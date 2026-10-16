@@ -71,6 +71,18 @@ def _category_counts(hits: list[Hit]) -> dict[str, int]:
     return counts
 
 
+def find_hit_rects(page, hit: Hit, textpage) -> list[tuple[float, float, float, float]]:
+    rects = []
+    for rect in _search_hit(page, hit, textpage):
+        if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+            continue
+        extracted = page.get_textbox(rect) or ""
+        if hit.text not in extracted:
+            continue
+        rects.append((float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)))
+    return rects
+
+
 def _search_hit(page, hit: Hit, textpage) -> list:
     pieces = [hit.text]
     if "\n" in hit.text:
