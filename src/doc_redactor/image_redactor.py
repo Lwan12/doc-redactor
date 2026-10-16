@@ -1,0 +1,132 @@
+"""Raster redaction via Presidio's image engines and pytesseract.
+
+ImageAnalyzerEngine / ImageRedactorEngine receive this project's AnalyzerEngine,
+so OCR does not construct the default engine and does not download a spaCy model.
+Language is chi_sim+eng. Hits are painted black.
+"""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+
+from PIL import Image, ImageDraw
+
+from doc_redactor.engine import RedactionEngine
+from doc_redactor.tesseract_cmd import require_tesseract
+
+_OCR_LANG = "chi_sim+eng"
+_PAD = 4
+
+
+def redact_image_file(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]:
+    _refuse_same_path(src, dest)
+    with Image.open(src) as opened:
+        opened.load()
+        redacted, counts = redact_image(opened, engine)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _save_image(redacted, dest)
+    return counts
+
+
+def redact_image(image: Image.Image, engine: RedactionEngine) -> tuple[Image.Image, dict[str, int]]:
+    require_tesseract()
+    prepared = _to_rgb(image)
+    redactor = _build_redactor(engine)
+    redacted, boxes = redactor.redact_and_return_bbox(
+        prepared,
+        fill=(0, 0, 0),
+        ocr_kwargs={"lang": _OCR_LANG},
+        language="en",
+    )
+    _paint_padding(redacted, boxes, _PAD)
+    return redacted, _counts_from_boxes(boxes)
+
+
+def redact_image_bytes(data: bytes, suffix: str, engine: RedactionEngine) -> tuple[bytes, dict[str, int]]:
+    with Image.open(io.BytesIO(data)) as opened:
+        opened.load()
+        redacted, counts = redact_image(opened, engine)
+    buf = io.BytesIO()
+    fmt = _format_for_suffix(suffix)
+    if fmt == "JPEG":
+        redacted.save(buf, format=fmt, quality=95)
+    else:
+        redacted.save(buf, format=fmt)
+    return buf.getvalue(), counts
+
+
+def _build_redactor(engine: RedactionEngine):
+    import os
+
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    from presidio_image_redactor import ImageAnalyzerEngine, ImageRedactorEngine, TesseractOCR
+
+    image_analyzer = ImageAnalyzerEngine(
+        analyzer_engine=engine.analyzer,
+        ocr=TesseractOCR(),
+    )
+    return ImageRedactorEngine(image_analyzer_engine=image_analyzer)
+
+
+def _counts_from_boxes(boxes) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    seen: set[tuple[str, int, int]] = set()
+    for box in boxes:
+        # One entity can cover several OCR words. Count the entity once.
+        key = (box.entity_type, int(box.start), int(box.end))
+        if key in seen:
+            continue
+        seen.add(key)
+        counts[box.entity_type] = counts.get(box.entity_type, 0) + 1
+    return counts
+
+
+def _paint_padding(image: Image.Image, boxes, pad: int) -> None:
+    if pad <= 0 or not boxes:
+        return
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    for box in boxes:
+        x0 = max(0, int(box.left) - pad)
+        y0 = max(0, int(box.top) - pad)
+        x1 = min(width, int(box.left) + int(box.width) + pad)
+        y1 = min(height, int(box.top) + int(box.height) + pad)
+        draw.rectangle([x0, y0, x1, y1], fill=(0, 0, 0))
+
+
+def _to_rgb(image: Image.Image) -> Image.Image:
+    if image.mode == "RGB":
+        return image.copy()
+    if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return image.convert("RGB")
+
+
+def _save_image(image: Image.Image, dest: Path) -> None:
+    fmt = _format_for_suffix(dest.suffix)
+    if fmt == "JPEG":
+        image.save(dest, format=fmt, quality=95)
+    else:
+        image.save(dest, format=fmt)
+
+
+def _format_for_suffix(suffix: str) -> str:
+    lowered = suffix.lower()
+    if lowered in {".jpg", ".jpeg"}:
+        return "JPEG"
+    if lowered == ".png":
+        return "PNG"
+    raise ValueError(f"不支持的图片类型: {suffix}")
+
+
+def _refuse_same_path(src: Path, dest: Path) -> None:
+    if src.resolve() == dest.resolve():
+        raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
+
+
+def is_raster_suffix(suffix: str) -> bool:
+    return suffix.lower() in {".png", ".jpg", ".jpeg"}

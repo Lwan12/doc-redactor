@@ -1,0 +1,10 @@
+presidio-analyzer==2.2.364
+presidio-image-redactor==0.0.60
+PyYAML==6.0.3
+python-docx==1.2.0
+pymupdf==1.28.2
+pytesseract==0.3.13
+pillow==12.3.0
+reportlab==5.0.1
+pytest==9.1.1
+pyinstaller==6.22.3

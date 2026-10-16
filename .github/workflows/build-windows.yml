@@ -1,0 +1,156 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Tesseract
+        shell: pwsh
+        run: choco install tesseract -y --no-progress
+
+      - name: Stage Tesseract and tessdata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tess = "C:\Program Files\Tesseract-OCR\tesseract.exe"
+          if (-not (Test-Path -LiteralPath $tess)) {
+            $found = Get-ChildItem -Path "C:\Program Files","C:\Program Files (x86)" -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $found) { throw "tesseract.exe not found after choco install" }
+            $tess = $found.FullName
+          }
+          $root = Split-Path $tess
+          $dlls = @(Get-ChildItem -Path $root -Filter *.dll -File)
+          if ($dlls.Count -lt 1) { throw "no DLLs next to $tess" }
+          New-Item -ItemType Directory -Force -Path build\tesseract\tessdata | Out-Null
+          Copy-Item -LiteralPath $tess -Destination build\tesseract\tesseract.exe
+          Copy-Item -Path $dlls.FullName -Destination build\tesseract\
+          $base = "https://github.com/tesseract-ocr/tessdata_fast/raw/main"
+          Invoke-WebRequest -Uri "$base/eng.traineddata" -OutFile "build\tesseract\tessdata\eng.traineddata"
+          Invoke-WebRequest -Uri "$base/chi_sim.traineddata" -OutFile "build\tesseract\tessdata\chi_sim.traineddata"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
+
+      - name: Test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PYTHONPATH = "src"
+          $env:TESSERACT_CMD = (Resolve-Path "build\tesseract\tesseract.exe").Path
+          $env:TESSDATA_PREFIX = (Resolve-Path "build\tesseract\tessdata").Path
+          python -m pytest
+          if ($LASTEXITCODE -ne 0) { throw "pytest failed" }
+
+      - name: Build onedir package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          # doc-redactor.spec is onedir: two EXE targets, one COLLECT. Not --onefile.
+          pyinstaller --noconfirm --clean --distpath dist --workpath build\pyi doc-redactor.spec
+          if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed" }
+
+      - name: Zip onedir package and write SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          python tools\make_windows_zip.py dist\doc-redactor dist\doc-redactor-windows.zip dist\SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "zip packaging failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: doc-redactor-windows
+          path: |
+            dist/doc-redactor-windows.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  verify:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install output checkers
+        run: python -m pip install --upgrade pip; python -m pip install "python-docx==1.2.0" "pymupdf==1.28.2"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: doc-redactor-windows
+          path: artifact
+
+      - name: Unpack into the user profile and redact samples
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          foreach ($name in @("TESSERACT_CMD", "PYTHONPATH", "TESSDATA_PREFIX")) {
+            if (Test-Path "Env:$name") { Remove-Item "Env:$name" }
+          }
+          $kept = New-Object System.Collections.Generic.List[string]
+          foreach ($part in ($env:PATH -split ";")) {
+            if ([string]::IsNullOrWhiteSpace($part)) { continue }
+            if ($part -match "(?i)tesseract") { continue }
+            if (Test-Path -LiteralPath (Join-Path $part "tesseract.exe")) { continue }
+            $kept.Add($part)
+          }
+          $env:PATH = ($kept -join ";")
+          $resolved = Get-Command tesseract -ErrorAction SilentlyContinue
+          if ($null -ne $resolved) { throw "tesseract is still on PATH: $($resolved.Source)" }
+          if (Test-Path Env:TESSERACT_CMD) { throw "TESSERACT_CMD is set" }
+          if (Test-Path Env:PYTHONPATH) { throw "PYTHONPATH is set" }
+
+          $sums = (Get-Content -Raw artifact\SHA256SUMS.txt).Trim()
+          $parts = $sums -split "\s+", 2
+          if ($parts.Count -lt 2) { throw "SHA256SUMS.txt is empty" }
+          $expected = $parts[0].ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 artifact\doc-redactor-windows.zip).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "SHA256 mismatch: expected $expected actual $actual" }
+          if ($parts[1] -ne "doc-redactor-windows.zip") { throw "SHA256SUMS.txt does not name the zip" }
+
+          $apps = Join-Path $env:USERPROFILE "apps"
+          $appsFull = [System.IO.Path]::GetFullPath($apps)
+          if ($appsFull -match "(?i)Program Files") { throw "refusing to unpack into $appsFull" }
+          if (Test-Path $apps) { Remove-Item -Recurse -Force $apps }
+          New-Item -ItemType Directory -Path $apps | Out-Null
+          Expand-Archive -LiteralPath artifact\doc-redactor-windows.zip -DestinationPath $apps
+
+          $cli = Join-Path $apps "doc-redactor\doc-redactor.exe"
+          $gui = Join-Path $apps "doc-redactor\doc-redactor-gui.exe"
+          $tess = Join-Path $apps "doc-redactor\tesseract\tesseract.exe"
+          foreach ($path in @($cli, $gui, $tess)) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "missing $path" }
+          }
+          $cliFull = (Resolve-Path -LiteralPath $cli).Path
+          if ($cliFull -match "(?i)Program Files") { throw "cli unpacked under Program Files: $cliFull" }
+
+          $repo = (Get-Location).Path
+          $out = Join-Path $apps "out"
+          & $cli @(
+            (Join-Path $repo "samples\sample.docx"),
+            (Join-Path $repo "samples\sample.pdf"),
+            (Join-Path $repo "samples\sample.png"),
+            "-r", (Join-Path $repo "rules.example.yaml"),
+            "-o", $out
+          )
+          if ($LASTEXITCODE -ne 0) { throw "packaged CLI failed with exit $LASTEXITCODE" }
+
+          & python (Join-Path $repo "tools\check_redacted_output.py") --output $out --tesseract $tess
+          if ($LASTEXITCODE -ne 0) { throw "redaction check failed" }
