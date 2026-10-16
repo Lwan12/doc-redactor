@@ -31,7 +31,7 @@ PROTOCOL_LIST_NAME = "方案号清单"
 LETTER_DIGIT_NAME = "字母加数字"
 MSG_PLAN_EMPTY = "还没有词，去导入"
 HINT_LETTER_DIGIT = "这条抓不全，也可能误伤"
-# ≥2 letters + 3–4 digits, optional hyphen and suffix (fictional examples: ZZZ9001, ZZ-K9001)
+# ≥2 letters + 3–4 digits, optional hyphen and suffix (fictional examples: AAA0000, AA-K0000)
 LETTER_DIGIT_INNER = r"[A-Za-z]{2,}(?:-[A-Za-z]+)?-?\d{3,4}(?:[-/][A-Za-z0-9]+)?"
 
 MSG_IMPORT_FAIL = "这个文件打不开，或不是本工具导出的规则文件。现有规则没有改动。"

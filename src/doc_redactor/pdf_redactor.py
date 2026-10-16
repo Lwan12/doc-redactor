@@ -23,11 +23,57 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]
         for page in document:
             merge_counts(counts, _redact_page_text(page, engine))
         merge_counts(counts, _redact_images(document, engine))
+        clear_pdf_hidden(document)
         dest.parent.mkdir(parents=True, exist_ok=True)
         document.save(dest, garbage=4, clean=True)
     finally:
         document.close()
     return counts
+
+
+_INFO_FIELDS = ("title", "author", "subject", "keywords", "creator", "producer")
+
+
+def clear_pdf_hidden(document) -> None:
+    """Drop document info, XMP, annotations (including widgets), bookmarks, and attachments.
+
+    CLI (`redact_pdf`) and the GUI write path (`scan._write_pdf`) both call this
+    immediately before save, after text redactions have already been applied.
+    MuPDF writes its own /Producer on save; the original producer string is removed.
+    """
+    for page in document:
+        widget = page.first_widget
+        while widget is not None:
+            nxt = widget.next
+            page.delete_widget(widget)
+            widget = nxt
+        annot = page.first_annot
+        while annot is not None:
+            nxt = annot.next
+            page.delete_annot(annot)
+            annot = nxt
+    for name in list(document.embfile_names() or []):
+        document.embfile_del(name)
+    document.set_toc([])
+    document.set_metadata({key: "" for key in _INFO_FIELDS})
+    document.set_xml_metadata("")
+    document.del_xml_metadata()
+    _drop_catalog_attachments(document)
+
+
+def _drop_catalog_attachments(document) -> None:
+    catalog = document.pdf_catalog()
+    for key in ("AcroForm", "PageMode"):
+        kind, _value = document.xref_get_key(catalog, key)
+        if kind != "null":
+            document.xref_set_key(catalog, key, "null")
+    kind, value = document.xref_get_key(catalog, "Names")
+    if kind != "xref":
+        return
+    names_xref = int(value.replace("0 R", "").strip())
+    embedded_kind, _embedded = document.xref_get_key(names_xref, "EmbeddedFiles")
+    if embedded_kind != "null":
+        document.xref_set_key(names_xref, "EmbeddedFiles", "null")
 
 
 def _redact_page_text(page, engine: RedactionEngine) -> dict[str, int]:

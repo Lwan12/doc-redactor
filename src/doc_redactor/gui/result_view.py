@@ -19,6 +19,7 @@ from doc_redactor.gui.theme import (
     LINE2,
     MUTED,
     PLACE,
+    fit_label,
     marker_for,
     status_style,
 )
@@ -83,15 +84,13 @@ class ResultView:
             warn = tk.Frame(self.frame, bg="#fdf1e5")
             warn.pack(fill="x")
             n = len(many.hits)
-            tk.Label(
+            fit_label(
                 warn,
-                text=f"⚠ {many.path.name} 命中了 {n} 处，比平时多很多，可能把不该遮的也遮了。请看高亮；不影响写出，可直接点「写出」。",
+                f"⚠ {many.path.name} 命中了 {n} 处，比平时多很多，可能把不该遮的也遮了。请看高亮；不影响写出，可直接点「写出」。",
                 bg="#fdf1e5",
                 fg="#c04700",
                 font=fonts["small"],
-                wraplength=900,
-                justify="left",
-            ).pack(anchor="w", padx=12, pady=6)
+            ).pack(fill="x", padx=12, pady=6)
 
         self._summary(scans, fonts, all_fail)
 
@@ -110,7 +109,6 @@ class ResultView:
             ttk.Button(err, text="查看", command=lambda: self._select(scans.index(fails[0]))).pack(side="left")
 
         body = tk.Frame(self.frame, bg=BG_PAGE)
-        body.pack(fill="both", expand=True, padx=12, pady=8)
         if app.narrow:
             body.columnconfigure(0, minsize=180, weight=0)
             body.columnconfigure(1, weight=1)
@@ -123,9 +121,11 @@ class ResultView:
             right = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
             right.grid(row=1, column=1, sticky="nsew", pady=(8, 0))
         else:
-            body.columnconfigure(0, minsize=200, weight=0)
-            body.columnconfigure(1, weight=1)
-            body.columnconfigure(2, minsize=260, weight=0)
+            # 960px: side panes stay wide enough for full filenames and hit text.
+            # The middle preview takes whatever is left.
+            body.columnconfigure(0, minsize=300, weight=0)
+            body.columnconfigure(1, weight=1, minsize=180)
+            body.columnconfigure(2, minsize=360, weight=0)
             body.rowconfigure(0, weight=1)
             left = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
             left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
@@ -140,7 +140,10 @@ class ResultView:
         else:
             self._file_preview(mid, scans[app.selected], fonts)
         self._right_pane(right, scans, fonts)
+        # Footer first (side=bottom) so the write bar keeps its height when the
+        # preview panes want more than the 640px window.
         self._foot(scans, fonts, all_fail, nohit_all)
+        body.pack(fill="both", expand=True, padx=12, pady=8)
         self.app.root.after_idle(lambda: setattr(self, "_building", False))
 
     def _set_hide(self, value: bool) -> None:
@@ -206,8 +209,9 @@ class ResultView:
         tree = ttk.Treeview(parent, columns=("name", "n"), show="headings", selectmode="browse")
         tree.heading("name", text="文件")
         tree.heading("n", text="替换数")
-        tree.column("name", width=140, stretch=True)
-        tree.column("n", width=50, stretch=False, anchor="e")
+        # font_small: "⚠ 命中偏多  入组统计报告_V2.pdf" is about 214px.
+        tree.column("name", width=240, minwidth=200, stretch=True)
+        tree.column("n", width=56, minwidth=48, stretch=False, anchor="e")
         tree.tag_configure("ok", foreground="#008035")
         tree.tag_configure("bad", foreground="#cb2f39")
         tree.tag_configure("no", foreground="#6c6c6c")
@@ -299,43 +303,52 @@ class ResultView:
     def _file_preview(self, parent, scan: FileScan, fonts) -> None:
         head = tk.Frame(parent, bg=BG_INSET)
         head.pack(fill="x")
-        tk.Label(head, text=scan.path.name, bg=BG_INSET, fg=INK, font=fonts["mono_font"]).pack(
-            side="left", padx=10, pady=5
+        # Filename on its own row. Radios and the PDF pager each get a row too:
+        # at 960px the side panes stay wide enough for full names, so the middle
+        # column cannot hold "原文高亮" and "第 n / n 页" on one line.
+        title_row = tk.Frame(head, bg=BG_INSET)
+        title_row.pack(fill="x")
+        tk.Label(title_row, text=scan.path.name, bg=BG_INSET, fg=INK, font=fonts["mono_font"]).pack(
+            side="left", padx=10, pady=(4, 0)
         )
-        tk.Label(head, text=_type_name(scan.kind), bg=BG_INSET, fg=INK2, font=fonts["small"], relief="solid", bd=1).pack(
-            side="left"
-        )
+        tk.Label(
+            title_row, text=_type_name(scan.kind), bg=BG_INSET, fg=INK2, font=fonts["small"], relief="solid", bd=1
+        ).pack(side="left", pady=(4, 0))
         has_prev = scan.status != "fail" and bool(scan.hits)
         if has_prev:
+            controls = tk.Frame(head, bg=BG_INSET)
+            controls.pack(fill="x")
             mode = tk.StringVar(value=self.app.preview_mode)
             if scan.kind == KIND_IMAGE:
                 ttk.Radiobutton(
-                    head, text="画框", value="orig", variable=mode, command=lambda: self._set_mode(mode.get())
-                ).pack(side="left", padx=6)
+                    controls, text="画框", value="orig", variable=mode, command=lambda: self._set_mode(mode.get())
+                ).pack(side="left", padx=(8, 0))
                 ttk.Radiobutton(
-                    head, text="涂黑后", value="after", variable=mode, command=lambda: self._set_mode(mode.get())
+                    controls, text="涂黑后", value="after", variable=mode, command=lambda: self._set_mode(mode.get())
                 ).pack(side="left")
             else:
                 ttk.Radiobutton(
-                    head, text="原文高亮", value="orig", variable=mode, command=lambda: self._set_mode(mode.get())
-                ).pack(side="left", padx=6)
+                    controls, text="原文高亮", value="orig", variable=mode, command=lambda: self._set_mode(mode.get())
+                ).pack(side="left", padx=(8, 0))
                 ttk.Radiobutton(
-                    head, text="替换后", value="after", variable=mode, command=lambda: self._set_mode(mode.get())
+                    controls, text="替换后", value="after", variable=mode, command=lambda: self._set_mode(mode.get())
                 ).pack(side="left")
         if scan.kind == KIND_PDF and has_prev and scan.pages:
-            ttk.Button(head, text="‹", command=lambda: self._turn(-1), width=2).pack(side="right", padx=(0, 4))
+            pager = tk.Frame(head, bg=BG_INSET)
+            pager.pack(fill="x")
+            ttk.Button(pager, text="‹", command=lambda: self._turn(-1), width=2).pack(side="right", padx=(0, 4))
             tk.Label(
-                head,
+                pager,
                 text=f"第 {self.app.pdf_page + 1} / {len(scan.pages)} 页",
                 bg=BG_INSET,
                 fg=INK,
                 font=fonts["mono_font"],
             ).pack(side="right")
-            ttk.Button(head, text="›", command=lambda: self._turn(1), width=2).pack(side="right", padx=4)
+            ttk.Button(pager, text="›", command=lambda: self._turn(1), width=2).pack(side="right", padx=4)
 
         body = tk.Frame(parent, bg=BG_SURFACE)
-        body.pack(fill="both", expand=True)
         if scan.status == "fail":
+            body.pack(fill="both", expand=True)
             _empty_state(
                 body,
                 "✕",
@@ -347,6 +360,7 @@ class ResultView:
             )
             return
         if not scan.hits:
+            body.pack(fill="both", expand=True)
             _empty_state(
                 body,
                 "—",
@@ -356,26 +370,22 @@ class ResultView:
                 fonts,
             )
             return
+        # Pack the locator under the preview before the expanding body, or the
+        # 960px middle column clips it.
+        foot = tk.Frame(parent, bg=BG_INSET)
+        foot.pack(side="bottom", fill="x")
+        cur = self.app.hit_by_id(self.app.current_hit)
+        if cur is not None:
+            hint = f"当前：{cur.location} · {self.app.marker(cur.category)} {cur.category}"
+        else:
+            hint = "点任一处高亮，或点右边的位置，可以定位"
+        fit_label(foot, hint, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(fill="x", padx=8, pady=4)
+
+        body.pack(fill="both", expand=True)
         if scan.kind == KIND_IMAGE:
             self._image_canvas(body, scan)
         else:
             self._text_preview(body, scan, fonts)
-
-        foot = tk.Frame(parent, bg=BG_INSET)
-        foot.pack(fill="x")
-        cur = self.app.hit_by_id(self.app.current_hit)
-        if cur is not None:
-            tk.Label(
-                foot,
-                text=f"当前：{cur.location} · {self.app.marker(cur.category)} {cur.category}",
-                bg=BG_INSET,
-                fg=INK2,
-                font=fonts["small"],
-            ).pack(side="left", padx=10, pady=4)
-        else:
-            tk.Label(foot, text="点任一处高亮，或点右边的位置，可以定位", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
-                side="left", padx=10, pady=4
-            )
 
     def _set_mode(self, value: str) -> None:
         self.app.preview_mode = value
@@ -484,49 +494,63 @@ class ResultView:
         canvas = tk.Canvas(parent, bg=BG_PAGE, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
         image = scan.image
-        if image is None:
-            return
-        max_w, max_h = 520, 360
-        w, h = image.size
-        scale = min(max_w / w, max_h / h, 1.0)
-        show = image.resize((max(1, int(w * scale)), max(1, int(h * scale))))
-        if self.app.hide_text:
-            show = show.point(lambda p: 230)
-        self._photo = ImageTk.PhotoImage(show)
-        x0 = 24
-        y0 = 16
-        canvas.create_image(x0, y0, anchor="nw", image=self._photo)
-        dashes = {0: None, 1: (6, 3), 2: (2, 3)}
-        cats = {cat: i for i, cat in enumerate(self.app.category_order())}
-        for hit in scan.hits:
-            for box in hit.boxes:
-                left, top, width, height = box
-                x1, y1 = x0 + left * scale, y0 + top * scale
-                x2, y2 = x1 + width * scale, y1 + height * scale
-                fill = ""
-                if hit.enabled and (self.app.preview_mode == "after" or self.app.hide_text):
-                    fill = "#000000"
-                outline = "#ffd84d" if self.app.current_hit == hit.hit_id else (INK if hit.enabled else PLACE)
-                width_px = 3 if self.app.current_hit == hit.hit_id else 2
-                dash = dashes.get(cats.get(hit.category, 0) % 3)
-                kwargs = {"outline": outline, "width": width_px, "fill": fill}
-                if dash:
-                    kwargs["dash"] = dash
-                canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
-                if hit.enabled:
-                    canvas.create_text(
-                        x2 - 2,
-                        y1 - 2,
-                        text=marker_for(cats.get(hit.category, 0)),
-                        anchor="se",
-                        fill=INK,
-                    )
+        # Scale to the pane. A fixed 520px preview is wider than the middle
+        # column once the file list and hit list are wide enough at 960px.
+        placed = {"scale": 1.0, "x0": 8, "y0": 8}
 
-            def bind_hit(h=hit):
-                canvas.bind("<Button-1>", lambda e, hh=h: self._maybe_pick_box(e, scan, scale, x0, y0))
+        def draw(_event=None) -> None:
+            if image is None:
+                return
+            pane_w = canvas.winfo_width()
+            pane_h = canvas.winfo_height()
+            if pane_w < 30 or pane_h < 30:
+                return
+            max_w = max(40, pane_w - 16)
+            max_h = max(40, pane_h - 16)
+            w, h = image.size
+            scale = min(max_w / w, max_h / h, 1.0)
+            show = image.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+            if self.app.hide_text:
+                show = show.point(lambda p: 230)
+            self._photo = ImageTk.PhotoImage(show)
+            x0, y0 = 8, 8
+            placed["scale"] = scale
+            placed["x0"] = x0
+            placed["y0"] = y0
+            canvas.delete("all")
+            canvas.create_image(x0, y0, anchor="nw", image=self._photo)
+            dashes = {0: None, 1: (6, 3), 2: (2, 3)}
+            cats = {cat: i for i, cat in enumerate(self.app.category_order())}
+            for hit in scan.hits:
+                for box in hit.boxes:
+                    left, top, width, height = box
+                    x1, y1 = x0 + left * scale, y0 + top * scale
+                    x2, y2 = x1 + width * scale, y1 + height * scale
+                    fill = ""
+                    if hit.enabled and (self.app.preview_mode == "after" or self.app.hide_text):
+                        fill = "#000000"
+                    outline = "#ffd84d" if self.app.current_hit == hit.hit_id else (INK if hit.enabled else PLACE)
+                    width_px = 3 if self.app.current_hit == hit.hit_id else 2
+                    dash = dashes.get(cats.get(hit.category, 0) % 3)
+                    kwargs = {"outline": outline, "width": width_px, "fill": fill}
+                    if dash:
+                        kwargs["dash"] = dash
+                    canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
+                    if hit.enabled:
+                        canvas.create_text(
+                            x2 - 2,
+                            y1 - 2,
+                            text=marker_for(cats.get(hit.category, 0)),
+                            anchor="se",
+                            fill=INK,
+                        )
 
-            bind_hit()
-        canvas.bind("<Button-1>", lambda e: self._maybe_pick_box(e, scan, scale, x0, y0))
+        canvas.bind("<Configure>", draw)
+        canvas.bind(
+            "<Button-1>",
+            lambda e: self._maybe_pick_box(e, scan, placed["scale"], placed["x0"], placed["y0"]),
+        )
+        canvas.after_idle(draw)
 
     def _maybe_pick_box(self, event, scan, scale, x0, y0) -> None:
         px = (event.x - x0) / scale
@@ -598,10 +622,11 @@ class ResultView:
         loc.heading("loc", text="位置")
         loc.heading("cat", text="类")
         loc.heading("text", text="内容")
-        loc.column("on", width=36, stretch=False, anchor="center")
-        loc.column("loc", width=90, stretch=False)
-        loc.column("cat", width=28, stretch=False)
-        loc.column("text", width=90, stretch=True)
+        # Room for "第 501 页 · 第 1 行" and "PRJ-2026-017-S02", plus the scrollbar.
+        loc.column("on", width=32, minwidth=32, stretch=False, anchor="center")
+        loc.column("loc", width=148, minwidth=130, stretch=False)
+        loc.column("cat", width=28, minwidth=28, stretch=False)
+        loc.column("text", width=136, minwidth=120, stretch=True)
         cat_index = {c: i for i, c in enumerate(cats)}
         for hit in hits:
             mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
@@ -638,7 +663,7 @@ class ResultView:
 
     def _foot(self, scans, fonts, all_fail, nohit_all) -> None:
         foot = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
-        foot.pack(fill="x")
+        foot.pack(side="bottom", fill="x")
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=8)
         enabled, _ = session_totals(scans, enabled_only=True)
@@ -714,12 +739,14 @@ def _short_type(scan: FileScan) -> str:
 
 def _empty_state(parent, icon, title, body, buttons, fonts, bad=False) -> None:
     wrap = tk.Frame(parent, bg=BG_SURFACE)
-    wrap.place(relx=0.5, rely=0.5, anchor="center")
+    wrap.pack(fill="both", expand=True)
+    inner = tk.Frame(wrap, bg=BG_SURFACE)
+    inner.pack(expand=True, fill="x", padx=12)
     color = "#cb2f39" if bad else MUTED
-    tk.Label(wrap, text=icon, bg=BG_SURFACE, fg=color, font=fonts["title"]).pack()
-    tk.Label(wrap, text=title, bg=BG_SURFACE, fg=color if bad else INK, font=fonts["title"]).pack(pady=4)
-    tk.Label(wrap, text=body, bg=BG_SURFACE, fg=INK2, font=fonts["small"], wraplength=380, justify="center").pack()
-    row = tk.Frame(wrap, bg=BG_SURFACE)
+    tk.Label(inner, text=icon, bg=BG_SURFACE, fg=color, font=fonts["title"]).pack()
+    tk.Label(inner, text=title, bg=BG_SURFACE, fg=color if bad else INK, font=fonts["title"]).pack(pady=4)
+    fit_label(inner, body, bg=BG_SURFACE, fg=INK2, font=fonts["small"], justify="center").pack(fill="x")
+    row = tk.Frame(inner, bg=BG_SURFACE)
     row.pack(pady=10)
     for label, cmd, primary in buttons:
         ttk.Button(row, text=label, style="Primary.TButton" if primary else "TButton", command=cmd).pack(

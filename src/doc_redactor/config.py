@@ -68,20 +68,20 @@ def parse_flags(value: object) -> int:
         key = part.upper().removeprefix("RE.")
         canonical = _FLAG_NAMES.get(key)
         if canonical is None:
-            raise ValueError(f"未知的正则 flags: {part}")
+            raise ValueError(f"未知的匹配写法标记: {part}")
         flags |= getattr(re, canonical)
     return flags
 
 
 def _parse_regex(node: object, index: int) -> RegexRule:
     if not isinstance(node, dict):
-        raise ValueError(f"第 {index} 条正则规则必须是映射")
+        raise ValueError(f"第 {index} 条匹配写法必须是映射")
     name = node.get("name")
     pattern = node.get("pattern")
     if not isinstance(name, str) or not name.strip():
-        raise ValueError(f"第 {index} 条正则规则缺少 name")
+        raise ValueError(f"第 {index} 条匹配写法缺少名称")
     if not isinstance(pattern, str) or pattern == "":
-        raise ValueError(f"正则规则 {name} 缺少 pattern")
+        raise ValueError(f"匹配写法 {name} 缺少内容")
     if "flags" not in node:
         flags = 0
     else:

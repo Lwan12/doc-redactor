@@ -76,7 +76,7 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
         try:
             re.compile(rule.pattern, flags=rule.flags)
         except re.error as exc:
-            raise ValueError(f"正则规则 {rule.name} 无法编译: {exc}") from exc
+            raise ValueError(f"匹配写法 {rule.name} 无法编译: {exc}") from exc
         recognizers.append(
             PatternRecognizer(
                 supported_entity=rule.name,

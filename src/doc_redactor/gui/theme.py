@@ -180,3 +180,37 @@ def marker_for(index: int) -> str:
     if 0 <= index < len(MARKERS):
         return MARKERS[index]
     return str(index + 1)
+
+
+def fit_label(parent, text: str, *, bg: str, fg: str, font, justify: str = "left") -> tk.Frame:
+    """Wrap text to the parent's width. Pack the returned frame with fill="x".
+
+    ``tk.Message`` uses its width as the wrap width and grows in height to fit,
+    so a hint is not cut off and is not broken on a fixed wraplength.
+    """
+    frame = tk.Frame(parent, bg=bg)
+    widget = tk.Message(
+        frame,
+        text=text,
+        bg=bg,
+        fg=fg,
+        font=font,
+        justify=justify,
+        anchor="center" if justify == "center" else "nw",
+        width=40,
+        padx=1,
+        pady=0,
+    )
+    widget.pack(fill="x", anchor="center" if justify == "center" else "w")
+
+    def sync(_event=None) -> None:
+        width = frame.winfo_width()
+        if width <= 2:
+            return
+        target = max(40, width - 2)
+        if int(widget.cget("width")) != target:
+            widget.configure(width=target)
+
+    frame.bind("<Configure>", sync)
+    frame.after_idle(sync)
+    return frame

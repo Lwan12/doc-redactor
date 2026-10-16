@@ -18,6 +18,7 @@ from doc_redactor.gui.theme import (
     LINE2,
     MUTED,
     PLACE,
+    fit_label,
 )
 from doc_redactor.pattern_guess import (
     TEMPLATES,
@@ -257,15 +258,13 @@ class RulesView:
             ttk.Button(hint, text="换成模板", command=lambda: self._set("template", True)).pack(side="right")
             ph = tk.StringVar(value=form.get("placeholder", ""))
             ttk.Entry(cell, textvariable=ph, font=fonts["mono_font"]).pack(fill="x", pady=(6, 0))
-            tk.Label(
+            fit_label(
                 cell,
-                text="也可以照样写，如 PROJ-####（# 代表数字，@ 代表字母）。写了这一行，就按它来，上面的例子先不用。",
+                "也可以照样写，如 PROJ-####（# 代表数字，@ 代表字母）。写了这一行，就按它来，上面的例子先不用。",
                 bg=BG_PAGE,
                 fg=INK2,
                 font=fonts["small"],
-                wraplength=360,
-                justify="left",
-            ).pack(anchor="w")
+            ).pack(fill="x", anchor="w")
             ex.bind("<KeyRelease>", lambda _e: self._set("examples", ex.get("1.0", "end-1c")))
             ph.trace_add("write", lambda *_: self._set("placeholder", ph.get()))
 
@@ -307,15 +306,13 @@ class RulesView:
         )
         adv_btn.pack(anchor="w", pady=(10, 4))
         if adv_open:
-            tk.Label(
+            fit_label(
                 left,
-                text="直接改匹配写法，右边的高亮会跟着变。不会写就别动，用例子或模板就行。",
+                "直接改匹配写法，右边的高亮会跟着变。不会写就别动，用例子或模板就行。",
                 bg=BG_PAGE,
                 fg=INK2,
                 font=fonts["small"],
-                wraplength=400,
-                justify="left",
-            ).pack(anchor="w")
+            ).pack(fill="x", anchor="w")
             adv = tk.StringVar(value=form.get("advanced") if form.get("advanced") is not None else (ev.guess.inner_pattern or ""))
             ttk.Entry(left, textvariable=adv, font=fonts["mono_font"]).pack(fill="x", pady=4)
             adv.trace_add("write", lambda *_: self._set("advanced", adv.get()))
@@ -329,26 +326,30 @@ class RulesView:
         test.bind("<KeyRelease>", lambda _e: self._debounce_test(test))
 
         if form.get("name") == LETTER_DIGIT_NAME:
-            tk.Label(
+            fit_label(
                 right,
-                text=f"⚠ {HINT_LETTER_DIGIT}。这是宽松写法，只要长得像「字母加数字」都会被遮。请看高亮，确认没有把不该遮的也遮了。",
+                f"⚠ {HINT_LETTER_DIGIT}。这是宽松写法，只要长得像「字母加数字」都会被遮。请看高亮，确认没有把不该遮的也遮了。",
                 bg=BG_PAGE,
                 fg="#c04700",
                 font=fonts["small"],
-                wraplength=400,
-                justify="left",
-            ).pack(anchor="w", pady=(0, 4))
-        icon = ev.icon
-        msg = f"{icon} {ev.message}"
-        tone = {"ok": "#008035", "warn": "#c04700", "err": "#cb2f39", "n": INK2}[ev.tone]
-        tk.Label(right, text=msg, bg=BG_PAGE, fg=tone, font=fonts["small"], wraplength=400, justify="left").pack(
-            anchor="w", pady=4
-        )
+            ).pack(fill="x", anchor="w", pady=(0, 4))
         if form.get("test") and ev.guess.ok and "命中" not in ev.message:
             tk.Label(right, text=f"命中 {len(ev.hits)} 处", bg=BG_PAGE, fg=INK2, font=fonts["small"]).pack(anchor="w")
         tk.Label(right, text="提示：试的文字只在这个窗口里，不会存下来。", bg=BG_PAGE, fg=INK2, font=fonts["small"]).pack(
             anchor="w", pady=(8, 0)
         )
+
+        tone = {"ok": "#008035", "warn": "#c04700", "err": "#cb2f39", "n": INK2}[ev.tone]
+        bar_bg = {"ok": "#e8f5ed", "warn": "#fdf1e5", "err": "#fcecec", "n": BG_INSET}[ev.tone]
+        bar = tk.Frame(body, bg=bar_bg)
+        bar.pack(fill="x", padx=12, pady=(0, 8))
+        fit_label(
+            bar,
+            f"{ev.icon} {ev.message}",
+            bg=bar_bg,
+            fg=tone,
+            font=fonts["small"],
+        ).pack(fill="x", padx=10, pady=6)
 
         foot = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         foot.pack(fill="x")
@@ -461,17 +462,15 @@ class RulesView:
         box = tk.Text(add_cell, height=5, relief="solid", bd=1, wrap="word")
         box.insert("1.0", form.get("incoming", ""))
         box.pack(fill="x")
-        tk.Label(
+        fit_label(
             add_cell,
-            text="每行写一个方案号，比如 AAA0000。可以一次粘贴一整列。"
+            "每行写一个方案号，比如 AAA0000。可以一次粘贴一整列。"
             if is_plan
             else "每行写一个词，比如「华曜医药」。可以一次粘贴很多行。",
             bg=BG_PAGE,
             fg=INK2,
             font=fonts["small"],
-            wraplength=360,
-            justify="left",
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(fill="x", anchor="w", pady=(2, 0))
         btns = tk.Frame(add_cell, bg=BG_PAGE)
         btns.pack(fill="x", pady=4)
         ttk.Button(btns, text="添加", style="Primary.TButton", command=lambda: self.app.add_word_lines(box.get("1.0", "end-1c"))).pack(
@@ -486,15 +485,13 @@ class RulesView:
             tk.Label(left, text=icon + text, bg=BG_PAGE, fg=color, font=fonts["small"], wraplength=360, justify="left").pack(
                 anchor="w", pady=6
             )
-        tk.Label(
+        fit_label(
             left,
-            text="词表里的词，在文件里出现一次就遮一次。写得越全越好：全称、简称、英文名都放进去。",
+            "词表里的词，在文件里出现一次就遮一次。写得越全越好：全称、简称、英文名都放进去。",
             bg=BG_PAGE,
             fg=INK2,
             font=fonts["small"],
-            wraplength=360,
-            justify="left",
-        ).pack(anchor="w", pady=8)
+        ).pack(fill="x", anchor="w", pady=8)
 
         words = form.get("words") or []
         sel = set(form.get("sel") or [])
@@ -537,7 +534,7 @@ class RulesView:
             wrap = tk.Frame(right, bg=BG_SURFACE)
             wrap.pack(fill="both", expand=True)
             inner = tk.Frame(wrap, bg=BG_SURFACE)
-            inner.place(relx=0.5, rely=0.5, anchor="center")
+            inner.pack(expand=True, fill="x", padx=16)
             tk.Label(inner, text="＋", bg=BG_SURFACE, fg=MUTED, font=fonts["title"]).pack()
             empty_title = MSG_PLAN_EMPTY if is_plan else "词表还是空的"
             empty_next = (
@@ -546,15 +543,14 @@ class RulesView:
                 else "在左边的框里每行写一个词，点「添加」。也可以点「从文本文件导入…」，文件里每行一个词。"
             )
             tk.Label(inner, text=empty_title, bg=BG_SURFACE, fg=INK, font=fonts["title"]).pack(pady=4)
-            tk.Label(
+            fit_label(
                 inner,
-                text=empty_next,
+                empty_next,
                 bg=BG_SURFACE,
                 fg=INK2,
                 font=fonts["small"],
-                wraplength=300,
                 justify="center",
-            ).pack()
+            ).pack(fill="x")
 
         tk.Label(left, text="试一段真实文字", bg=BG_PAGE, fg=INK, font=fonts["bold"]).pack(anchor="w", pady=(8, 0))
         test = tk.Text(left, height=4, relief="solid", bd=1, wrap="word")
@@ -577,15 +573,13 @@ class RulesView:
                     font=fonts["small"],
                 ).pack(anchor="w")
             else:
-                tk.Label(
+                fit_label(
                     left,
-                    text="⚠ 这段文字里没有命中。请检查词表里有没有这个词，或换一段文字再试。",
+                    "⚠ 这段文字里没有命中。请检查词表里有没有这个词，或换一段文字再试。",
                     bg=BG_PAGE,
                     fg="#c04700",
                     font=fonts["small"],
-                    wraplength=360,
-                    justify="left",
-                ).pack(anchor="w")
+                ).pack(fill="x", anchor="w")
 
         foot = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         foot.pack(fill="x")
@@ -624,15 +618,13 @@ class RulesView:
             self.app.lib_checked = checked
         body = tk.Frame(self.frame, bg=BG_PAGE)
         body.pack(fill="both", expand=True, padx=12, pady=8)
-        tk.Label(
+        fit_label(
             body,
-            text="勾上要用的，点「添加到我的规则」。例子都是占位的，加进去后可以再改。方案号清单、申办方、药名是词表：每行写一个词（或一个号）就行，不用写规则。",
+            "勾上要用的，点「添加到我的规则」。例子都是占位的，加进去后可以再改。方案号清单、申办方、药名是词表：每行写一个词（或一个号）就行，不用写规则。",
             bg=BG_PAGE,
             fg=INK2,
             font=fonts["small"],
-            wraplength=860,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(fill="x", pady=(0, 8))
         pane = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         pane.pack(fill="both", expand=True)
         tree = ttk.Treeview(pane, columns=("ck", "name", "kind", "ex", "def"), show="headings")
@@ -675,15 +667,13 @@ class RulesView:
                 tags=("off" if gated else ()),
             )
         tree.pack(fill="both", expand=True)
-        tk.Label(
+        fit_label(
             body,
-            text=f"字母加数字：⚠ {HINT_LETTER_DIGIT}。至少 2 个字母 + 3～4 位数字，可带横杠和后缀；默认不勾。方案号清单没勾时不可勾。",
+            f"字母加数字：⚠ {HINT_LETTER_DIGIT}。至少 2 个字母 + 3～4 位数字，可带横杠和后缀；默认不勾。方案号清单没勾时不可勾。",
             bg=BG_PAGE,
             fg="#c04700",
             font=fonts["small"],
-            wraplength=860,
-            justify="left",
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(fill="x", pady=(6, 0))
 
         def toggle(event):
             row = tree.identify_row(event.y)

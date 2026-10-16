@@ -20,7 +20,7 @@ from doc_redactor.image_redactor import (
     is_raster_suffix,
     paint_image_boxes,
 )
-from doc_redactor.pdf_redactor import find_hit_rects
+from doc_redactor.pdf_redactor import clear_pdf_hidden, find_hit_rects
 from doc_redactor.tesseract_cmd import require_tesseract
 
 FILE_HIT_WARN = 500
@@ -576,6 +576,7 @@ def _write_pdf(scan: FileScan, dest: Path, engine: RedactionEngine | None) -> di
                     buf = io.BytesIO()
                     painted.save(buf, format="PNG")
                     page.replace_image(xref, stream=buf.getvalue())
+        clear_pdf_hidden(document)
         dest.parent.mkdir(parents=True, exist_ok=True)
         document.save(dest, garbage=4, clean=True)
     finally:

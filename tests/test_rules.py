@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from doc_redactor.config import load_rules, parse_flags
-from doc_redactor.engine import RedactionEngine
+from doc_redactor.engine import RedactionEngine, RegexRule, build_engine
 from presidio_analyzer.nlp_engine import NoOpNlpEngine
 from presidio_analyzer.predefined_recognizers import SpacyRecognizer
 
@@ -58,19 +58,39 @@ def test_regex_without_ignorecase_is_sensitive(tmp_path: Path):
     assert engine.find_hits("ABC-2026-001")[0].category == "PROJECT_ID"
 
 
+def _assert_match_wording(message: str) -> None:
+    assert "正则" not in message
+    assert "匹配写法" in message
+
+
 def test_parse_flags_and_invalid_pattern(tmp_path: Path):
     assert parse_flags(None) == 0
     assert parse_flags(["IGNORECASE", "MULTILINE"]) != 0
     assert parse_flags("IGNORECASE|DOTALL") != 0
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as flags:
         parse_flags("NOT_A_FLAG")
+    _assert_match_wording(str(flags.value))
     rules = tmp_path / "bad.yaml"
     rules.write_text(
         "regex:\n  - name: BAD\n    pattern: '('\nwordlists: []\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="BAD"):
+    with pytest.raises(ValueError, match="BAD") as invalid:
         load_rules(rules)
+    _assert_match_wording(str(invalid.value))
+    shape = tmp_path / "shape.yaml"
+    shape.write_text("regex:\n  - []\nwordlists: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="匹配写法") as mapping:
+        load_rules(shape)
+    _assert_match_wording(str(mapping.value))
+    missing = tmp_path / "missing.yaml"
+    missing.write_text("regex:\n  - name: BAD\nwordlists: []\n", encoding="utf-8")
+    with pytest.raises(ValueError) as missing_pattern:
+        load_rules(missing)
+    _assert_match_wording(str(missing_pattern.value))
+    with pytest.raises(ValueError) as compile_error:
+        build_engine([RegexRule(name="BAD", pattern="(", flags=0)], [])
+    _assert_match_wording(str(compile_error.value))
 
 
 def test_wordlist_path_is_relative_to_the_rules_file(tmp_path: Path):
