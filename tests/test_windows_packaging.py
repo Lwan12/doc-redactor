@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 
 import pymupdf
+import pytest
 from docx import Document
 from PIL import Image
 
@@ -129,6 +130,12 @@ def _write_output(directory: Path, *, docx_body: str, docx_header: str, pdf_text
     )
 
 
+POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="uses fake script/symlink tesseract; real exe is checked by the verify job"
+)
+
+
+@POSIX_ONLY
 def test_check_redacted_output_accepts_clean_files_and_rejects_leaks(tmp_path: Path):
     clean = tmp_path / "clean"
     _write_output(
@@ -164,6 +171,7 @@ def test_check_redacted_output_accepts_clean_files_and_rejects_leaks(tmp_path: P
     assert "Fictizumab" in bad_report.stderr
 
 
+@POSIX_ONLY
 def test_checker_reads_tessdata_beside_symlink(tmp_path: Path):
     output = tmp_path / "out"
     _write_output(
