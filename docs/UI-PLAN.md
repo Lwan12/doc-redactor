@@ -1,6 +1,6 @@
 # 桌面界面改造计划（feat/ui）
 
-依据：`/workspace/deliverables/doc-redactor-ui/brief.md`（为准）、`方案.md`、`rule-input-flow.md`、`prototype.html`、`regex-input-ux.md`。Lee 已拍板项不再重开。
+依据：内部界面方案稿（brief、方案、规则输入流程、原型）。Lee 已拍板项不再重开。
 
 ## 功能清单
 

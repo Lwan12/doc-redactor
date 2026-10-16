@@ -1,7 +1,7 @@
 """Drive GUI states under xvfb and save 960×640 screenshots.
 
 Usage:
-  xvfb-run -a -s "-screen 0 960x640x24" /workspace/dr-venv312/bin/python tools/shoot_gui.py
+  xvfb-run -a -s "-screen 0 960x640x24" python tools/shoot_gui.py   # 环境变量 DOC_REDACTOR_FONTS_CONF、DOC_REDACTOR_SHOTS
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-_FONTS_CONF = Path("/workspace/fonts/fonts.conf")
+_FONTS_CONF = Path(os.environ.get("DOC_REDACTOR_FONTS_CONF", ""))
 if _FONTS_CONF.is_file():
     os.environ.setdefault("FONTCONFIG_FILE", str(_FONTS_CONF))
 
-OUT = Path("/workspace/deliverables/doc-redactor-ui/real-screenshots")
+OUT = Path(os.environ.get("DOC_REDACTOR_SHOTS", "screenshots-out"))
 
 STATES = [
     ("01-main-empty", "main-empty"),

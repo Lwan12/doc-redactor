@@ -5,7 +5,7 @@ import os
 
 
 def _prepare_fonts() -> None:
-    conf = Path("/workspace/fonts/fonts.conf")
+    conf = Path(os.environ.get("DOC_REDACTOR_FONTS_CONF", ""))
     if conf.is_file():
         os.environ.setdefault("FONTCONFIG_FILE", str(conf))
     tcl = Path("/usr/share/tcltk/tcl8.6")
