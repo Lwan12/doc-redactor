@@ -1,0 +1,727 @@
+"""Result screen: files, preview, categories, locations, write."""
+
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import ttk
+
+from PIL import ImageTk
+
+from doc_redactor.gui.theme import (
+    BG_INSET,
+    BG_PAGE,
+    BG_SURFACE,
+    BD,
+    HL,
+    HL2,
+    INK,
+    INK2,
+    LINE2,
+    MUTED,
+    PLACE,
+    marker_for,
+    status_style,
+)
+from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
+
+
+class ResultView:
+    def __init__(self, app) -> None:
+        self.app = app
+        self.frame = ttk.Frame(app.container)
+        self._photo = None
+        self._hit_ranges: dict[str, int] = {}
+
+    def present(self) -> None:
+        self.frame.pack(fill="both", expand=True)
+        self.refresh()
+
+    def hide(self) -> None:
+        self.frame.pack_forget()
+
+    def refresh(self) -> None:
+        self._building = True
+        for child in self.frame.winfo_children():
+            child.destroy()
+        app = self.app
+        fonts = app.fonts
+        scans = app.scans
+        all_fail = bool(scans) and all(s.status == "fail" for s in scans)
+        nohit_all = bool(scans) and all(s.status != "fail" and not s.hits for s in scans) and not any(
+            s.status == "fail" for s in scans
+        )
+        if scans and not any(s.status == "fail" for s in scans) and all(s.status == "nohit" or not s.hits for s in scans):
+            nohit_all = True
+
+        head = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+        head.pack(fill="x")
+        row = tk.Frame(head, bg=BG_SURFACE)
+        row.pack(fill="x", padx=12, pady=8)
+        _steps(row, 3, fonts)
+        tk.Label(row, text="结果预览，写出前可以逐处取消", bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="right")
+
+        if not all_fail:
+            note = tk.Frame(self.frame, bg=BG_INSET)
+            note.pack(fill="x")
+            tk.Label(
+                note,
+                text="ⓘ 原文只在这个窗口里临时显示，不会存进任何文件，关闭窗口就清除。",
+                bg=BG_INSET,
+                fg=INK,
+                font=fonts["small"],
+            ).pack(side="left", padx=12, pady=6)
+            hide = tk.BooleanVar(value=app.hide_text)
+            ttk.Checkbutton(
+                note,
+                text="隐藏原文，只看位置",
+                variable=hide,
+                command=lambda: self._set_hide(hide.get()),
+            ).pack(side="right", padx=12)
+
+        many = next((s for s in scans if s.too_many), None)
+        if many is not None and not all_fail:
+            warn = tk.Frame(self.frame, bg="#fdf1e5")
+            warn.pack(fill="x")
+            n = len(many.hits)
+            tk.Label(
+                warn,
+                text=f"⚠ {many.path.name} 命中了 {n} 处，比平时多很多，可能把不该遮的也遮了。请看高亮；不影响写出，可直接点「写出」。",
+                bg="#fdf1e5",
+                fg="#c04700",
+                font=fonts["small"],
+                wraplength=900,
+                justify="left",
+            ).pack(anchor="w", padx=12, pady=6)
+
+        self._summary(scans, fonts, all_fail)
+
+        fails = [s for s in scans if s.status == "fail"]
+        if fails and app.selected == "all" and not all_fail and not nohit_all:
+            err = tk.Frame(self.frame, bg="#fcecec")
+            err.pack(fill="x")
+            names = "、".join(s.path.name for s in fails)
+            tk.Label(
+                err,
+                text=f"✕ 有 {len(fails)} 个文件没能处理（{names}）。其他文件正常。",
+                bg="#fcecec",
+                fg="#cb2f39",
+                font=fonts["small"],
+            ).pack(side="left", padx=12, pady=6)
+            ttk.Button(err, text="查看", command=lambda: self._select(scans.index(fails[0]))).pack(side="left")
+
+        body = tk.Frame(self.frame, bg=BG_PAGE)
+        body.pack(fill="both", expand=True, padx=12, pady=8)
+        if app.narrow:
+            body.columnconfigure(0, minsize=180, weight=0)
+            body.columnconfigure(1, weight=1)
+            body.rowconfigure(0, weight=1)
+            body.rowconfigure(1, weight=1)
+            left = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+            left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 8))
+            mid = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+            mid.grid(row=0, column=1, sticky="nsew")
+            right = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+            right.grid(row=1, column=1, sticky="nsew", pady=(8, 0))
+        else:
+            body.columnconfigure(0, minsize=200, weight=0)
+            body.columnconfigure(1, weight=1)
+            body.columnconfigure(2, minsize=260, weight=0)
+            body.rowconfigure(0, weight=1)
+            left = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+            left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+            mid = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+            mid.grid(row=0, column=1, sticky="nsew")
+            right = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+            right.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+
+        self._file_list(left, scans, fonts)
+        if app.selected == "all":
+            self._all_preview(mid, scans, fonts, all_fail, nohit_all)
+        else:
+            self._file_preview(mid, scans[app.selected], fonts)
+        self._right_pane(right, scans, fonts)
+        self._foot(scans, fonts, all_fail, nohit_all)
+        self.app.root.after_idle(lambda: setattr(self, "_building", False))
+
+    def _set_hide(self, value: bool) -> None:
+        self.app.hide_text = value
+        self.refresh()
+
+    def _select(self, value) -> None:
+        if getattr(self, "_building", False):
+            return
+        if self.app.selected == value:
+            return
+        self.app.selected = value
+        self.app.selected_cat = None
+        self.app.current_hit = None
+        self.app.pdf_page = 0
+        self.refresh()
+
+    def _summary(self, scans, fonts, all_fail: bool) -> None:
+        bar = tk.Frame(self.frame, bg=BG_SURFACE)
+        bar.pack(fill="x")
+        inner = tk.Frame(bar, bg=BG_SURFACE)
+        inner.pack(fill="x", padx=12, pady=8)
+        if all_fail:
+            tk.Label(inner, text="0", bg=BG_SURFACE, fg=INK, font=fonts["mono_big"]).pack(side="left")
+            tk.Label(inner, text=" 个文件可处理", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
+            tk.Label(
+                inner,
+                text=f"    ✕ {len(scans)} 个文件全部失败",
+                bg=BG_SURFACE,
+                fg="#cb2f39",
+                font=fonts["small"],
+            ).pack(side="left")
+            return
+        enabled, _counts = session_totals(scans, enabled_only=True)
+        total_hits = sum(len(s.hits) for s in scans)
+        cancelled_n = total_hits - enabled
+        n_hit = sum(1 for s in scans if s.status != "fail" and s.hits)
+        n_no = sum(1 for s in scans if s.status != "fail" and not s.hits)
+        n_fail = sum(1 for s in scans if s.status == "fail")
+        tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
+        verb = "已替换" if self.app.written else "将替换"
+        tk.Label(inner, text=f"    {verb} ", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
+        tk.Label(inner, text=str(enabled), bg=BG_SURFACE, fg=INK, font=fonts["mono_big"]).pack(side="left")
+        tk.Label(inner, text=" 处", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
+        if cancelled_n:
+            tk.Label(
+                inner,
+                text=f"    （你取消了 {cancelled_n} 处）",
+                bg=BG_SURFACE,
+                fg="#c04700",
+                font=fonts["small"],
+            ).pack(side="left")
+        tk.Label(inner, text=f"    ✓ 有命中 {n_hit}", bg=BG_SURFACE, fg="#008035", font=fonts["small"]).pack(side="left")
+        tk.Label(inner, text=f"    — 无命中 {n_no}", bg=BG_SURFACE, fg=MUTED, font=fonts["small"]).pack(side="left")
+        tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
+
+    def _file_list(self, parent, scans, fonts) -> None:
+        head = tk.Frame(parent, bg=BG_INSET)
+        head.pack(fill="x")
+        tk.Label(head, text=f"文件 {len(scans)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
+            side="left", padx=10, pady=5
+        )
+        tree = ttk.Treeview(parent, columns=("name", "n"), show="headings", selectmode="browse")
+        tree.heading("name", text="文件")
+        tree.heading("n", text="替换数")
+        tree.column("name", width=140, stretch=True)
+        tree.column("n", width=50, stretch=False, anchor="e")
+        tree.tag_configure("ok", foreground="#008035")
+        tree.tag_configure("bad", foreground="#cb2f39")
+        tree.tag_configure("no", foreground="#6c6c6c")
+        tree.tag_configure("warn", foreground="#c04700")
+        total, _ = session_totals(scans, enabled_only=True)
+        all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=("ok",))
+        ids = [all_id]
+        for scan in scans:
+            kind, label, tag = _scan_status(scan, self.app.written)
+            icon, text, _ = status_style(kind)
+            count = "—" if scan.status == "fail" else scan.enabled_count()
+            label = f"{icon} {scan.path.name}"
+            if kind == "many":
+                label = f"{icon} {text}  {scan.path.name}"
+            item = tree.insert("", "end", values=(label, count), tags=(tag,))
+            ids.append(item)
+        target = ids[0] if self.app.selected == "all" else ids[self.app.selected + 1]
+        tree.selection_set(target)
+        tree.see(target)
+        tree.pack(fill="both", expand=True)
+
+        def on_sel(_e=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            index = ids.index(sel[0])
+            self._select("all" if index == 0 else index - 1)
+
+        tree.bind("<<TreeviewSelect>>", on_sel)
+
+    def _all_preview(self, parent, scans, fonts, all_fail, nohit_all) -> None:
+        head = tk.Frame(parent, bg=BG_INSET)
+        head.pack(fill="x")
+        tk.Label(head, text="全部文件合计", bg=BG_INSET, fg=INK, font=fonts["bold"]).pack(side="left", padx=10, pady=5)
+        body = tk.Frame(parent, bg=BG_SURFACE)
+        body.pack(fill="both", expand=True)
+        if all_fail:
+            _empty_state(
+                body,
+                "✕",
+                f"{len(scans)} 个文件都没能处理",
+                "可能是文件放在了网络盘且已断开，或都不是支持的格式。请把文件复制到本机再拖进来。",
+                [("回到选文件", self.app.back_to_files, True)],
+                fonts,
+                bad=True,
+            )
+            return
+        if nohit_all:
+            _empty_state(
+                body,
+                "—",
+                "这批文件里没有找到要遮的内容",
+                "文件都正常打开了，但规则一处都没命中。下一步：检查规则里的例子是否和这批文件的写法一致，或换一类规则再扫。",
+                [("检查规则", self.app.show_rules, True), ("换一批文件", self.app.back_to_files, False)],
+                fonts,
+            )
+            return
+        cats = self.app.category_order()
+        ok_scans = [s for s in scans if s.status != "fail"]
+        columns = ["cat"] + [f"f{i}" for i in range(len(ok_scans))] + ["sum"]
+        tree = ttk.Treeview(body, columns=columns, show="headings")
+        tree.heading("cat", text="类别")
+        tree.column("cat", width=90, stretch=True)
+        for i, scan in enumerate(ok_scans):
+            key = f"f{i}"
+            tree.heading(key, text=_short_type(scan))
+            tree.column(key, width=50, anchor="e", stretch=False)
+        tree.heading("sum", text="合计")
+        tree.column("sum", width=50, anchor="e", stretch=False)
+        for ci, cat in enumerate(cats):
+            row = [f"{marker_for(ci)} {cat}"]
+            total = 0
+            for scan in ok_scans:
+                n = sum(1 for h in scan.enabled_hits if h.category == cat)
+                row.append(n)
+                total += n
+            row.append(total)
+            tree.insert("", "end", values=row)
+        sum_row = ["合计"]
+        grand = 0
+        for scan in ok_scans:
+            n = scan.enabled_count()
+            sum_row.append(n)
+            grand += n
+        sum_row.append(grand)
+        tree.insert("", "end", values=sum_row)
+        tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _file_preview(self, parent, scan: FileScan, fonts) -> None:
+        head = tk.Frame(parent, bg=BG_INSET)
+        head.pack(fill="x")
+        tk.Label(head, text=scan.path.name, bg=BG_INSET, fg=INK, font=fonts["mono_font"]).pack(
+            side="left", padx=10, pady=5
+        )
+        tk.Label(head, text=_type_name(scan.kind), bg=BG_INSET, fg=INK2, font=fonts["small"], relief="solid", bd=1).pack(
+            side="left"
+        )
+        has_prev = scan.status != "fail" and bool(scan.hits)
+        if has_prev:
+            mode = tk.StringVar(value=self.app.preview_mode)
+            if scan.kind == KIND_IMAGE:
+                ttk.Radiobutton(
+                    head, text="画框", value="orig", variable=mode, command=lambda: self._set_mode(mode.get())
+                ).pack(side="left", padx=6)
+                ttk.Radiobutton(
+                    head, text="涂黑后", value="after", variable=mode, command=lambda: self._set_mode(mode.get())
+                ).pack(side="left")
+            else:
+                ttk.Radiobutton(
+                    head, text="原文高亮", value="orig", variable=mode, command=lambda: self._set_mode(mode.get())
+                ).pack(side="left", padx=6)
+                ttk.Radiobutton(
+                    head, text="替换后", value="after", variable=mode, command=lambda: self._set_mode(mode.get())
+                ).pack(side="left")
+        if scan.kind == KIND_PDF and has_prev and scan.pages:
+            ttk.Button(head, text="‹", command=lambda: self._turn(-1), width=2).pack(side="right", padx=(0, 4))
+            tk.Label(
+                head,
+                text=f"第 {self.app.pdf_page + 1} / {len(scan.pages)} 页",
+                bg=BG_INSET,
+                fg=INK,
+                font=fonts["mono_font"],
+            ).pack(side="right")
+            ttk.Button(head, text="›", command=lambda: self._turn(1), width=2).pack(side="right", padx=4)
+
+        body = tk.Frame(parent, bg=BG_SURFACE)
+        body.pack(fill="both", expand=True)
+        if scan.status == "fail":
+            _empty_state(
+                body,
+                "✕",
+                "打不开这个文件",
+                scan.error or "",
+                [("从列表移除", lambda: self.app.remove_scan(scan), False)],
+                fonts,
+                bad=True,
+            )
+            return
+        if not scan.hits:
+            _empty_state(
+                body,
+                "—",
+                "没有找到要遮的内容",
+                "所选规则在这个文件里都没有命中。可以检查规则里的例子，或看看这个文件是不是扫描件。",
+                [("去看规则", self.app.show_rules, False)],
+                fonts,
+            )
+            return
+        if scan.kind == KIND_IMAGE:
+            self._image_canvas(body, scan)
+        else:
+            self._text_preview(body, scan, fonts)
+
+        foot = tk.Frame(parent, bg=BG_INSET)
+        foot.pack(fill="x")
+        cur = self.app.hit_by_id(self.app.current_hit)
+        if cur is not None:
+            tk.Label(
+                foot,
+                text=f"当前：{cur.location} · {self.app.marker(cur.category)} {cur.category}",
+                bg=BG_INSET,
+                fg=INK2,
+                font=fonts["small"],
+            ).pack(side="left", padx=10, pady=4)
+        else:
+            tk.Label(foot, text="点任一处高亮，或点右边的位置，可以定位", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
+                side="left", padx=10, pady=4
+            )
+
+    def _set_mode(self, value: str) -> None:
+        self.app.preview_mode = value
+        self.refresh()
+
+    def _turn(self, delta: int) -> None:
+        scan = self.app.scans[self.app.selected]
+        n = len(scan.pages) if scan.pages else 1
+        self.app.pdf_page = max(0, min(n - 1, self.app.pdf_page + delta))
+        self.refresh()
+
+    def _text_preview(self, parent, scan: FileScan, fonts) -> None:
+        text = tk.Text(parent, wrap="word", relief="flat", bd=0, padx=14, pady=12, font=fonts["ui"], bg=BG_SURFACE, fg=INK)
+        text.pack(fill="both", expand=True)
+        text.tag_configure("hit", background=HL, underline=True)
+        text.tag_configure("cur", background=HL2, underline=True)
+        text.tag_configure("off", foreground=PLACE, underline=True)
+        text.tag_configure("redacted", background=BG_INSET, font=fonts["mono_font"])
+        text.tag_configure("black", background="#000000", foreground="#000000")
+        text.tag_configure("mark", font=fonts["small"])
+        text.tag_configure("page", foreground=MUTED, font=fonts["mono_font"])
+        text.tag_configure("title", font=fonts["title"])
+        self._hit_ranges = {}
+        cats = {cat: i for i, cat in enumerate(self.app.category_order())}
+        replacements = self.app.ruleset.replacements()
+
+        def insert_run(block: str, block_hits: list, title: bool = False):
+            pos = 0
+            ordered = sorted(block_hits, key=lambda h: h.start)
+            for hit in ordered:
+                if hit.start > pos:
+                    text.insert("end", block[pos : hit.start], ("title",) if title else ())
+                display, tags = self._hit_display(scan, hit, replacements)
+                start_index = text.index("end-1c")
+                text.insert("end", display, tags)
+                end_index = text.index("end-1c")
+                tag_name = f"h{hit.hit_id}"
+                text.tag_add(tag_name, start_index, end_index)
+                self._hit_ranges[tag_name] = hit.hit_id
+                if hit.enabled and self.app.preview_mode == "orig":
+                    text.insert("end", marker_for(cats.get(hit.category, 0)), ("mark",))
+                pos = hit.end
+            if pos < len(block):
+                text.insert("end", block[pos:], ("title",) if title else ())
+            text.insert("end", "\n")
+
+        if scan.kind == KIND_WORD:
+            by_unit: dict[str, list] = {}
+            for hit in scan.hits:
+                by_unit.setdefault(hit.unit, []).append(hit)
+            for i, para in enumerate(scan.paragraphs):
+                insert_run(para, by_unit.get(f"p:{i}", []), title=(i == 0))
+        else:
+            for pi, page in enumerate(scan.pages):
+                text.insert("end", f"—— 第 {pi + 1} 页 ——\n", ("page",))
+                page_hits = [h for h in scan.hits if h.page == pi and h.unit.startswith("page:")]
+                offset = 0
+                for li, line in enumerate(page):
+                    line_hits = []
+                    for hit in page_hits:
+                        if offset <= hit.start < offset + len(line) + 1:
+                            line_hits.append(
+                                type(hit)(
+                                    **{
+                                        **hit.__dict__,
+                                        "start": hit.start - offset,
+                                        "end": hit.end - offset,
+                                    }
+                                )
+                            )
+                    insert_run(line, line_hits)
+                    offset += len(line) + 1
+
+        def on_click(event):
+            index = text.index(f"@{event.x},{event.y}")
+            for tag in text.tag_names(index):
+                if tag.startswith("h") and tag[1:].isdigit():
+                    self.app.current_hit = int(tag[1:])
+                    self.refresh()
+                    return
+
+        text.bind("<Button-1>", on_click)
+        text.configure(state="disabled")
+        if self.app.current_hit is not None:
+            tag = f"h{self.app.current_hit}"
+            try:
+                text.see(f"{tag}.first")
+            except tk.TclError:
+                pass
+
+    def _hit_display(self, scan, hit, replacements):
+        hide = self.app.hide_text
+        cur = self.app.current_hit == hit.hit_id
+        if not hit.enabled:
+            shown = "▇" * min(len(hit.text), 8) if hide else hit.text
+            return shown, ("off",)
+        if self.app.preview_mode == "after":
+            if scan.kind == KIND_WORD:
+                label = replacements.get(hit.category) or f"[REDACTED:{hit.category}]"
+                return label, ("redacted", "cur" if cur else "")
+            return "█" * max(3, min(len(hit.text), 8)), ("black", "cur" if cur else "")
+        shown = "▇" * min(len(hit.text), 8) if hide else hit.text
+        return shown, ("cur" if cur else "hit",)
+
+    def _image_canvas(self, parent, scan: FileScan) -> None:
+        canvas = tk.Canvas(parent, bg=BG_PAGE, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        image = scan.image
+        if image is None:
+            return
+        max_w, max_h = 520, 360
+        w, h = image.size
+        scale = min(max_w / w, max_h / h, 1.0)
+        show = image.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        if self.app.hide_text:
+            show = show.point(lambda p: 230)
+        self._photo = ImageTk.PhotoImage(show)
+        x0 = 24
+        y0 = 16
+        canvas.create_image(x0, y0, anchor="nw", image=self._photo)
+        dashes = {0: None, 1: (6, 3), 2: (2, 3)}
+        cats = {cat: i for i, cat in enumerate(self.app.category_order())}
+        for hit in scan.hits:
+            for box in hit.boxes:
+                left, top, width, height = box
+                x1, y1 = x0 + left * scale, y0 + top * scale
+                x2, y2 = x1 + width * scale, y1 + height * scale
+                fill = ""
+                if hit.enabled and (self.app.preview_mode == "after" or self.app.hide_text):
+                    fill = "#000000"
+                outline = "#ffd84d" if self.app.current_hit == hit.hit_id else (INK if hit.enabled else PLACE)
+                width_px = 3 if self.app.current_hit == hit.hit_id else 2
+                dash = dashes.get(cats.get(hit.category, 0) % 3)
+                kwargs = {"outline": outline, "width": width_px, "fill": fill}
+                if dash:
+                    kwargs["dash"] = dash
+                canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
+                if hit.enabled:
+                    canvas.create_text(
+                        x2 - 2,
+                        y1 - 2,
+                        text=marker_for(cats.get(hit.category, 0)),
+                        anchor="se",
+                        fill=INK,
+                    )
+
+            def bind_hit(h=hit):
+                canvas.bind("<Button-1>", lambda e, hh=h: self._maybe_pick_box(e, scan, scale, x0, y0))
+
+            bind_hit()
+        canvas.bind("<Button-1>", lambda e: self._maybe_pick_box(e, scan, scale, x0, y0))
+
+    def _maybe_pick_box(self, event, scan, scale, x0, y0) -> None:
+        px = (event.x - x0) / scale
+        py = (event.y - y0) / scale
+        for hit in scan.hits:
+            for left, top, width, height in hit.boxes:
+                if left <= px <= left + width and top <= py <= top + height:
+                    self.app.current_hit = hit.hit_id
+                    self.refresh()
+                    return
+
+    def _right_pane(self, parent, scans, fonts) -> None:
+        if self.app.selected == "all":
+            current = None
+            hits = [h for s in scans if s.status != "fail" for h in s.hits]
+        else:
+            current = scans[self.app.selected]
+            hits = list(current.hits) if current.status != "fail" else []
+        if self.app.selected_cat:
+            hits = [h for h in hits if h.category == self.app.selected_cat]
+        cats = self.app.category_order()
+        head = tk.Frame(parent, bg=BG_INSET)
+        head.pack(fill="x")
+        tk.Label(head, text="按类别汇总" + ("（全部文件）" if current is None else ""), bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
+            side="left", padx=10, pady=5
+        )
+        tree = ttk.Treeview(parent, columns=("cat", "n"), show="headings", height=min(6, len(cats) + 1))
+        tree.heading("cat", text="类别")
+        tree.heading("n", text="个数")
+        tree.column("cat", width=140, stretch=True)
+        tree.column("n", width=50, anchor="e", stretch=False)
+        source = current.enabled_hits if current is not None else [h for s in scans for h in s.enabled_hits]
+        if current is not None and current.status == "fail":
+            source = []
+        for i, cat in enumerate(cats):
+            n = sum(1 for h in source if h.category == cat)
+            item = tree.insert("", "end", values=(f"{marker_for(i)} {cat}", n))
+            if self.app.selected_cat == cat:
+                tree.selection_set(item)
+        total = len(source)
+        tree.insert("", "end", values=("合计", total))
+        tree.pack(fill="x")
+
+        def on_cat(_e=None):
+            if getattr(self, "_building", False):
+                return
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            nxt = None if idx >= len(cats) else cats[idx]
+            if self.app.selected_cat == nxt:
+                return
+            self.app.selected_cat = nxt
+            self.refresh()
+
+        tree.bind("<<TreeviewSelect>>", on_cat)
+
+        loc_head = tk.Frame(parent, bg=BG_INSET)
+        loc_head.pack(fill="x")
+        tk.Label(loc_head, text=f"被替换的位置 {len(hits)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
+            side="left", padx=10, pady=5
+        )
+        if self.app.selected_cat:
+            ttk.Button(loc_head, text="看全部类别", command=lambda: self._clear_cat()).pack(side="right", padx=6)
+
+        loc = ttk.Treeview(parent, columns=("on", "loc", "cat", "text"), show="headings", selectmode="browse")
+        loc.heading("on", text="" if self.app.written else "替换")
+        loc.heading("loc", text="位置")
+        loc.heading("cat", text="类")
+        loc.heading("text", text="内容")
+        loc.column("on", width=36, stretch=False, anchor="center")
+        loc.column("loc", width=90, stretch=False)
+        loc.column("cat", width=28, stretch=False)
+        loc.column("text", width=90, stretch=True)
+        cat_index = {c: i for i, c in enumerate(cats)}
+        for hit in hits:
+            mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
+            content = "▇▇▇▇" if self.app.hide_text else hit.text
+            loc.insert(
+                "",
+                "end",
+                iid=str(hit.hit_id),
+                values=(mark, hit.location, marker_for(cat_index.get(hit.category, 0)), content),
+            )
+        if self.app.current_hit is not None and loc.exists(str(self.app.current_hit)):
+            loc.selection_set(str(self.app.current_hit))
+            loc.see(str(self.app.current_hit))
+        loc.pack(fill="both", expand=True)
+
+        def on_loc_click(event):
+            row = loc.identify_row(event.y)
+            col = loc.identify_column(event.x)
+            if not row:
+                return
+            hid = int(row)
+            if col == "#1" and not self.app.written:
+                self.app.toggle_hit(hid)
+                self.refresh()
+                return
+            self.app.jump_to_hit(hid)
+            self.refresh()
+
+        loc.bind("<Button-1>", on_loc_click)
+
+    def _clear_cat(self) -> None:
+        self.app.selected_cat = None
+        self.refresh()
+
+    def _foot(self, scans, fonts, all_fail, nohit_all) -> None:
+        foot = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+        foot.pack(fill="x")
+        inner = tk.Frame(foot, bg=BG_SURFACE)
+        inner.pack(fill="x", padx=12, pady=8)
+        enabled, _ = session_totals(scans, enabled_only=True)
+        n_files = sum(1 for s in scans if s.status != "fail" and s.enabled_count() > 0)
+        if self.app.written:
+            tk.Label(
+                inner,
+                text=f"✓ 已写出 {n_files} 个脱敏文件，共替换 {enabled} 处",
+                bg=BG_SURFACE,
+                fg="#008035",
+                font=fonts["small"],
+            ).pack(side="left")
+            tk.Label(inner, text=self.app.output_var.get(), bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"]).pack(
+                side="left", padx=8
+            )
+            ttk.Button(inner, text="导出命中清单（只含类别和次数）", command=self.app.export_hit_list).pack(side="right", padx=8)
+            ttk.Button(inner, text="打开输出文件夹", style="Primary.TButton", command=self.app.open_output).pack(side="right")
+            return
+        left = tk.Frame(inner, bg=BG_SURFACE)
+        left.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            left,
+            text="原文件不会被修改。确认无误后再写出，不想遮的位置取消勾选即可。",
+            bg=BG_SURFACE,
+            fg=INK2,
+            font=fonts["small"],
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(left, text=self.app.output_var.get(), bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"], anchor="w").pack(
+            fill="x"
+        )
+        ttk.Button(inner, text="返回", command=self.app.back_to_files).pack(side="right", padx=(8, 0))
+        ttk.Button(inner, text="导出命中清单", command=self.app.export_hit_list).pack(side="right", padx=8)
+        can_write = enabled > 0 and not all_fail
+        ttk.Button(
+            inner,
+            text=f"写出 {n_files} 个脱敏文件（替换 {enabled} 处）",
+            style="Primary.TButton",
+            command=self.app.write_files,
+            state=("normal" if can_write else "disabled"),
+        ).pack(side="right")
+
+
+def _steps(parent, current, fonts) -> None:
+    names = ["选文件", "选规则", "开始扫描", "查看结果"]
+    for i, name in enumerate(names):
+        weight = fonts["bold"] if i == current else fonts["small"]
+        color = INK if i == current else INK2
+        tk.Label(parent, text=f"{i + 1} {name}", bg=BG_SURFACE, fg=color, font=weight).pack(side="left")
+        if i < len(names) - 1:
+            tk.Label(parent, text=" › ", bg=BG_SURFACE, fg=PLACE, font=fonts["small"]).pack(side="left")
+
+
+def _scan_status(scan: FileScan, written: bool) -> tuple[str, str, str]:
+    if scan.status == "fail":
+        return "fail", "失败", "bad"
+    if scan.too_many:
+        return "many", "命中偏多", "warn"
+    if written and scan.enabled_count() > 0:
+        return "written", "已写出", "ok"
+    if not scan.hits:
+        return "nohit", "无命中", "no"
+    return "hit", "有命中", "ok"
+
+
+def _type_name(kind: str) -> str:
+    return {"word": "Word", "pdf": "PDF", "image": "图片"}.get(kind, kind)
+
+
+def _short_type(scan: FileScan) -> str:
+    return _type_name(scan.kind)
+
+
+def _empty_state(parent, icon, title, body, buttons, fonts, bad=False) -> None:
+    wrap = tk.Frame(parent, bg=BG_SURFACE)
+    wrap.place(relx=0.5, rely=0.5, anchor="center")
+    color = "#cb2f39" if bad else MUTED
+    tk.Label(wrap, text=icon, bg=BG_SURFACE, fg=color, font=fonts["title"]).pack()
+    tk.Label(wrap, text=title, bg=BG_SURFACE, fg=color if bad else INK, font=fonts["title"]).pack(pady=4)
+    tk.Label(wrap, text=body, bg=BG_SURFACE, fg=INK2, font=fonts["small"], wraplength=380, justify="center").pack()
+    row = tk.Frame(wrap, bg=BG_SURFACE)
+    row.pack(pady=10)
+    for label, cmd, primary in buttons:
+        ttk.Button(row, text=label, style="Primary.TButton" if primary else "TButton", command=cmd).pack(
+            side="left", padx=4
+        )

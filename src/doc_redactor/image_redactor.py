@@ -29,6 +29,72 @@ def redact_image_file(src: Path, dest: Path, engine: RedactionEngine) -> dict[st
     return counts
 
 
+def analyze_image_entities(image: Image.Image, engine: RedactionEngine) -> list[dict]:
+    """Return unique entities with OCR snippet and bounding boxes.
+
+    Each item: category, text, start, end, boxes (list of left, top, width, height).
+    """
+    require_tesseract()
+    prepared = _to_rgb(image)
+    analyzer = _build_image_analyzer(engine)
+    boxes = analyzer.analyze(
+        prepared,
+        ocr_kwargs={"lang": _OCR_LANG},
+        language="en",
+    )
+    grouped: dict[tuple[str, int, int], dict] = {}
+    for box in boxes:
+        key = (box.entity_type, int(box.start), int(box.end))
+        item = grouped.get(key)
+        rect = (int(box.left), int(box.top), int(box.width), int(box.height))
+        if item is None:
+            grouped[key] = {
+                "category": box.entity_type,
+                "start": int(box.start),
+                "end": int(box.end),
+                "text": "",
+                "boxes": [rect],
+            }
+        else:
+            item["boxes"].append(rect)
+    for item in grouped.values():
+        item["text"] = _ocr_crop(prepared, item["boxes"][0]) or item["category"]
+    return list(grouped.values())
+
+
+def paint_image_boxes(image: Image.Image, boxes: list[tuple[int, int, int, int]], pad: int = _PAD) -> Image.Image:
+    prepared = _to_rgb(image)
+    class _Box:
+        def __init__(self, left, top, width, height):
+            self.left = left
+            self.top = top
+            self.width = width
+            self.height = height
+
+    _paint_padding(prepared, [_Box(*box) for box in boxes], pad)
+    return prepared
+
+
+def _build_image_analyzer(engine: RedactionEngine):
+    import os
+
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    from presidio_image_redactor import ImageAnalyzerEngine, TesseractOCR
+
+    return ImageAnalyzerEngine(
+        analyzer_engine=engine.analyzer,
+        ocr=TesseractOCR(),
+    )
+
+
+def _ocr_crop(image: Image.Image, box: tuple[int, int, int, int]) -> str:
+    import pytesseract
+
+    left, top, width, height = box
+    region = image.crop((left, top, left + max(width, 1), top + max(height, 1)))
+    return (pytesseract.image_to_string(region, lang=_OCR_LANG) or "").strip()
+
+
 def redact_image(image: Image.Image, engine: RedactionEngine) -> tuple[Image.Image, dict[str, int]]:
     require_tesseract()
     prepared = _to_rgb(image)
@@ -57,16 +123,9 @@ def redact_image_bytes(data: bytes, suffix: str, engine: RedactionEngine) -> tup
 
 
 def _build_redactor(engine: RedactionEngine):
-    import os
+    from presidio_image_redactor import ImageRedactorEngine
 
-    os.environ.setdefault("MPLBACKEND", "Agg")
-    from presidio_image_redactor import ImageAnalyzerEngine, ImageRedactorEngine, TesseractOCR
-
-    image_analyzer = ImageAnalyzerEngine(
-        analyzer_engine=engine.analyzer,
-        ocr=TesseractOCR(),
-    )
-    return ImageRedactorEngine(image_analyzer_engine=image_analyzer)
+    return ImageRedactorEngine(image_analyzer_engine=_build_image_analyzer(engine))
 
 
 def _counts_from_boxes(boxes) -> dict[str, int]:

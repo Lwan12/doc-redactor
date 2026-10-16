@@ -35,12 +35,27 @@ def _collected():
         "PIL",
         "cv2",
         "presidio_image_redactor",
+        "doc_redactor.gui.app",
+        "doc_redactor.gui.theme",
+        "doc_redactor.gui.main_view",
+        "doc_redactor.gui.result_view",
+        "doc_redactor.gui.rules_view",
+        "doc_redactor.gui.dialogs",
+        "doc_redactor.gui.demo",
+        "tkinterdnd2",
     ]
     datas += collect_data_files("presidio_analyzer")
     extra_datas, extra_binaries, extra_hidden = collect_all("pymupdf")
     datas += extra_datas
     binaries += extra_binaries
     hidden += extra_hidden
+    try:
+        dnd_datas, dnd_binaries, dnd_hidden = collect_all("tkinterdnd2")
+        datas += dnd_datas
+        binaries += dnd_binaries
+        hidden += dnd_hidden
+    except Exception:
+        pass
     return datas, binaries, hidden
 
 

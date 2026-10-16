@@ -99,11 +99,57 @@ def _index_runs(paragraph: Paragraph):
     return text, spans
 
 
-def _apply_hit(spans, hit: Hit) -> bool:
+def iter_document_paragraphs(document):
+    """Yield paragraphs in the same order as redact_docx (body, tables, headers/footers)."""
+    yield from _iter_container_paragraphs(document)
+    for section in document.sections:
+        for header_footer in _owned_headers_footers(section):
+            yield from _iter_container_paragraphs(header_footer)
+
+
+def _iter_container_paragraphs(container):
+    for paragraph in container.paragraphs:
+        yield paragraph
+    for table in container.tables:
+        yield from _iter_table_paragraphs(table)
+
+
+def _iter_table_paragraphs(table: Table):
+    seen: set[int] = set()
+    for row in table.rows:
+        for cell in row.cells:
+            marker = id(cell._tc)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            yield from _iter_container_paragraphs(cell)
+
+
+def apply_hits_to_paragraph(paragraph: Paragraph, hits: list[Hit], replacement_for) -> list[str]:
+    """Apply stored hits from the right. replacement_for(category) -> str."""
+    ordered = sorted(hits, key=lambda item: item.start, reverse=True)
+    categories: list[str] = []
+    for hit in ordered:
+        text, spans = _index_runs(paragraph)
+        rebuilt = Hit(
+            start=hit.start,
+            end=hit.end,
+            category=hit.category,
+            text=text[hit.start : hit.end] if 0 <= hit.start <= hit.end <= len(text) else hit.text,
+        )
+        if not _apply_hit(spans, rebuilt, replacement=replacement_for(hit.category)):
+            continue
+        categories.append(hit.category)
+    categories.reverse()
+    return categories
+
+
+def _apply_hit(spans, hit: Hit, replacement: str | None = None) -> bool:
     involved = [span for span in spans if span[1] < hit.end and span[2] > hit.start]
     if not involved:
         return False
-    replacement = redaction_label(hit.category)
+    if replacement is None:
+        replacement = redaction_label(hit.category)
     first_run, first_start, _first_end, first_text = involved[0]
     local_start = hit.start - first_start
     if len(involved) == 1:

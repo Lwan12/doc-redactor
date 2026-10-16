@@ -94,11 +94,18 @@ def _parse_wordlist(node: object, index: int, base_dir: Path) -> WordlistRule:
         raise ValueError(f"第 {index} 个词表必须是映射")
     raw_path = node.get("path")
     category = node.get("category")
+    raw_terms = node.get("terms")
+    if not isinstance(category, str) or not category.strip():
+        label = raw_path if isinstance(raw_path, str) else str(index)
+        raise ValueError(f"词表 {label} 缺少 category")
+    case_sensitive = bool(node.get("case_sensitive", False))
+    if raw_terms is not None:
+        if not isinstance(raw_terms, list):
+            raise ValueError(f"词表 {category} 的 terms 必须是列表")
+        terms = [str(item).strip() for item in raw_terms if str(item).strip()]
+        return WordlistRule(category=category.strip(), terms=terms, case_sensitive=case_sensitive)
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError(f"第 {index} 个词表缺少 path")
-    if not isinstance(category, str) or not category.strip():
-        raise ValueError(f"词表 {raw_path} 缺少 category")
-    case_sensitive = bool(node.get("case_sensitive", False))
     list_path = Path(raw_path)
     if not list_path.is_absolute():
         list_path = (base_dir / list_path).resolve()
