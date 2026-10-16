@@ -9,4 +9,5 @@ venv/
 dist/
 build/
 *.spec
+!doc-redactor.spec
 .DS_Store

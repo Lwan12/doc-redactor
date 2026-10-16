@@ -23,6 +23,50 @@ PYTHONPATH=src python -m doc_redactor --help
 
 识别引擎用的是 Presidio 的 `AnalyzerEngine`，NLP 部分是 `NoOpNlpEngine`。它不加载 spaCy 语言模型，也不会下载 `en_core_web_lg`。默认的 `AnalyzerEngine()` 会去找 spaCy 模型，这里没有走那条路径。
 
+## Windows 免安装包
+
+Actions 产物里有 `doc-redactor-windows.zip` 和 `SHA256SUMS.txt`。zip 解压就能用：不用安装，不用管理员权限，也不写注册表。两个 exe 的 manifest 里，`requestedExecutionLevel` 是 `asInvoker`，权限跟启动它的用户一样，不会弹出 UAC 要求提权。`doc-redactor.spec` 里 PyInstaller 的 `uac_admin` 保持关闭。
+
+解压到当前用户能写的目录，例如 `%USERPROFILE%\apps`。不要放进 `C:\Program Files`。解压出来的 `doc-redactor` 目录里有：
+
+- `doc-redactor.exe`，命令行
+- `doc-redactor-gui.exe`，窗口
+- `tesseract\`：`tesseract.exe`、DLL，以及 `tessdata` 里的 `chi_sim.traineddata` 和 `eng.traineddata`
+
+两个 exe 共用这一目录里的依赖。不要把 exe 单独拷走。图片脱敏用包内的 Tesseract，不用另外安装，也不用设置 `TESSERACT_CMD`。
+
+打包用 onedir，不用 onefile。onefile 每次启动都先把内容解压到临时目录，启动更慢，也更容易被杀毒软件拦住。onedir 把 exe 和依赖放在同一个目录里，启动更稳。
+
+没有签名的 exe 可能被杀毒软件或公司策略拦住。可以把解压后的目录交给 IT 加白名单；用 `SHA256SUMS.txt` 核对 zip 的 SHA256，确认它就是 Actions 上的那一份；也可以不跑 exe，按上面的安装一节用源码运行。
+
+使用步骤：
+
+1. 在本仓库的 Actions 页面下载名为 `doc-redactor-windows` 的产物。里面是 `doc-redactor-windows.zip` 和 `SHA256SUMS.txt`。
+2. 核对 SHA256。PowerShell：
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\doc-redactor-windows.zip
+```
+
+`Hash` 和 `SHA256SUMS.txt` 里的值一致即可，不区分大小写。
+
+3. 解压到用户目录：
+
+```powershell
+Expand-Archive .\doc-redactor-windows.zip -DestinationPath "$env:USERPROFILE\apps"
+```
+
+4. 命令行处理文件：
+
+```powershell
+& "$env:USERPROFILE\apps\doc-redactor\doc-redactor.exe" `
+  D:\docs\a.docx D:\docs\a.pdf D:\docs\a.png `
+  -r D:\docs\rules.yaml `
+  -o D:\docs\out
+```
+
+也可以双击同一目录里的 `doc-redactor-gui.exe`，在窗口里选文件、规则和输出目录。规则文件不会打进 zip，格式见下一节。仓库里的 `rules.example.yaml` 只有虚构词。
+
 ## 规则
 
 `rules.example.yaml`：
@@ -96,7 +140,7 @@ python tools/make_samples.py
 2. 打包后的程序：可执行文件同目录下的 `tesseract/tesseract.exe`（或 `tesseract`），然后是 PyInstaller 解压目录 `_MEIPASS/tesseract/` 里的同名文件
 3. `PATH`
 
-如果可执行文件旁边有 `tessdata/` 目录，程序会把 `TESSDATA_PREFIX` 指到那里，这样打包后的程序不用再联网下载语言数据。
+如果可执行文件旁边有 `tessdata/` 目录，程序会把 `TESSDATA_PREFIX` 指到那里，这样打包后的程序不用再联网下载语言数据。Windows 免安装包把 Tesseract 放在 exe 同目录的 `tesseract\` 下，走的就是上面第 2 步，不用再设 `TESSERACT_CMD`。
 
 本机示例：
 
@@ -108,25 +152,13 @@ TESSERACT_CMD=/path/to/tesseract pytest
 
 ## 打包
 
-不要为这个项目下载 spaCy 的 `en_core_web_lg` 或其他语言模型。PyInstaller 需要带上 Presidio 自带的配置数据：
+不要为这个项目下载 spaCy 的 `en_core_web_lg` 或其他语言模型。Windows 产物由 `doc-redactor.spec` 生成：一次 onedir 构建，里面两个 `EXE`（命令行 `doc-redactor`，窗口 `doc-redactor-gui`），再由一个 `COLLECT` 收进同一个目录。两个程序共用这个目录里的依赖。spec 不用 `MERGE`，避免每个 exe 再去临时目录解压共享文件。
+
+`uac_admin=False`，manifest 指向 `packaging/asInvoker.manifest`，其中 `requestedExecutionLevel` 的 `level` 是 `asInvoker`。`contents_directory` 是 `.`，收集到的文件（包括 `tesseract/`）放在两个 exe 旁边。构建前要把 Tesseract 放到 `build/tesseract/`：`tesseract.exe`、DLL、`tessdata/eng.traineddata`、`tessdata/chi_sim.traineddata`。
 
 ```bash
-pyinstaller --onefile --windowed --name doc-redactor-gui \
-  --paths src \
-  --collect-data presidio_analyzer \
-  --collect-all pymupdf \
-  --add-data "tesseract:tesseract" \
-  tools/pyinstaller_entry_gui.py
-
-pyinstaller --onefile --name doc-redactor \
-  --paths src \
-  --collect-data presidio_analyzer \
-  --collect-all pymupdf \
-  --add-data "tesseract:tesseract" \
-  tools/pyinstaller_entry_cli.py
+pyinstaller --noconfirm --clean --distpath dist --workpath build/pyi doc-redactor.spec
 ```
-
-Windows 上 `--add-data` 的分隔符是分号：`tesseract;tesseract`。GUI 使用 `--windowed`，CLI 保留控制台。两个入口都会把 `tesseract.exe`、它的 DLL 和 `tessdata` 打进去。
 
 体积会明显大于这几份脚本。主要来自 PyMuPDF、Presidio 带进来的 spaCy（即使不加载语言模型）、OpenCV、Pillow，以及 Tesseract 和 `eng` / `chi_sim` 语言数据。Tesseract 本身是 Apache-2.0；构建时用的 `eng.traineddata` 和 `chi_sim.traineddata` 来自 [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)，许可证以该仓库的声明为准（Apache-2.0）。
 
@@ -135,13 +167,16 @@ Windows 上 `--add-data` 的分隔符是分号：`tesseract;tesseract`。GUI 使
 `.github/workflows/build-windows.yml` 在 `windows-latest` 上使用 Python 3.12：
 
 1. `choco install tesseract`
-2. 只在构建机上，从 `github.com/tesseract-ocr/tessdata_fast` 下载 `eng.traineddata` 和 `chi_sim.traineddata`
+2. 只在构建机上，从 `github.com/tesseract-ocr/tessdata_fast` 下载 `eng.traineddata` 和 `chi_sim.traineddata`，连同 `tesseract.exe` 和 DLL 放到 `build/tesseract/`
 3. `pip install -r requirements.txt`
 4. `pytest`
-5. PyInstaller 分别打出 GUI（`--onefile --windowed`）和 CLI 两个 exe，并用 `--add-data` 放进 Tesseract
-6. `upload-artifact` 上传 `dist/doc-redactor.exe` 和 `dist/doc-redactor-gui.exe`
+5. 用 `doc-redactor.spec` 打 onedir，得到 `dist/doc-redactor/`（两个 exe 和 `tesseract/`）
+6. `tools/make_windows_zip.py` 检查 manifest 是 `asInvoker`、没有 `requireAdministrator`，并确认 `tesseract.exe`、DLL 和两种语言数据都在，然后打成 `doc-redactor-windows.zip`，写出 `SHA256SUMS.txt`
+7. `upload-artifact` 上传这两个文件，产物名是 `doc-redactor-windows`
 
-构建机需要联网安装依赖和语言数据。打好的 exe 在运行时不再下载模型或语言数据。
+另一个 job 下载这份产物，核对 SHA256，解压到 `%USERPROFILE%\apps`（不是 Program Files），清掉 PATH 里的 Tesseract 以及 `TESSERACT_CMD` 和 `PYTHONPATH`，只用包内的 `doc-redactor.exe` 对 `samples/` 里的 docx、pdf、png 脱敏。然后 `tools/check_redacted_output.py` 检查 docx 文本、PDF 文本，并用包内 Tesseract 对 png 做 OCR，确认 `ABC-2026-001`、`Acme Pharma`、`Fictizumab` 这些原词已经不在，`report.json` 里也没有原文。任何一步失败，job 就失败。
+
+构建机需要联网安装依赖和语言数据。打好的程序在运行时不再下载模型或语言数据，也不写注册表。
 
 ## 测试
 
