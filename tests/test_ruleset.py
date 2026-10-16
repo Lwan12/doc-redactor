@@ -20,6 +20,7 @@ from doc_redactor.ruleset import (
     common_library,
     find_word_hits,
     library_main_items,
+    load_rules_file,
     load_ruleset,
     word_dup_message,
 )
@@ -185,12 +186,12 @@ def test_letter_digit_matches_fictional_protocol_ids():
         ]
     )
     engine = rules.to_engine()
-    text = "方案 ZZZ9001 与 zz-k9001 已归档，ABC-1 太短不算，AAA0000 在列。"
+    text = "方案 AAA0000 与 aa-k0000 已归档，ABC-1 太短不算，BBB1111 在列。"
     hits = engine.find_hits(text)
     found = {hit.text.lower() for hit in hits}
-    assert "zzz9001" in found
-    assert "zz-k9001" in found
     assert "aaa0000" in found
+    assert "aa-k0000" in found
+    assert "bbb1111" in found
     assert not any(hit.text.upper().startswith("ABC-1") for hit in hits)
 
 
@@ -206,13 +207,13 @@ def test_protocol_list_import_enables_and_is_case_insensitive():
             )
         ]
     )
-    merged, added, skipped = rules.import_terms(0, ["ZZZ9001", "ZZ-K9001", "zzz9001"])
+    merged, added, skipped = rules.import_terms(0, ["AAA0000", "AA-K0000", "aaa0000"])
     assert rules.rules[0].enabled is True
-    assert merged == ["ZZZ9001", "ZZ-K9001"]
-    assert added == ["ZZZ9001", "ZZ-K9001"]
-    assert skipped == ["zzz9001"]
+    assert merged == ["AAA0000", "AA-K0000"]
+    assert added == ["AAA0000", "AA-K0000"]
+    assert skipped == ["aaa0000"]
     engine = rules.to_engine()
-    hits = engine.find_hits("见 zzz9001 与 ZZ-K9001")
+    hits = engine.find_hits("见 aaa0000 与 AA-K0000")
     assert len(hits) == 2
 
 
@@ -258,6 +259,19 @@ def test_import_failure_message(tmp_path: Path):
     preview = RuleSet().preview_import(bad)
     assert preview.failed
     assert preview.message == MSG_IMPORT_FAIL
+
+
+def test_import_bad_flag_uses_match_wording(tmp_path: Path):
+    rules = tmp_path / "flags.yaml"
+    rules.write_text(
+        "regex:\n  - name: BAD\n    pattern: 'ABC'\n    flags: NOT_A_FLAG\nwordlists: []\n",
+        encoding="utf-8",
+    )
+    loaded = load_rules_file(rules)
+    message = loaded[0][1]
+    assert message
+    assert "正则" not in message
+    assert "匹配写法" in message
 
 
 def test_threshold_constant_not_in_library_copy():

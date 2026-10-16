@@ -65,11 +65,11 @@ Expand-Archive .\doc-redactor-windows.zip -DestinationPath "$env:USERPROFILE\app
   -o D:\docs\out
 ```
 
-也可以双击同一目录里的 `doc-redactor-gui.exe`，在窗口里选文件、规则和输出目录。规则文件不会打进 zip，格式见下一节。仓库里的 `rules.example.yaml` 只有虚构词。
+也可以双击同一目录里的 `doc-redactor-gui.exe`，在窗口里选文件、规则和输出目录。规则文件不会打进 zip。窗口里直接设规则即可；自己改规则文件是给开发者 / 命令行的高级用法，格式见下一节。仓库里的 `rules.example.yaml` 只有虚构词。
 
-## 规则
+## 规则文件格式（给开发者 / 命令行高级用法）
 
-`rules.example.yaml`：
+窗口里设规则，不用看这一节，界面也不出现下面这些键名。命令行和要自己改规则文件的同事用这个格式。`rules.example.yaml`：
 
 ```yaml
 regex:
@@ -85,7 +85,7 @@ wordlists:
     category: DRUG
 ```
 
-- `regex` 可增可删。每条有 `name`、`pattern`、`flags`。`name` 就是报告里的类别。`flags` 可以省略，也可以写成 `IGNORECASE`，或用 `|` / 列表组合 `MULTILINE`、`DOTALL`。
+- 下面的键名只出现在规则文件里。`regex` 可增可删。每条有 `name`、`pattern`、`flags`。`name` 就是报告里的类别。`flags` 可以省略，也可以写成 `IGNORECASE`，或用 `|` / 列表组合 `MULTILINE`、`DOTALL`。
 - `wordlists` 可增可删。每条有 `path`、`case_sensitive`、`category`。`case_sensitive: false` 时忽略大小写。
 - 词表一行一个。空行忽略。`.csv` 取第一列，不要表头。
 - 相对路径相对于规则文件所在目录，不相对于当前工作目录。
@@ -118,6 +118,7 @@ python -m doc_redactor.gui
 - 右侧勾选要遮的内容。第一次打开会带上常用库里默认勾上的五条（项目号、方案号清单、申办方、药名、NCT 试验登记号）。方案号清单是词表，要先导入一列号才会命中；「字母加数字」是它的备选子项，默认不勾。点「规则设置…」可以新增（贴例子或照样写 `#`/`@`）、编辑词表、从常用库添加、导入/导出。界面不出现「正则」字样。
 - 「开始扫描」先在内存里找出命中位置，不改原文件。结果页高亮原文（可改「替换后」），按类别汇总，每处可取消勾选。取消后顶部总数、文件替换数、类别个数、位置清单和主按钮上的数字一起变。
 - 原文只在窗口里临时显示，不会写入任何文件。勾「隐藏原文，只看位置」后，预览和清单里的原文都换成 ▇。
+- 「导出命中清单」写的是每个文件名对应的「类别 → 次数」。清单含文件名，不含原文。文件名本身敏感时请自行注意。
 - 确认后写出 `<原名>.redacted.<ext>` 和只含类别次数的 `report.json`。Word 默认换成 `[REDACTED:类别]`；PDF 用 `apply_redactions` 删掉文字；图片涂黑。
 - 覆盖同名文件、关闭时还没写出，用自绘对话框确认，不用系统 `messagebox`。删除规则后 10 分钟内可撤销（只留在本次运行的内存里，到点撤销按钮消失，关掉窗口即清）。
 
@@ -135,7 +136,7 @@ python tools/make_samples.py
 
 **Word。** 遍历正文段落、表格（递归嵌套表格），以及每个 section 自己定义的页眉页脚（默认、首页、奇偶页）。命中如果跨了多个 run，占位符写在第一个涉及的 run 上，并保留这个 run 的格式；后面那些 run 里属于命中的文字删掉。`word/media/` 下的 `png` / `jpg` / `jpeg` 会脱敏后再写回同名文件。
 
-**PDF 文本。** 对每一页用 Presidio 看 `page.get_text()` 的文本，再用 `page.search_for()` 找矩形，然后 `add_redact_annot` 和 `apply_redactions` 把文字从内容流里删掉，不是只盖一个黑框。保存时使用 `garbage` 和 `clean`。
+**PDF 文本。** 对每一页用 Presidio 看 `page.get_text()` 的文本，再用 `page.search_for()` 找矩形，然后 `add_redact_annot` 和 `apply_redactions` 把文字从内容流里删掉，不是只盖一个黑框。写出前会清空文档属性（标题、作者、主题、关键词、创建者、制作者）和 XMP，并删除全部批注（含表单控件）、书签和嵌入附件。保存时使用 `garbage` 和 `clean`。命令行和窗口走同一个清理函数。
 
 **PDF 图片。** 对有 xref 的位图取出像素，走和独立图片一样的 OCR 与涂黑，再用 `page.replace_image` 写回。没有独立 xref 的内联图片替换不到。
 
@@ -193,11 +194,11 @@ pyinstaller --noconfirm --clean --distpath dist --workpath build/pyi doc-redacto
 TESSERACT_CMD=/path/to/tesseract PYTHONPATH=src pytest
 ```
 
-覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run）、PDF 文本删除、报告不含原文、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。
+覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run）、PDF 文本删除（含文档属性、XMP、批注、书签、表单、附件里不再留下原词）、报告不含原文、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。
 
 ## 限制
 
-- 文本框、脚注、批注不覆盖。
+- Word 的文本框、脚注、批注不覆盖。PDF 写出时会去掉文档属性、XMP、批注（含表单）、书签和嵌入附件。
 - PDF 里被拆开、写成矢量路径，或和 `get_text()` 对不上的词，`search_for` 可能找不到，文字就还在。
 - 图片只处理 `png` / `jpg` / `jpeg`。docx 里的 emf、wmf 等不处理。
 - PDF 里没有独立 xref 的内联图片可能无法写回。
