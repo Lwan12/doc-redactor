@@ -64,3 +64,37 @@ MuPDF 保存时会自己写上 `/Producer (MuPDF …)`。原来的制作者字�
 `collect_all("pymupdf")` 之后，用 `try/except` 包住 `collect_all("tkinterdnd2")`。收集成功就把 datas、binaries、hiddenimports 并进包；收集失败（没装，或 hook 报错）就跳过，spec 继续往下走。这是打包时可选收集。窗口运行时仍看 import 成不成功，决定能不能拖文件。
 
 两个 exe 还是同一个 `COLLECT` 收到 `dist/doc-redactor/`。没有改 `MERGE`，也没有改成 onefile。
+
+---
+
+## PR #4：按类别固定占位符
+
+命中的内容不再写成 `[REDACTED:类别]` 加编号，同一类的所有命中换成同一个固定占位符。
+
+默认表：
+
+| 类别 | 占位符 |
+|---|---|
+| 药名 | `[STUDY DRUG]` |
+| 申办方 | `[SPONSOR]` |
+| 项目号 | `[PROTOCOL]` |
+| NCT 试验登记号 | `[NCT ID]` |
+| 方案号清单、「字母加数字」 | `[PROTOCOL NO]` |
+| 邮箱 | `[EMAIL]` |
+| 手机号 | `[PHONE]` |
+| 其他规则 | `[REDACTED:名称]` |
+
+- **可改**：规则设置页里每条规则、词表有「替换成」；常用库添加时带上默认值。`rules.yaml` 的 `regex` 和 `wordlists` 条目都可写 `replacement` 字段。旧 yaml 没有该字段时走默认表，不报错。
+- **Word**：跨 run 命中写入占位符，保留首个 run 的格式。
+- **PDF**：先 `apply_redactions` 真删文字，再在被遮的框里写入占位符。放不下先缩字号，缩到最小仍放不下就截断显示。原文已经删掉，不会残留。
+- **图片**：仍然涂黑，不写占位符。
+- **不变**：`report.json` 和命中清单仍只有类别和次数；预览高亮、统计、取消勾选同源逻辑不变；结果页「替换后」预览显示的就是这些占位符。
+- **验证**：56 条 pytest 全过（含 tesseract 的图片测试）；对样例 docx、pdf、png 和含内嵌图的 docx 跑命令行，三个原词不残留，输出里有对应占位符；Actions 构建与非管理员运行验证为绿。
+
+限制：
+
+- PDF 框太小时占位符会缩小或截断。
+- 图片只涂黑，不写占位符。
+- Word 的文本框、脚注、批注仍不覆盖。
+- PDF 里文字搜不到的词（比如被拆开的）仍可能留着。
+- 结果页中间预览栏比上一版窄，长句折行较多。
