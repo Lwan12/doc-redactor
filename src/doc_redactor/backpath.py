@@ -44,6 +44,13 @@ class UncheckMemory:
 
 
 @dataclass(frozen=True)
+class ScanTicket:
+    """Generation captured when a scan starts. Callbacks carry this back."""
+
+    generation: int
+
+
+@dataclass(frozen=True)
 class LeaveDecision:
     """Shared by the step bar and the back buttons."""
 
@@ -200,6 +207,16 @@ def discard_scan_results(scans) -> list:
     return []
 
 
+def bump_generation(generation: int) -> int:
+    """Start and cancel both retire whatever ticket the previous scan holds."""
+    return generation + 1
+
+
+def is_current(ticket: ScanTicket, generation: int) -> bool:
+    """Progress and scan-done callbacks are live only for the current generation."""
+    return ticket.generation == generation
+
+
 def retain_editor_draft(draft: dict) -> dict:
     """Back and validation errors keep the examples and the test text."""
     return draft
@@ -253,6 +270,19 @@ def is_write_failure(scan, result) -> bool:
     if result.dest is not None and not result.error:
         return False
     return bool(result.error)
+
+
+def decide_written(written: bool, results) -> bool:
+    """Turn written on only when this attempt produced at least one file.
+
+    If every target failed, leave the flag unchanged. A first write stays off,
+    so the written state and close-without-prompt do not start. A later retry
+    that also fails does not clear an earlier success.
+    """
+    for item in results:
+        if getattr(item, "dest", None) is not None and not getattr(item, "error", None):
+            return True
+    return written
 
 
 def partial_banner(failures: list[tuple[str, str]]) -> str:
