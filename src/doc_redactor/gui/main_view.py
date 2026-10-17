@@ -157,12 +157,18 @@ class MainView:
         n = len(self.app.ruleset.enabled_rules())
         tk.Label(
             body,
-            text=f"已选 {n} 类。命中的内容会换成 [REDACTED:类别]；PDF 和图片会涂黑。",
+            text=(
+                f"已选 {n} 类。\n"
+                "命中的内容会换成该类的占位符\n"
+                "(可在规则设置里改)；\n"
+                "PDF 的占位符放不下会缩小或截断；\n"
+                "图片会涂黑。"
+            ),
             bg=BG_SURFACE,
             fg=INK2,
             font=fonts["small"],
-            wraplength=240,
             justify="left",
+            anchor="w",
         ).pack(anchor="w", pady=(12, 8))
         ttk.Button(body, text="规则设置…", command=self.app.show_rules, state=state).pack(anchor="w")
 

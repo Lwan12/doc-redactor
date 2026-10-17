@@ -116,7 +116,7 @@ def check_docx(path: Path) -> None:
         fail(f"missing {path.name}")
     text = docx_text(path)
     _reject_terms(path.name, text, FRAGMENTS)
-    if "[REDACTED:" not in text:
+    if "[PROTOCOL]" not in text and "[REDACTED:" not in text:
         fail(f"{path.name} has no redaction marker")
     if "fictizumab" not in text:
         fail(f"{path.name} lost the lowercase fictizumab that the sample keeps")
@@ -130,6 +130,8 @@ def check_pdf(path: Path) -> None:
     _reject_terms(path.name, text, FRAGMENTS)
     if "fictizumab stays" not in text:
         fail(f"{path.name} is missing the unredacted line 'fictizumab stays'")
+    if "[PROTOCOL]" not in text and "[REDACTED:" not in text:
+        fail(f"{path.name} has no redaction marker")
     print(f"ok {path.name}")
 
 

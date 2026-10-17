@@ -79,7 +79,7 @@ def _redact_paragraph(paragraph: Paragraph, engine: RedactionEngine) -> list[str
         if not hits:
             break
         hit = hits[-1]
-        if not _apply_hit(spans, hit):
+        if not _apply_hit(spans, hit, replacement=engine.label(hit.category)):
             break
         categories.append(hit.category)
     else:

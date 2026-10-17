@@ -57,6 +57,7 @@ class RegexRule:
     name: str
     pattern: str
     flags: int
+    replacement: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,10 +65,49 @@ class WordlistRule:
     category: str
     terms: list[str]
     case_sensitive: bool
+    replacement: str = ""
 
 
-def redaction_label(category: str) -> str:
+# Category names used by the common library and by example/old yaml files.
+DEFAULT_REPLACEMENTS = {
+    "DRUG": "[STUDY DRUG]",
+    "药名": "[STUDY DRUG]",
+    "SPONSOR": "[SPONSOR]",
+    "申办方": "[SPONSOR]",
+    "PROJECT_ID": "[PROTOCOL]",
+    "项目号": "[PROTOCOL]",
+    "NCT": "[NCT ID]",
+    "NCT 试验登记号": "[NCT ID]",
+    "方案号清单": "[PROTOCOL NO]",
+    "字母加数字": "[PROTOCOL NO]",
+    "EMAIL": "[EMAIL]",
+    "邮箱": "[EMAIL]",
+    "PHONE": "[PHONE]",
+    "手机号": "[PHONE]",
+    "手机号（中国大陆）": "[PHONE]",
+}
+
+
+def redaction_label(category: str, mapping: dict[str, str] | None = None) -> str:
+    if mapping:
+        custom = mapping.get(category)
+        if isinstance(custom, str) and custom.strip():
+            return custom
+    default = DEFAULT_REPLACEMENTS.get(category)
+    if default:
+        return default
     return f"[REDACTED:{category}]"
+
+
+def _replacements_from_rules(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for rule in regex_rules:
+        if rule.replacement.strip():
+            mapping[rule.name] = rule.replacement
+    for rule in wordlists:
+        if rule.replacement.strip():
+            mapping[rule.category] = rule.replacement
+    return mapping
 
 
 def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) -> "RedactionEngine":
@@ -119,12 +159,16 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
         supported_languages=["en"],
         context_aware_enhancer=_PassthroughEnhancer(),
     )
-    return RedactionEngine(analyzer)
+    return RedactionEngine(analyzer, _replacements_from_rules(regex_rules, wordlists))
 
 
 class RedactionEngine:
-    def __init__(self, analyzer: AnalyzerEngine) -> None:
+    def __init__(self, analyzer: AnalyzerEngine, replacements: dict[str, str] | None = None) -> None:
         self.analyzer = analyzer
+        self.replacements = dict(replacements or {})
+
+    def label(self, category: str) -> str:
+        return redaction_label(category, self.replacements)
 
     def find_hits(self, text: str) -> list[Hit]:
         if not text:

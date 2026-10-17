@@ -20,6 +20,7 @@ from doc_redactor.gui.theme import (
     PLACE,
     fit_label,
 )
+from doc_redactor.engine import redaction_label
 from doc_redactor.pattern_guess import (
     TEMPLATES,
     TestHit,
@@ -127,7 +128,7 @@ class RulesView:
         else:
             tree = ttk.Treeview(
                 pane,
-                columns=("on", "name", "kind", "ex", "act"),
+                columns=("on", "name", "kind", "ex", "repl", "act"),
                 show="headings",
                 selectmode="browse",
             )
@@ -135,12 +136,14 @@ class RulesView:
             tree.heading("name", text="规则名")
             tree.heading("kind", text="类型")
             tree.heading("ex", text="例子")
+            tree.heading("repl", text="替换成")
             tree.heading("act", text="操作")
-            tree.column("on", width=90, stretch=False)
-            tree.column("name", width=140, stretch=False)
-            tree.column("kind", width=60, stretch=False)
-            tree.column("ex", width=260, stretch=True)
-            tree.column("act", width=120, stretch=False)
+            tree.column("on", width=80, stretch=False)
+            tree.column("name", width=130, stretch=False)
+            tree.column("kind", width=50, stretch=False)
+            tree.column("ex", width=180, stretch=True)
+            tree.column("repl", width=130, stretch=False)
+            tree.column("act", width=110, stretch=False)
             tree.tag_configure("on", foreground="#008035")
             tree.tag_configure("off", foreground=MUTED)
             for i, rule in enumerate(self.app.ruleset.rules):
@@ -149,7 +152,14 @@ class RulesView:
                     "",
                     "end",
                     iid=str(i),
-                    values=(on_label, rule.name, rule.display_kind(), rule.display_example(), "修改   删除"),
+                    values=(
+                        on_label,
+                        rule.name,
+                        rule.display_kind(),
+                        rule.display_example(),
+                        rule.replacement_text(),
+                        "修改   删除",
+                    ),
                     tags=("on" if rule.enabled else "off",),
                 )
             tree.pack(fill="both", expand=True)
@@ -163,7 +173,7 @@ class RulesView:
                 if col == "#1":
                     self.app.toggle_rule(index, not self.app.ruleset.rules[index].enabled)
                     self.refresh()
-                elif col == "#5":
+                elif col == "#6":
                     x = event.x
                     bbox = tree.bbox(row, "act")
                     if bbox and x < bbox[0] + bbox[2] / 2:
@@ -193,7 +203,6 @@ class RulesView:
         fonts = self.app.fonts
         ev = self._eval()
         body = tk.Frame(self.frame, bg=BG_PAGE)
-        body.pack(fill="both", expand=True)
         cols = tk.Frame(body, bg=BG_PAGE)
         cols.pack(fill="both", expand=True, padx=12, pady=8)
         cols.columnconfigure(0, weight=1)
@@ -284,7 +293,7 @@ class RulesView:
         ).pack(anchor="w")
 
         repl_cell = row(left, "替换成")
-        repl = tk.StringVar(value=form.get("replacement") or f"[REDACTED:{form.get('name') or '规则名'}]")
+        repl = tk.StringVar(value=form.get("replacement") or redaction_label(form.get("name") or "规则名"))
         ttk.Entry(repl_cell, textvariable=repl, font=fonts["mono_font"]).pack(fill="x")
         repl.trace_add("write", lambda *_: self._set("replacement", repl.get(), refresh=False))
 
@@ -352,7 +361,7 @@ class RulesView:
         ).pack(fill="x", padx=10, pady=6)
 
         foot = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
-        foot.pack(fill="x")
+        foot.pack(side="bottom", fill="x")
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=8)
         why = (
@@ -371,6 +380,7 @@ class RulesView:
             command=self.app.save_rule,
             state=("normal" if ev.can_save else "disabled"),
         ).pack(side="right", padx=8)
+        body.pack(fill="both", expand=True)
 
     def _eval(self):
         form = self.app.rule_form
@@ -457,6 +467,9 @@ class RulesView:
             variable=cs,
             command=lambda: form.__setitem__("case_sensitive", cs.get()),
         ).pack(anchor="w")
+        repl_var = tk.StringVar(value=form.get("replacement") or redaction_label(form.get("name") or "规则名"))
+        ttk.Entry(labeled("替换成"), textvariable=repl_var, font=fonts["mono_font"]).pack(fill="x")
+        repl_var.trace_add("write", lambda *_: form.__setitem__("replacement", repl_var.get()))
         add_cell = labeled("加词")
         is_plan = (form.get("name") == PROTOCOL_LIST_NAME) or form.get("kind") == "plan"
         box = tk.Text(add_cell, height=5, relief="solid", bd=1, wrap="word")
@@ -649,10 +662,12 @@ class RulesView:
             else:
                 mark = "☑" if checked[i] else "☐"
             display = f"└ {item.name}" if item.is_subitem else item.name
+            placeholder = item.replacement or redaction_label(item.name)
             if item.is_subitem:
-                note = "⚠ 可能误伤"
+                note = f"⚠ 可能误伤 · {placeholder}"
             else:
-                note = "默认勾上" if item.default_checked else "同事自己开"
+                prefix = "默认勾上" if item.default_checked else "同事自己开"
+                note = f"{prefix} · {placeholder}"
             tree.insert(
                 "",
                 "end",

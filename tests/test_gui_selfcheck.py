@@ -78,6 +78,7 @@ def test_samples_and_extra_embedded_docx(tmp_path: Path):
             document = Document(str(dest))
             joined = "\n".join(p.text for p in document.paragraphs)
             assert "ABC-2026-001" not in joined
+            assert "[PROTOCOL]" in joined
         elif src.suffix.lower() == ".pdf":
             doc = pymupdf.open(dest)
             text = "\n".join(page.get_text() for page in doc)
@@ -85,6 +86,7 @@ def test_samples_and_extra_embedded_docx(tmp_path: Path):
             assert "ABC-2026-001" not in text
             assert "Acme Pharma" not in text
             assert "Fictizumab" not in text
+            assert "[PROTOCOL]" in text
         else:
             with Image.open(dest) as image:
                 folded = _compact(_ocr(image))

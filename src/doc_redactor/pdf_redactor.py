@@ -11,6 +11,8 @@ from PIL import Image
 from doc_redactor.engine import Hit, RedactionEngine, merge_counts
 from doc_redactor.image_redactor import redact_image
 
+MIN_PLACEHOLDER_SIZE = 4.0
+
 
 def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]:
     if src.resolve() == dest.resolve():
@@ -84,6 +86,7 @@ def _redact_page_text(page, engine: RedactionEngine) -> dict[str, int]:
     if not hits:
         return {}
     matched: list[Hit] = []
+    fills: list[tuple[object, str]] = []
     placed = False
     for hit in hits:
         rects = _search_hit(page, hit, textpage)
@@ -100,14 +103,57 @@ def _redact_page_text(page, engine: RedactionEngine) -> dict[str, int]:
         if not usable:
             continue
         for rect in usable:
-            # No replacement string: apply_redactions deletes the text.
-            page.add_redact_annot(rect)
+            page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
+        fills.append((max(usable, key=_rect_area), engine.label(hit.category)))
         matched.append(hit)
         placed = True
     if placed:
         # images=0 keeps image xobjects intact so the later OCR pass can see them.
         page.apply_redactions(images=0, graphics=0, text=0)
+        for rect, label in fills:
+            fill_placeholder(page, rect, label)
     return _category_counts(matched)
+
+
+def _rect_area(rect) -> float:
+    return float(rect.width) * float(rect.height)
+
+
+def fill_placeholder(page, rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> None:
+    """Write ``text`` into ``rect``, shrinking then truncating so it stays inside.
+
+    Original page text must already have been deleted (apply_redactions).
+    A box too small for even one glyph is left empty — never the source word.
+    """
+    box = pymupdf.Rect(rect)
+    if not text or box.is_empty or box.width <= 0 or box.height <= 0:
+        return
+    fontsize = min(11.0, max(min_size, float(box.height) * 0.9))
+    while fontsize >= min_size - 1e-6:
+        if _commit_textbox(page, box, text, fontsize):
+            return
+        fontsize -= 0.5
+    shown = text
+    while shown:
+        if _commit_textbox(page, box, shown, min_size):
+            return
+        shown = shown[:-1]
+
+
+def _commit_textbox(page, rect, text: str, fontsize: float) -> bool:
+    shape = page.new_shape()
+    leftover = shape.insert_textbox(
+        rect,
+        text,
+        fontsize=fontsize,
+        fontname="helv",
+        color=(0, 0, 0),
+        align=pymupdf.TEXT_ALIGN_LEFT,
+    )
+    if leftover < 0:
+        return False
+    shape.commit()
+    return True
 
 
 def _category_counts(hits: list[Hit]) -> dict[str, int]:

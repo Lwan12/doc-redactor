@@ -12,7 +12,7 @@ import regex as re
 import yaml
 
 from doc_redactor.config import parse_flags
-from doc_redactor.engine import RedactionEngine, RegexRule, WordlistRule, build_engine
+from doc_redactor.engine import RedactionEngine, RegexRule, WordlistRule, build_engine, redaction_label
 from doc_redactor.pattern_guess import (
     compile_pattern,
     guess_from_examples,
@@ -79,7 +79,7 @@ class Rule:
     def replacement_text(self) -> str:
         if self.replacement.strip():
             return self.replacement
-        return f"[REDACTED:{self.name}]"
+        return redaction_label(self.name)
 
     def compile_flags(self) -> int:
         flags = self.extra_flags
@@ -107,6 +107,7 @@ class LibraryItem:
     is_subitem: bool = False
     parent_name: str = ""
     hint: str = ""
+    replacement: str = ""
 
 
 @dataclass
@@ -162,6 +163,7 @@ def common_library() -> list[LibraryItem]:
             default_checked=True,
             placeholder="AAA-####-###",
             pattern=wrap_pattern(project.inner_pattern),
+            replacement=redaction_label("项目号"),
         ),
         LibraryItem(
             name=PROTOCOL_LIST_NAME,
@@ -169,6 +171,7 @@ def common_library() -> list[LibraryItem]:
             example="AAA0000、AA-K0000（粘贴或导入一列）",
             default_checked=True,
             terms=(),
+            replacement=redaction_label(PROTOCOL_LIST_NAME),
         ),
         LibraryItem(
             name=LETTER_DIGIT_NAME,
@@ -179,6 +182,7 @@ def common_library() -> list[LibraryItem]:
             is_subitem=True,
             parent_name=PROTOCOL_LIST_NAME,
             hint=HINT_LETTER_DIGIT,
+            replacement=redaction_label(LETTER_DIGIT_NAME),
         ),
         LibraryItem(
             name="申办方",
@@ -186,6 +190,7 @@ def common_library() -> list[LibraryItem]:
             example="Acme Pharma",
             default_checked=True,
             terms=("Acme Pharma",),
+            replacement=redaction_label("申办方"),
         ),
         LibraryItem(
             name="药名",
@@ -193,6 +198,7 @@ def common_library() -> list[LibraryItem]:
             example="Fictizumab",
             default_checked=True,
             terms=("Fictizumab",),
+            replacement=redaction_label("药名"),
         ),
         LibraryItem(
             name="NCT 试验登记号",
@@ -201,6 +207,7 @@ def common_library() -> list[LibraryItem]:
             default_checked=True,
             placeholder="NCT########",
             pattern=wrap_pattern(nct.inner_pattern),
+            replacement=redaction_label("NCT 试验登记号"),
         ),
         LibraryItem(
             name="邮箱",
@@ -208,6 +215,7 @@ def common_library() -> list[LibraryItem]:
             example="name@example.com",
             default_checked=False,
             pattern=wrap_pattern(email_inner),
+            replacement=redaction_label("邮箱"),
         ),
         LibraryItem(
             name="手机号（中国大陆）",
@@ -215,6 +223,7 @@ def common_library() -> list[LibraryItem]:
             example="138 0000 0000",
             default_checked=False,
             pattern=wrap_pattern(phone_inner),
+            replacement=redaction_label("手机号（中国大陆）"),
         ),
     ]
 
@@ -265,6 +274,7 @@ def find_word_hits(terms: list[str], text: str, *, case_sensitive: bool) -> list
 
 
 def library_item_to_rule(item: LibraryItem, *, enabled: bool = True) -> Rule:
+    replacement = item.replacement.strip() or redaction_label(item.name)
     if item.kind == KIND_WORDLIST:
         return Rule(
             name=item.name,
@@ -273,6 +283,7 @@ def library_item_to_rule(item: LibraryItem, *, enabled: bool = True) -> Rule:
             terms=list(item.terms),
             examples=[item.example] if item.example else [],
             case_sensitive=False,
+            replacement=replacement,
         )
     examples = [item.example] if item.example else []
     return Rule(
@@ -283,6 +294,7 @@ def library_item_to_rule(item: LibraryItem, *, enabled: bool = True) -> Rule:
         placeholder=item.placeholder,
         pattern=item.pattern,
         case_sensitive=False,
+        replacement=replacement,
     )
 
 
@@ -435,6 +447,7 @@ class RuleSet:
                         category=rule.name,
                         terms=list(rule.terms),
                         case_sensitive=rule.case_sensitive,
+                        replacement=rule.replacement,
                     )
                 )
                 continue
@@ -449,7 +462,12 @@ class RuleSet:
             if not pattern:
                 continue
             regex_rules.append(
-                RegexRule(name=rule.name, pattern=pattern, flags=rule.compile_flags())
+                RegexRule(
+                    name=rule.name,
+                    pattern=pattern,
+                    flags=rule.compile_flags(),
+                    replacement=rule.replacement,
+                )
             )
         return build_engine(regex_rules, wordlists)
 
@@ -569,6 +587,8 @@ def rules_to_mapping(rules: list[Rule]) -> dict:
             }
             if rule.source_path:
                 node["path"] = rule.source_path
+            if rule.replacement:
+                node["replacement"] = rule.replacement
             wordlist_nodes.append(node)
             continue
         flags = []
@@ -703,6 +723,7 @@ def _parse_wordlist_rule(node: object, index: int, base_dir: Path) -> Rule:
     else:
         terms = []
     enabled = bool(node.get("enabled", True))
+    replacement = node.get("replacement") if isinstance(node.get("replacement"), str) else ""
     return Rule(
         name=category.strip(),
         kind=KIND_WORDLIST,
@@ -711,6 +732,7 @@ def _parse_wordlist_rule(node: object, index: int, base_dir: Path) -> Rule:
         case_sensitive=case_sensitive,
         source_path=source_path,
         examples=[terms[0]] if terms else [],
+        replacement=replacement,
     )
 
 

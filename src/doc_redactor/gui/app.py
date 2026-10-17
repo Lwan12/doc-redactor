@@ -258,6 +258,7 @@ class App:
                 "case_sensitive": rule.case_sensitive,
                 "test": "",
                 "kind": "plan" if rule.name == PROTOCOL_LIST_NAME else "words",
+                "replacement": rule.replacement_text(),
             }
             self.rules_page = "words"
             self.refresh()
@@ -460,6 +461,7 @@ class App:
             enabled=True,
             terms=list(words),
             case_sensitive=bool(form.get("case_sensitive")),
+            replacement=form.get("replacement") or "",
         )
         if form.get("index") is None:
             self.ruleset.add(rule)
@@ -1075,6 +1077,7 @@ def _empty_word_form() -> dict:
         "case_sensitive": False,
         "test": "",
         "kind": "words",
+        "replacement": "",
     }
 
 

@@ -93,25 +93,26 @@ def test_docx_body_table_header_and_cross_run(tmp_path: Path):
     assert "acme pharma" not in combined
     assert "Fictizumab" not in combined
     assert "fictizumab" in combined
-    assert "[REDACTED:PROJECT_ID]" in combined
-    assert "[REDACTED:SPONSOR]" in combined
-    assert "[REDACTED:DRUG]" in combined
+    assert "[PROTOCOL]" in combined
+    assert "[SPONSOR]" in combined
+    assert "[STUDY DRUG]" in combined
+    assert "[REDACTED:PROJECT_ID]" not in combined
 
     split = document.paragraphs[3]
-    assert split.text == "ID [REDACTED:PROJECT_ID] end"
-    label = next(run for run in split.runs if run.text == "[REDACTED:PROJECT_ID]")
+    assert split.text == "ID [PROTOCOL] end"
+    label = next(run for run in split.runs if run.text == "[PROTOCOL]")
     assert label.bold
     assert any(run.text == "" for run in split.runs)
 
     nested_text = document.tables[0].cell(0, 0).tables[0].cell(0, 0).text
-    assert nested_text == "Drug [REDACTED:DRUG]"
-    assert document.tables[0].cell(0, 0).paragraphs[0].text == "Site [REDACTED:SPONSOR]"
-    assert "FIRST [REDACTED:PROJECT_ID]" in headers
-    assert "ODD [REDACTED:SPONSOR]" in headers
-    assert "EVEN [REDACTED:DRUG]" in headers
-    assert "FF [REDACTED:DRUG]" in headers
-    assert "DF [REDACTED:PROJECT_ID]" in headers
-    assert "EF [REDACTED:SPONSOR]" in headers
+    assert nested_text == "Drug [STUDY DRUG]"
+    assert document.tables[0].cell(0, 0).paragraphs[0].text == "Site [SPONSOR]"
+    assert "FIRST [PROTOCOL]" in headers
+    assert "ODD [SPONSOR]" in headers
+    assert "EVEN [STUDY DRUG]" in headers
+    assert "FF [STUDY DRUG]" in headers
+    assert "DF [PROTOCOL]" in headers
+    assert "EF [SPONSOR]" in headers
 
     assert counts == {"DRUG": 3, "PROJECT_ID": 4, "SPONSOR": 4}
     redact_path(source, outdir, load_rules(RULES))

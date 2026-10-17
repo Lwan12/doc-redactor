@@ -149,6 +149,14 @@ def test_common_library_seven_items_five_checked():
     assert plan.terms == []
     assert plan.enabled is True
     assert plan.display_example() == MSG_PLAN_EMPTY
+    labels = {rule.name: rule.replacement_text() for rule in rules.rules}
+    assert labels["项目号"] == "[PROTOCOL]"
+    assert labels[PROTOCOL_LIST_NAME] == "[PROTOCOL NO]"
+    assert labels["申办方"] == "[SPONSOR]"
+    assert labels["药名"] == "[STUDY DRUG]"
+    assert labels["NCT 试验登记号"] == "[NCT ID]"
+    sub_item = next(item for item in items if item.is_subitem)
+    assert sub_item.replacement == "[PROTOCOL NO]"
     added_again = rules.add_from_library(items, flags)
     assert added_again == 0
 

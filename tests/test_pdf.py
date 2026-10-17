@@ -37,6 +37,10 @@ def test_pdf_text_is_deleted_and_report_omits_source(tmp_path: Path):
     assert "Acme Pharma" not in text
     assert "Fictizumab" not in text
     assert "fictizumab stays" in text
+    assert "[PROTOCOL]" in text
+    assert "[SPONSOR]" in text
+    assert "[STUDY DRUG]" in text
+    assert text.count("[PROTOCOL]") == 2
     assert counts == {"DRUG": 1, "PROJECT_ID": 2, "SPONSOR": 1}
 
     redact_path(source, outdir, load_rules(RULES))

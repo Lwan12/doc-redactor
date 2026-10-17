@@ -23,6 +23,7 @@ from doc_redactor.gui.theme import (
     marker_for,
     status_style,
 )
+from doc_redactor.engine import redaction_label
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
 
 
@@ -483,10 +484,10 @@ class ResultView:
             shown = "▇" * min(len(hit.text), 8) if hide else hit.text
             return shown, ("off",)
         if self.app.preview_mode == "after":
-            if scan.kind == KIND_WORD:
-                label = replacements.get(hit.category) or f"[REDACTED:{hit.category}]"
-                return label, ("redacted", "cur" if cur else "")
-            return "█" * max(3, min(len(hit.text), 8)), ("black", "cur" if cur else "")
+            if scan.kind == KIND_IMAGE:
+                return "█" * max(3, min(len(hit.text), 8)), ("black", "cur" if cur else "")
+            label = replacements.get(hit.category) or redaction_label(hit.category)
+            return label.replace(" ", "\u00a0"), ("redacted", "cur" if cur else "")
         shown = "▇" * min(len(hit.text), 8) if hide else hit.text
         return shown, ("cur" if cur else "hit",)
 

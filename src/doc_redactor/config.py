@@ -86,7 +86,8 @@ def _parse_regex(node: object, index: int) -> RegexRule:
         flags = 0
     else:
         flags = parse_flags(node.get("flags"))
-    return RegexRule(name=name.strip(), pattern=pattern, flags=flags)
+    replacement = node.get("replacement") if isinstance(node.get("replacement"), str) else ""
+    return RegexRule(name=name.strip(), pattern=pattern, flags=flags, replacement=replacement)
 
 
 def _parse_wordlist(node: object, index: int, base_dir: Path) -> WordlistRule:
@@ -103,7 +104,13 @@ def _parse_wordlist(node: object, index: int, base_dir: Path) -> WordlistRule:
         if not isinstance(raw_terms, list):
             raise ValueError(f"词表 {category} 的 terms 必须是列表")
         terms = [str(item).strip() for item in raw_terms if str(item).strip()]
-        return WordlistRule(category=category.strip(), terms=terms, case_sensitive=case_sensitive)
+        replacement = node.get("replacement") if isinstance(node.get("replacement"), str) else ""
+        return WordlistRule(
+            category=category.strip(),
+            terms=terms,
+            case_sensitive=case_sensitive,
+            replacement=replacement,
+        )
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError(f"第 {index} 个词表缺少 path")
     list_path = Path(raw_path)
@@ -112,7 +119,13 @@ def _parse_wordlist(node: object, index: int, base_dir: Path) -> WordlistRule:
     if not list_path.is_file():
         raise FileNotFoundError(f"词表不存在: {list_path}")
     terms = _read_terms(list_path)
-    return WordlistRule(category=category.strip(), terms=terms, case_sensitive=case_sensitive)
+    replacement = node.get("replacement") if isinstance(node.get("replacement"), str) else ""
+    return WordlistRule(
+        category=category.strip(),
+        terms=terms,
+        case_sensitive=case_sensitive,
+        replacement=replacement,
+    )
 
 
 def _read_terms(path: Path) -> list[str]:
