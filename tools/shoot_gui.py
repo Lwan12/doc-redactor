@@ -70,6 +70,14 @@ STATES = [
     ("45-plan-dup", "plan-dup"),
     ("46-plan-deleted", "plan-deleted"),
     ("47-rule-letters", "rule-letters"),
+    ("49-res-backhint", "res-backhint"),
+    ("50-res-backwritten", "res-backwritten"),
+    ("51-main-rules", "main-rules"),
+    ("52-res-restore", "res-restore"),
+    ("53-main-rm", "main-rm"),
+    ("54-res-partial", "res-partial"),
+    ("55-main-rules-kept", "main-rules-kept"),
+    ("56-main-rules-changed", "main-rules-changed"),
 ]
 
 

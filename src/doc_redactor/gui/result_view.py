@@ -7,11 +7,22 @@ from tkinter import ttk
 
 from PIL import ImageTk
 
+from doc_redactor.backpath import (
+    MSG_CLEARED_TOP,
+    MSG_OUTPUT_HINT,
+    MSG_PARTIAL_BOTTOM,
+    MSG_PARTIAL_KEEP,
+    MSG_RESTORE,
+    MSG_WRITTEN_TOP,
+    partial_banner,
+    unchecked_count,
+    write_allowed,
+)
+from doc_redactor.gui.steps import StepBar
 from doc_redactor.gui.theme import (
     BG_INSET,
     BG_PAGE,
     BG_SURFACE,
-    BD,
     HL,
     HL2,
     INK,
@@ -43,9 +54,10 @@ class ResultView:
 
     def refresh(self) -> None:
         self._building = True
+        app = self.app
+        app.drop_step_tip()
         for child in self.frame.winfo_children():
             child.destroy()
-        app = self.app
         fonts = app.fonts
         scans = app.scans
         all_fail = bool(scans) and all(s.status == "fail" for s in scans)
@@ -59,8 +71,9 @@ class ResultView:
         head.pack(fill="x")
         row = tk.Frame(head, bg=BG_SURFACE)
         row.pack(fill="x", padx=12, pady=8)
-        _steps(row, 3, fonts)
-        tk.Label(row, text="结果预览，写出前可以逐处取消", bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="right")
+        title = "已写出" if app.written else "结果预览，写出前可以逐处取消"
+        tk.Label(row, text=title, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="right")
+        StepBar(row, app).frame.pack(side="left", fill="x", expand=True)
 
         if not all_fail:
             note = tk.Frame(self.frame, bg=BG_INSET)
@@ -79,6 +92,47 @@ class ResultView:
                 variable=hide,
                 command=lambda: self._set_hide(hide.get()),
             ).pack(side="right", padx=12)
+
+        failures = app.write_failure_rows()
+        if app.written and failures:
+            err = tk.Frame(self.frame, bg="#fcecec")
+            err.pack(fill="x")
+            tk.Label(
+                err,
+                text=partial_banner(failures),
+                bg="#fcecec",
+                fg="#cb2f39",
+                font=fonts["small"],
+                wraplength=920,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x", padx=12, pady=6)
+        if app.written:
+            ok = tk.Frame(self.frame, bg="#e8f5ed")
+            ok.pack(fill="x")
+            tk.Label(
+                ok,
+                text="✓ " + MSG_WRITTEN_TOP.format(n=app.written_file_count()),
+                bg="#e8f5ed",
+                fg="#008035",
+                font=fonts["small"],
+                wraplength=920,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x", padx=12, pady=6)
+        if app.note_cleared:
+            cleared = tk.Frame(self.frame, bg=BG_INSET)
+            cleared.pack(fill="x")
+            tk.Label(
+                cleared,
+                text="ⓘ " + MSG_CLEARED_TOP,
+                bg=BG_INSET,
+                fg=INK,
+                font=fonts["small"],
+                wraplength=920,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x", padx=12, pady=6)
 
         many = next((s for s in scans if s.too_many), None)
         if many is not None and not all_fail:
@@ -179,6 +233,10 @@ class ResultView:
             ).pack(side="left")
             return
         enabled, _counts = session_totals(scans, enabled_only=True)
+        if self.app.written:
+            for scan in scans:
+                if str(scan.path) in self.app.write_errors:
+                    enabled -= scan.enabled_count()
         total_hits = sum(len(s.hits) for s in scans)
         cancelled_n = total_hits - enabled
         n_hit = sum(1 for s in scans if s.status != "fail" and s.hits)
@@ -221,11 +279,11 @@ class ResultView:
         all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=("ok",))
         ids = [all_id]
         for scan in scans:
-            kind, label, tag = _scan_status(scan, self.app.written)
+            kind, _status_text, tag = _scan_status(scan, self.app)
             icon, text, _ = status_style(kind)
             count = "—" if scan.status == "fail" else scan.enabled_count()
             label = f"{icon} {scan.path.name}"
-            if kind == "many":
+            if kind in {"many", "nowrite"}:
                 label = f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
@@ -266,7 +324,7 @@ class ResultView:
                 "—",
                 "这批文件里没有找到要遮的内容",
                 "文件都正常打开了，但规则一处都没命中。下一步：检查规则里的例子是否和这批文件的写法一致，或换一类规则再扫。",
-                [("检查规则", self.app.show_rules, True), ("换一批文件", self.app.back_to_files, False)],
+                [("检查规则", self.app.leave_to_rules, True), ("换一批文件", self.app.back_to_files, False)],
                 fonts,
             )
             return
@@ -367,7 +425,7 @@ class ResultView:
                 "—",
                 "没有找到要遮的内容",
                 "所选规则在这个文件里都没有命中。可以检查规则里的例子，或看看这个文件是不是扫描件。",
-                [("去看规则", self.app.show_rules, False)],
+                [("去看规则", self.app.leave_to_rules, False)],
                 fonts,
             )
             return
@@ -617,6 +675,15 @@ class ResultView:
         )
         if self.app.selected_cat:
             ttk.Button(loc_head, text="看全部类别", command=lambda: self._clear_cat()).pack(side="right", padx=6)
+        off = unchecked_count(scans)
+        if off > 0 and not self.app.written:
+            restore = tk.Frame(parent, bg="#fdf1e5")
+            restore.pack(fill="x")
+            ttk.Button(
+                restore,
+                text=MSG_RESTORE.format(n=off),
+                command=self.app.restore_all_hits,
+            ).pack(anchor="w", padx=8, pady=4)
 
         loc = ttk.Treeview(parent, columns=("on", "loc", "cat", "text"), show="headings", selectmode="browse")
         loc.heading("on", text="" if self.app.written else "替换")
@@ -668,62 +735,86 @@ class ResultView:
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=8)
         enabled, _ = session_totals(scans, enabled_only=True)
-        n_files = sum(1 for s in scans if s.status != "fail" and s.enabled_count() > 0)
-        if self.app.written:
+        app = self.app
+        if app.written:
+            for scan in scans:
+                if str(scan.path) in app.write_errors:
+                    enabled -= scan.enabled_count()
+        n_files = app.written_file_count()
+        failures = app.write_failure_rows()
+        path = app.output_label()
+        buttons = tk.Frame(inner, bg=BG_SURFACE)
+        buttons.pack(side="right")
+        left = tk.Frame(inner, bg=BG_SURFACE)
+        left.pack(side="left", fill="x", expand=True)
+        if app.written and failures:
             tk.Label(
-                inner,
+                left,
+                text=f"✕ {MSG_PARTIAL_BOTTOM.format(n=n_files, m=len(failures))}  {MSG_PARTIAL_KEEP}",
+                bg=BG_SURFACE,
+                fg="#cb2f39",
+                font=fonts["small"],
+                anchor="w",
+            ).pack(fill="x")
+        elif app.written:
+            tk.Label(
+                left,
                 text=f"✓ 已写出 {n_files} 个脱敏文件，共替换 {enabled} 处",
                 bg=BG_SURFACE,
                 fg="#008035",
                 font=fonts["small"],
-            ).pack(side="left")
-            tk.Label(inner, text=self.app.output_var.get(), bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"]).pack(
-                side="left", padx=8
+                anchor="w",
+            ).pack(fill="x")
+        else:
+            tk.Label(
+                left,
+                text=MSG_OUTPUT_HINT,
+                bg=BG_SURFACE,
+                fg=INK2,
+                font=fonts["small"],
+                anchor="w",
+                wraplength=320,
+                justify="left",
+            ).pack(fill="x")
+        tk.Label(left, text=path, bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"], anchor="w").pack(fill="x")
+        if app.written and failures:
+            ttk.Button(buttons, text="打开输出文件夹", style="Primary.TButton", command=app.open_output).pack(side="right")
+            ttk.Button(buttons, text="重试失败的", command=lambda: app.write_files(retry=True)).pack(
+                side="right", padx=(0, 8)
             )
-            ttk.Button(inner, text="导出命中清单（只含类别和次数）", command=self.app.export_hit_list).pack(side="right", padx=8)
-            ttk.Button(inner, text="打开输出文件夹", style="Primary.TButton", command=self.app.open_output).pack(side="right")
+            ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
             return
-        left = tk.Frame(inner, bg=BG_SURFACE)
-        left.pack(side="left", fill="x", expand=True)
-        tk.Label(
-            left,
-            text="原文件不会被修改。确认无误后再写出，不想遮的位置取消勾选即可。",
-            bg=BG_SURFACE,
-            fg=INK2,
-            font=fonts["small"],
-            anchor="w",
-        ).pack(fill="x")
-        tk.Label(left, text=self.app.output_var.get(), bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"], anchor="w").pack(
-            fill="x"
-        )
-        ttk.Button(inner, text="返回", command=self.app.back_to_files).pack(side="right", padx=(8, 0))
-        ttk.Button(inner, text="导出命中清单", command=self.app.export_hit_list).pack(side="right", padx=8)
-        can_write = enabled > 0 and not all_fail
+        if app.written:
+            ttk.Button(buttons, text="打开输出文件夹", style="Primary.TButton", command=app.open_output).pack(side="right")
+            ttk.Button(buttons, text="导出命中清单", command=app.export_hit_list).pack(side="right", padx=(0, 8))
+            ttk.Button(buttons, text="改规则再出一份", command=app.back_to_rules).pack(side="right", padx=(0, 8))
+            ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
+            return
+        can_write = write_allowed(has_fresh_scans=bool(scans)) and enabled > 0 and not all_fail
         ttk.Button(
-            inner,
+            buttons,
             text=f"写出 {n_files} 个脱敏文件（替换 {enabled} 处）",
             style="Primary.TButton",
-            command=self.app.write_files,
+            command=app.write_files,
             state=("normal" if can_write else "disabled"),
         ).pack(side="right")
+        ttk.Button(
+            buttons,
+            text="导出命中清单",
+            command=app.export_hit_list,
+            state=("normal" if can_write else "disabled"),
+        ).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
 
 
-def _steps(parent, current, fonts) -> None:
-    names = ["选文件", "选规则", "开始扫描", "查看结果"]
-    for i, name in enumerate(names):
-        weight = fonts["bold"] if i == current else fonts["small"]
-        color = INK if i == current else INK2
-        tk.Label(parent, text=f"{i + 1} {name}", bg=BG_SURFACE, fg=color, font=weight).pack(side="left")
-        if i < len(names) - 1:
-            tk.Label(parent, text=" › ", bg=BG_SURFACE, fg=PLACE, font=fonts["small"]).pack(side="left")
-
-
-def _scan_status(scan: FileScan, written: bool) -> tuple[str, str, str]:
+def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
     if scan.status == "fail":
         return "fail", "失败", "bad"
+    if str(scan.path) in app.write_errors:
+        return "nowrite", "没写出", "bad"
     if scan.too_many:
         return "many", "命中偏多", "warn"
-    if written and scan.enabled_count() > 0:
+    if app.written and scan.enabled_count() > 0:
         return "written", "已写出", "ok"
     if not scan.hits:
         return "nohit", "无命中", "no"
