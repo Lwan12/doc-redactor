@@ -19,13 +19,17 @@ from doc_redactor.backpath import (
     STEP_RESULT,
     STEP_RULES,
     STEP_SCAN,
+    ScanTicket,
     allocate_batch_dir,
     apply_unchecks,
+    bump_generation,
     capture_unchecks,
     decide_close,
     decide_leave,
+    decide_written,
     discard_scan_results,
     hit_list_payload,
+    is_current,
     is_write_failure,
     merge_kept,
     protect_written,
@@ -137,6 +141,7 @@ class App:
         self.lib_checked = [item.default_checked for item in common_library()]
         self.import_preview = None
         self.cancel_event: Event | None = None
+        self.scan_generation = 0
         self.toast = None
         self._undo_job = None
         self._word_undo_job = None
@@ -701,6 +706,8 @@ class App:
         if self.output_error:
             self.refresh()
             return
+        self.scan_generation = bump_generation(self.scan_generation)
+        ticket = ScanTicket(self.scan_generation)
         self.running = True
         self.cancelled = False
         self.written = False
@@ -717,7 +724,9 @@ class App:
             def progress(index, _path, status):
                 mapped = {"running": "running", "ok": "scanned", "nohit": "scanned", "fail": "fail"}.get(status, status)
 
-                def apply():
+                def apply(index=index, mapped=mapped, ticket=ticket):
+                    if not is_current(ticket, self.scan_generation):
+                        return
                     if index < len(self.file_status):
                         self.file_status[index] = mapped
                     self.refresh()
@@ -725,11 +734,12 @@ class App:
                 self.root.after(0, apply)
 
             results = scan_paths(paths, engine, cancel=self.cancel_event, progress=progress)
-            self.root.after(0, lambda: self._scan_done(results))
+            self.root.after(0, lambda results=results, ticket=ticket: self._scan_done(results, ticket))
 
         Thread(target=worker, daemon=True).start()
 
     def cancel_scan(self) -> None:
+        self.scan_generation = bump_generation(self.scan_generation)
         if self.cancel_event is not None:
             self.cancel_event.set()
         self.running = False
@@ -741,7 +751,9 @@ class App:
         self.main_step = 1
         self.refresh()
 
-    def _scan_done(self, results: list[FileScan]) -> None:
+    def _scan_done(self, results: list[FileScan], ticket: ScanTicket) -> None:
+        if not is_current(ticket, self.scan_generation):
+            return
         if self.cancelled:
             self.scans = discard_scan_results(results)
             return
@@ -900,7 +912,7 @@ class App:
         self.kept_outputs = merge_kept(self.kept_outputs, new_paths)
         self.batch_dir = batch
         self.output_display = None
-        self.written = True
+        self.written = decide_written(self.written, results)
         self.refresh()
 
     def export_hit_list(self) -> None:

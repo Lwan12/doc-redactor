@@ -17,18 +17,22 @@ from doc_redactor.backpath import (
     MSG_KEPT,
     MSG_STALE,
     MSG_STALE_DROP,
+    ScanTicket,
     UncheckMemory,
     allocate_batch_dir,
     apply_unchecks,
     assert_not_source,
     back_prompt_body,
+    bump_generation,
     capture_unchecks,
     clear_file_list,
     decide_close,
     decide_leave,
+    decide_written,
     discard_scan_results,
     files_signature,
     hit_list_payload,
+    is_current,
     is_write_failure,
     merge_kept,
     protect_written,
@@ -41,7 +45,7 @@ from doc_redactor.backpath import (
     write_allowed,
 )
 from doc_redactor.engine import RegexRule, build_engine
-from doc_redactor.scan import FileScan, KIND_PDF, KIND_WORD, LocatedHit, scan_path, write_scans
+from doc_redactor.scan import FileScan, KIND_PDF, KIND_WORD, LocatedHit, WriteResult, scan_path, write_scans
 
 
 def _rule(name="项目号", *, enabled=True, pattern=r"ABC-\d{4}-\d{3}", replacement="", terms=None):
@@ -381,3 +385,59 @@ def test_empty_uncheck_memory_is_none_outcome():
     memory = UncheckMemory(signature="x", keys=())
     assert apply_unchecks([scan], memory, "x") == "none"
     assert apply_unchecks([scan], None, "x") == "none"
+
+
+def _write_result(name: str, *, dest: Path | None = None, error: str | None = None) -> WriteResult:
+    return WriteResult(path=Path(name), dest=dest, report=None, counts={}, error=error)
+
+
+def test_all_failed_writes_stay_unwritten_until_one_succeeds():
+    failed = (
+        _write_result("a.docx", error="输出文件夹里这个文件正被别的程序占用"),
+        _write_result("b.docx", error="没写出"),
+    )
+    partial = (
+        _write_result("a.docx", dest=Path("batch/a.redacted.docx")),
+        _write_result("b.docx", error="输出文件夹里这个文件正被别的程序占用"),
+    )
+    assert decide_written(False, failed) is False
+    assert decide_close(on_result=True, written=decide_written(False, failed), has_preview=True) is True
+    assert decide_written(False, partial) is True
+    assert decide_close(on_result=True, written=decide_written(False, partial), has_preview=True) is False
+    # A retry that fails again must not clear a file that already landed.
+    assert decide_written(True, failed) is True
+
+
+def test_cancel_then_rescan_drops_the_previous_generation():
+    generation = 0
+    generation = bump_generation(generation)
+    first = ScanTicket(generation)
+    generation = bump_generation(generation)  # cancel retires the in-flight scan
+    generation = bump_generation(generation)
+    second = ScanTicket(generation)
+
+    progress = []
+    adopted = None
+
+    def on_progress(ticket: ScanTicket, payload):
+        if not is_current(ticket, generation):
+            return
+        progress.append(payload)
+
+    def on_done(ticket: ScanTicket, payload):
+        nonlocal adopted
+        if not is_current(ticket, generation):
+            return
+        adopted = payload
+
+    on_progress(first, (0, "scanned"))
+    on_done(first, ["old-scan"])
+    assert progress == []
+    assert adopted is None
+    assert is_current(first, generation) is False
+
+    on_progress(second, (0, "scanned"))
+    on_done(second, ["new-scan"])
+    assert progress == [(0, "scanned")]
+    assert adopted == ["new-scan"]
+    assert is_current(second, generation) is True
