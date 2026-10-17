@@ -14,6 +14,28 @@ from threading import Event, Thread
 from tkinter import filedialog, ttk
 import tkinter as tk
 
+from doc_redactor.backpath import (
+    STEP_FILES,
+    STEP_RESULT,
+    STEP_RULES,
+    STEP_SCAN,
+    allocate_batch_dir,
+    apply_unchecks,
+    capture_unchecks,
+    decide_close,
+    decide_leave,
+    discard_scan_results,
+    hit_list_payload,
+    is_write_failure,
+    merge_kept,
+    protect_written,
+    retain_editor_draft,
+    session_signature,
+    step_clickable,
+    unchecked_count,
+    without_paths,
+    write_allowed,
+)
 from doc_redactor.gui.dialogs import confirm_dialog, show_toast
 from doc_redactor.gui.main_view import MainView
 from doc_redactor.gui.result_view import ResultView
@@ -40,7 +62,6 @@ from doc_redactor.scan import (
     conflicting_destinations,
     scan_paths,
     size_label,
-    write_report,
     write_scans,
 )
 
@@ -81,7 +102,22 @@ class App:
         self.files: list[Path] = []
         self.file_sizes: list[str] = []
         self.file_status: list[str] = []
-        self.output_var = tk.StringVar(value=str(_default_output()))
+        self.file_selected: set[str] = set()
+        self.main_step = 0
+        self.reached = 0
+        self.from_result = False
+        self.uncheck_memory = None
+        self.note_cleared = False
+        self.write_errors: dict[str, str] = {}
+        self.batch_dir: Path | None = None
+        self.kept_outputs: list[Path] = []
+        self.pin_step_tip = None
+        self.output_display: str | None = None
+        self._step_tip = None
+        self._step_tip_pinned = False
+        # Screenshots use a fictional drive letter so the picture does not show this machine.
+        shown_output = r"D:\脱敏输出" if shoot else str(_default_output())
+        self.output_var = tk.StringVar(value=shown_output)
         self.output_error: str | None = None
         self.running = False
         self.cancelled = False
@@ -112,10 +148,12 @@ class App:
         self.result_view = ResultView(self)
         self.rules_view = RulesView(self)
         self.show("main")
-        self._check_output()
+        if not shoot:
+            self._check_output()
 
     def show(self, name: str) -> None:
         self.screen = name
+        self.reached = max(self.reached, self.current_step())
         self.main_view.hide()
         self.result_view.hide()
         self.rules_view.hide()
@@ -125,6 +163,16 @@ class App:
             self.result_view.present()
         else:
             self.rules_view.present()
+
+    def drop_step_tip(self) -> None:
+        tip = getattr(self, "_step_tip", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+            self._step_tip = None
+        self._step_tip_pinned = False
 
     def refresh(self) -> None:
         if getattr(self, "_refreshing", False):
@@ -170,6 +218,130 @@ class App:
         self.cancelled = False
         self.refresh()
 
+    def toggle_file_selected(self, path: Path) -> None:
+        key = str(path)
+        if key in self.file_selected:
+            self.file_selected.remove(key)
+        else:
+            self.file_selected.add(key)
+        self.refresh()
+
+    def remove_paths(self, drop: set[str]) -> None:
+        self.files, self.file_sizes, self.file_status = without_paths(
+            self.files, self.file_sizes, self.file_status, drop
+        )
+        self.file_selected -= drop
+        self.refresh()
+
+    def remove_selected_files(self) -> None:
+        if self.file_selected:
+            self.remove_paths(set(self.file_selected))
+
+    def go_rules_step(self) -> None:
+        if not self.files or self.output_error:
+            return
+        self.main_step = 1
+        self.cancelled = False
+        self.show("main")
+
+    def current_step(self) -> int:
+        if self.screen == "result":
+            return STEP_RESULT
+        if self.running:
+            return STEP_SCAN
+        if self.cancelled and self.main_step != 0:
+            return STEP_SCAN
+        if self.main_step == 1:
+            return STEP_RULES
+        return STEP_FILES
+
+    def on_step(self, index: int) -> None:
+        if not step_clickable(
+            target=index, current=self.current_step(), reached=self.reached, running=self.running
+        ):
+            return
+        self.request_leave(index)
+
+    def signature_matches_memory(self) -> bool:
+        if self.uncheck_memory is None:
+            return True
+        return session_signature(self.files, self.ruleset.rules) == self.uncheck_memory.signature
+
+    def remembered_unchecks(self) -> int:
+        if self.uncheck_memory is None:
+            return 0
+        return len(self.uncheck_memory.keys)
+
+    def output_label(self) -> str:
+        if self.output_display:
+            return self.output_display
+        if self.batch_dir is not None:
+            return str(self.batch_dir)
+        parent = Path(self.output_var.get().strip() or ".")
+        return str(allocate_batch_dir(parent, datetime.now()))
+
+    def request_leave(self, target) -> bool:
+        """Step bar and back buttons share this. Stay leaves the preview alone."""
+        decision = decide_leave(
+            on_result=self.screen == "result",
+            written=self.written,
+            has_preview=bool(self.scans),
+            unchecked=unchecked_count(self.scans),
+        )
+        if decision.prompt:
+            choice = confirm_dialog(
+                self.root,
+                decision.title,
+                decision.body,
+                [
+                    (decision.stay, "stay", False),
+                    (decision.confirm, "leave", True),
+                ],
+            )
+            if choice != "leave":
+                return False
+        if decision.clear_preview:
+            self._clear_preview()
+        self._go(target)
+        return True
+
+    def _clear_preview(self) -> None:
+        signature = session_signature(self.files, self.ruleset.rules)
+        self.uncheck_memory = capture_unchecks(self.scans, signature)
+        self.scans = []
+        self.from_result = True
+        self.note_cleared = False
+        self.written = False
+        self.write_errors = {}
+        self.file_status = ["pending"] * len(self.files)
+        self.kept_outputs = protect_written(self.kept_outputs)
+
+    def _go(self, target) -> None:
+        if target == STEP_FILES:
+            self.cancelled = False
+            self.main_step = 0
+            self.show("main")
+        elif target == STEP_RULES:
+            self.cancelled = False
+            self.main_step = 1
+            self.show("main")
+        elif target == STEP_SCAN:
+            self.cancelled = False
+            self.main_step = 1
+            self.show("main")
+            self.start_scan()
+        elif target == "rules":
+            self.cancelled = False
+            self.main_step = 1
+            self.rules_page = "list"
+            self.show("rules")
+
+    def leave_to_rules(self) -> None:
+        if self.screen == "result":
+            self.request_leave("rules")
+        else:
+            self.show_rules()
+
     def browse_files(self) -> None:
         selected = filedialog.askopenfilenames(title="选择文件", filetypes=SUPPORTED)
         if selected:
@@ -187,9 +359,8 @@ class App:
         self.add_files(found)
 
     def clear_files(self) -> None:
-        self.files = []
-        self.file_sizes = []
-        self.file_status = []
+        self.files, self.file_sizes, self.file_status = [], [], []
+        self.file_selected = set()
         self.refresh()
 
     def browse_output(self) -> None:
@@ -225,13 +396,13 @@ class App:
 
     def rules_back(self) -> None:
         if self.rules_page != "list":
+            self.rule_form = retain_editor_draft(self.rule_form)
+            self.word_form = retain_editor_draft(self.word_form)
             self.rules_page = "list"
             self.refresh()
             return
-        if self.scans:
-            self.show("result")
-        else:
-            self.show("main")
+        self.main_step = 1 if self.files else 0
+        self.show("main")
 
     def new_rule(self) -> None:
         self.rule_form = _empty_rule_form()
@@ -330,6 +501,7 @@ class App:
         self.refresh()
 
     def cancel_rule_edit(self) -> None:
+        self.rule_form = retain_editor_draft(self.rule_form)
         self.rules_page = "list"
         self.refresh()
 
@@ -532,8 +704,11 @@ class App:
         self.running = True
         self.cancelled = False
         self.written = False
+        self.write_errors = {}
+        self.note_cleared = False
+        self.main_step = 1
         self.file_status = ["pending"] * len(self.files)
-        self.refresh()
+        self.show("main")
         self.cancel_event = Event()
         engine = self.ruleset.to_engine()
         paths = list(self.files)
@@ -559,15 +734,23 @@ class App:
             self.cancel_event.set()
         self.running = False
         self.cancelled = True
+        self.scans = discard_scan_results(self.scans)
         self.file_status = [
             "cancelled" if s in {"pending", "running"} else s for s in self.file_status
         ]
+        self.main_step = 1
         self.refresh()
 
     def _scan_done(self, results: list[FileScan]) -> None:
         if self.cancelled:
+            self.scans = discard_scan_results(results)
             return
         self.running = False
+        signature = session_signature(self.files, self.ruleset.rules)
+        outcome = apply_unchecks(results, self.uncheck_memory, signature)
+        self.note_cleared = outcome == "cleared"
+        self.uncheck_memory = None
+        self.from_result = False
         self.scans = results
         self.file_status = [
             "fail" if s.status == "fail" else ("scanned" if s.status != "cancelled" else "cancelled") for s in results
@@ -579,10 +762,15 @@ class App:
         self.current_hit = None
         self.pdf_page = 0
         self.written = False
+        self.write_errors = {}
+        self.batch_dir = None
         self.show("result")
 
     def back_to_files(self) -> None:
-        self.show("main")
+        self.request_leave(STEP_FILES)
+
+    def back_to_rules(self) -> None:
+        self.request_leave(STEP_RULES)
 
     def category_order(self) -> list[str]:
         names = []
@@ -633,38 +821,85 @@ class App:
         self.selected = "all" if self.scans else 0
         self.refresh()
 
-    def write_files(self) -> None:
-        outdir = Path(self.output_var.get().strip())
-        conflicts = conflicting_destinations(self.scans, outdir)
-        overwrite = True
+    def written_file_count(self) -> int:
+        total = 0
+        for scan in self.scans:
+            if scan.status == "fail" or str(scan.path) in self.write_errors:
+                continue
+            if scan.enabled_count() > 0:
+                total += 1
+        return total
+
+    def write_failure_rows(self) -> list[tuple[str, str]]:
+        rows = []
+        for scan in self.scans:
+            reason = self.write_errors.get(str(scan.path))
+            if reason:
+                rows.append((scan.path.name, reason))
+        return rows
+
+    def restore_all_hits(self) -> None:
+        if self.written:
+            return
+        for scan in self.scans:
+            for hit in scan.hits:
+                hit.enabled = True
+        self.refresh()
+
+    def write_files(self, *, retry: bool = False) -> None:
+        """Each write gets a new timestamp folder. Retry stays in that folder and skips successes."""
+        if not write_allowed(has_fresh_scans=bool(self.scans)) or self.running:
+            return
+        if retry:
+            if not self.write_errors or self.batch_dir is None:
+                return
+            batch = self.batch_dir
+            targets = [scan for scan in self.scans if str(scan.path) in self.write_errors]
+        else:
+            parent = Path(self.output_var.get().strip() or ".")
+            batch = allocate_batch_dir(parent, datetime.now())
+            targets = list(self.scans)
+        if not targets:
+            return
+        conflicts = conflicting_destinations(targets, batch)
+        overwrite = False
         sequence = False
         if conflicts:
-            names = "\n".join(p.name for p in conflicts)
+            names = "\n".join(path.name for path in conflicts)
             choice = confirm_dialog(
                 self.root,
                 "输出文件夹里已经有同名文件",
                 f"输出文件夹里已有 {len(conflicts)} 个同名文件：\n{names}\n写出会覆盖它们，覆盖后无法恢复。",
                 [
                     ("取消，先不写出", "cancel", False),
-                    ("都另存，名字后加序号", "seq", False),
-                    (f"覆盖这 {len(conflicts)} 个", "over", True),
+                    ("都另存，名字后加序号", "seq", True),
+                    (f"覆盖这 {len(conflicts)} 个", "over", False),
                 ],
             )
             if choice in (None, "cancel"):
                 return
-            if choice == "seq":
-                sequence = True
-                overwrite = False
-            else:
-                overwrite = True
-        write_scans(
-            self.scans,
-            outdir,
+            sequence = choice == "seq"
+            overwrite = choice == "over"
+        results = write_scans(
+            targets,
+            batch,
             replacements=self.ruleset.replacements(),
             overwrite=overwrite,
             sequence=sequence,
             engine=self.ruleset.to_engine(),
         )
+        new_paths = []
+        for scan, item in zip(targets, results):
+            key = str(scan.path)
+            if is_write_failure(scan, item):
+                self.write_errors[key] = item.error or "没写出"
+            else:
+                self.write_errors.pop(key, None)
+                if item.dest is not None:
+                    new_paths.append(item.dest)
+        self.kept_outputs = merge_kept(self.kept_outputs, new_paths)
+        self.batch_dir = batch
+        self.output_display = None
         self.written = True
         self.refresh()
 
@@ -676,17 +911,11 @@ class App:
         )
         if not path:
             return
-        payload = {}
-        for scan in self.scans:
-            if scan.status == "fail":
-                continue
-            counts = scan.category_counts(enabled_only=True)
-            if counts:
-                payload[scan.path.name] = counts
+        payload = hit_list_payload(self.scans)
         Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def open_output(self) -> None:
-        path = Path(self.output_var.get().strip())
+        path = self.batch_dir if self.batch_dir is not None else Path(self.output_var.get().strip())
         path.mkdir(parents=True, exist_ok=True)
         if sys.platform.startswith("win"):
             os.startfile(path)  # type: ignore[attr-defined]
@@ -696,7 +925,7 @@ class App:
             subprocess.Popen(["xdg-open", str(path)])
 
     def on_close(self) -> None:
-        if self.scans and not self.written:
+        if decide_close(on_result=self.screen == "result", written=self.written, has_preview=bool(self.scans)):
             choice = confirm_dialog(
                 self.root,
                 "脱敏文件还没有写出",
@@ -704,8 +933,6 @@ class App:
                 [("回去写出", "back", False), ("仍然关闭", "close", True)],
             )
             if choice != "close":
-                if self.screen != "result":
-                    self.show("result")
                 return
         self.scans = []
         self.root.destroy()
@@ -742,6 +969,19 @@ class App:
         self.rule_form = _empty_rule_form()
         self.word_form = _empty_word_form()
         self.import_preview = None
+        self.main_step = 0
+        self.reached = 0
+        self.from_result = False
+        self.uncheck_memory = None
+        self.note_cleared = False
+        self.write_errors = {}
+        self.batch_dir = None
+        self.kept_outputs = []
+        self.pin_step_tip = None
+        self.output_display = None
+        self.file_selected = set()
+        self.output_var.set(r"D:\脱敏输出")
+        self.drop_step_tip()
         self.files = demo_files()
         self.file_sizes = ["86 KB", "1.2 MB", "2.4 MB", "640 KB", "41 KB"]
         self.file_status = ["pending"] * 5
@@ -772,12 +1012,34 @@ class App:
             return
         if key == "main-running":
             self.running = True
+            self.main_step = 1
             self.file_status = ["scanned", "scanned", "running", "pending", "pending"]
             self.show("main")
             return
         if key == "main-cancelled":
             self.cancelled = True
+            self.main_step = 1
             self.file_status = ["scanned", "scanned", "cancelled", "cancelled", "cancelled"]
+            self.show("main")
+            return
+        if key == "main-rules":
+            self.main_step = 1
+            self.pin_step_tip = 0
+            self.show("main")
+            return
+        if key == "main-rm":
+            self.file_selected = {str(self.files[1]), str(self.files[3])}
+            self.show("main")
+            return
+        if key in {"main-rules-kept", "main-rules-changed"}:
+            from doc_redactor.backpath import UncheckMemory, session_signature
+
+            self.main_step = 1
+            self.from_result = True
+            signature = session_signature(self.files, self.ruleset.rules)
+            if key == "main-rules-changed":
+                signature = "changed"
+            self.uncheck_memory = UncheckMemory(signature=signature, keys=(("kept-1",), ("kept-2",)))
             self.show("main")
             return
 
@@ -788,6 +1050,7 @@ class App:
         self.selected = 0
 
         if key.startswith("res-"):
+            self.output_display = r"D:\脱敏输出\20261017-2140"
             if key == "res-word":
                 self.selected = 0
             elif key == "res-word-after":
@@ -830,6 +1093,32 @@ class App:
             elif key == "res-written":
                 self.selected = 0
                 self.written = True
+            elif key == "res-backhint":
+                self.selected = 0
+                if self.scans[0].hits:
+                    self.scans[0].hits[3].enabled = False
+                self.show("result")
+                from doc_redactor.backpath import back_prompt_body
+
+                self._overlay(
+                    "返回修改？",
+                    back_prompt_body(unchecked_count(self.scans)),
+                    [("留在这里", False), ("返回修改", True)],
+                )
+                return
+            elif key == "res-backwritten":
+                self.selected = 0
+                self.written = True
+            elif key == "res-restore":
+                self.selected = 0
+                self.selected_cat = "项目号"
+                if len(self.scans[0].hits) > 3:
+                    self.scans[0].hits[1].enabled = False
+                    self.scans[0].hits[3].enabled = False
+            elif key == "res-partial":
+                self.selected = 2
+                self.written = True
+                self.write_errors[str(self.scans[2].path)] = "输出文件夹里这个文件正被别的程序占用"
             elif key == "res-many":
                 self.selected = 1
             elif key == "res-conflict":
@@ -837,8 +1126,11 @@ class App:
                 self.show("result")
                 self._overlay(
                     "输出文件夹里已经有同名文件",
-                    "继续写出的话，这 2 个文件会被盖掉：访视记录_受试者012.docx、入组统计报告_V2.pdf。原文件还在，被盖掉的是以前写出的脱敏文件。",
-                    [("取消", False), ("都另存加序号", False), ("覆盖这 2 个", True)],
+                    "输出文件夹里已有 2 个同名文件：\n"
+                    "访视记录_受试者012.redacted.docx\n"
+                    "入组统计报告_V2.redacted.pdf\n"
+                    "写出会覆盖它们，覆盖后无法恢复。",
+                    [("取消，先不写出", False), ("都另存，名字后加序号", True), ("覆盖这 2 个", False)],
                 )
                 return
             self.show("result")
@@ -1082,8 +1374,8 @@ def _empty_word_form() -> dict:
 
 
 def _default_output() -> Path:
-    stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    return Path.home() / "脱敏输出" / stamp
+    """Parent folder only. Each write adds its own YYYYMMDD-HHMM directory."""
+    return Path.home() / "脱敏输出"
 
 
 def run(*, shoot: bool = False) -> None:

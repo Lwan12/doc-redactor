@@ -74,6 +74,7 @@ def setup_style(root: tk.Tk) -> dict:
     font_title = tkfont.Font(root=root, family=sans, size=12, weight="bold")
     font_mono = tkfont.Font(root=root, family=mono, size=10)
     font_mono_big = tkfont.Font(root=root, family=mono, size=15, weight="bold")
+    font_link = tkfont.Font(root=root, family=sans, size=10, underline=True)
     root.option_add("*Font", font_ui)
     root.configure(bg=BG_PAGE)
 
@@ -157,6 +158,7 @@ def setup_style(root: tk.Tk) -> dict:
         "title": font_title,
         "mono_font": font_mono,
         "mono_big": font_mono_big,
+        "link": font_link,
     }
 
 
@@ -172,6 +174,7 @@ def status_style(kind: str) -> tuple[str, str, str]:
         "fail": ("✕", "失败", BAD),
         "cancelled": ("⊘", "已取消", WARN),
         "many": ("⚠", "命中偏多", WARN),
+        "nowrite": ("✕", "没写出", BAD),
     }
     return mapping.get(kind, ("○", kind, INK2))
 

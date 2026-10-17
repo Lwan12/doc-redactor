@@ -47,7 +47,7 @@ def confirm_dialog(
     inner.pack(fill="x", padx=14, pady=8)
     spacer = ttk.Frame(inner)
     spacer.pack(side="left", expand=True, fill="x")
-    for label, value, primary in buttons:
+    for label, value, primary in reversed(buttons):
         style = "Primary.TButton" if primary else "TButton"
         ttk.Button(inner, text=label, style=style, command=lambda v=value: finish(v)).pack(side="right", padx=(8, 0))
 

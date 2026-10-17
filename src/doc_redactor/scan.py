@@ -278,6 +278,8 @@ def write_scan(
     replacements: dict[str, str] | None = None,
     engine: RedactionEngine | None = None,
 ) -> dict[str, int]:
+    if Path(dest).resolve() == Path(scan.path).resolve():
+        raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
     mapping = replacements or {}
 
     def label(category: str) -> str:
