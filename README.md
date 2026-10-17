@@ -1,6 +1,6 @@
 # doc-redactor
 
-离线脱敏小工具。它按你自己的规则，处理 Word（`.docx`）、PDF，以及 `png` / `jpg` / `jpeg`。正文、表格（含嵌套表格）、页眉页脚里的命中会被换成 `[REDACTED:类别]`；PDF 文本层里能定位到的命中会被真正删掉；图片里的命中用黑块盖住。
+离线脱敏小工具。它按你自己的规则，处理 Word（`.docx`）、PDF，以及 `png` / `jpg` / `jpeg`。正文、表格（含嵌套表格）、页眉页脚里的命中会换成该类的固定占位符（同一类不编号，例如药名一律 `[STUDY DRUG]`）；PDF 文本层里能定位到的命中会先真正删掉，再在原位置写入同一个占位符（放不下会缩小或截断）；图片里的命中用黑块盖住。
 
 规则、词表和 `samples/` 里只有虚构数据，例如项目号 `ABC-2026-001`、申办方 `Acme Pharma`、药名 `Fictizumab`。不要把真实项目号、申办方或药名写进仓库。
 
@@ -76,17 +76,21 @@ regex:
   - name: PROJECT_ID
     pattern: '\bABC-\d{4}-\d{3}\b'
     flags: ""
+    replacement: "[PROTOCOL]"
 wordlists:
   - path: wordlists/sponsors.example.txt
     case_sensitive: false
     category: SPONSOR
+    replacement: "[SPONSOR]"
   - path: wordlists/drugs.example.csv
     case_sensitive: true
     category: DRUG
+    replacement: "[STUDY DRUG]"
 ```
 
-- 下面的键名只出现在规则文件里。`regex` 可增可删。每条有 `name`、`pattern`、`flags`。`name` 就是报告里的类别。`flags` 可以省略，也可以写成 `IGNORECASE`，或用 `|` / 列表组合 `MULTILINE`、`DOTALL`。
-- `wordlists` 可增可删。每条有 `path`、`case_sensitive`、`category`。`case_sensitive: false` 时忽略大小写。
+- 下面的键名只出现在规则文件里。`regex` 可增可删。每条有 `name`、`pattern`、`flags`，以及可选的 `replacement`。`name` 就是报告里的类别。`flags` 可以省略，也可以写成 `IGNORECASE`，或用 `|` / 列表组合 `MULTILINE`、`DOTALL`。
+- `wordlists` 可增可删。每条有 `path`、`case_sensitive`、`category`，以及可选的 `replacement`。`case_sensitive: false` 时忽略大小写。
+- `replacement` 是写入文件的占位符。同一类所有命中都换成这一串，不编号。缺省（旧文件没有这个字段也可以）按类别走默认表：`PROJECT_ID` → `[PROTOCOL]`，`SPONSOR` → `[SPONSOR]`，`DRUG` → `[STUDY DRUG]`，`NCT` → `[NCT ID]`，方案号清单和「字母加数字」→ `[PROTOCOL NO]`，邮箱 → `[EMAIL]`，手机号 → `[PHONE]`。其它类别 → `[REDACTED:类别]`。
 - 词表一行一个。空行忽略。`.csv` 取第一列，不要表头。
 - 相对路径相对于规则文件所在目录，不相对于当前工作目录。
 
@@ -119,7 +123,7 @@ python -m doc_redactor.gui
 - 「开始扫描」先在内存里找出命中位置，不改原文件。结果页高亮原文（可改「替换后」），按类别汇总，每处可取消勾选。取消后顶部总数、文件替换数、类别个数、位置清单和主按钮上的数字一起变。
 - 原文只在窗口里临时显示，不会写入任何文件。勾「隐藏原文，只看位置」后，预览和清单里的原文都换成 ▇。
 - 「导出命中清单」写的是每个文件名对应的「类别 → 次数」。清单含文件名，不含原文。文件名本身敏感时请自行注意。
-- 确认后写出 `<原名>.redacted.<ext>` 和只含类别次数的 `report.json`。Word 默认换成 `[REDACTED:类别]`；PDF 用 `apply_redactions` 删掉文字；图片涂黑。
+- 确认后写出 `<原名>.redacted.<ext>` 和只含类别次数的 `report.json`。命中换成该类的占位符（可在规则设置里改）；PDF 的占位符放不下会缩小或截断；图片涂黑。
 - 覆盖同名文件、关闭时还没写出，用自绘对话框确认，不用系统 `messagebox`。删除规则后 10 分钟内可撤销（只留在本次运行的内存里，到点撤销按钮消失，关掉窗口即清）。
 
 Linux 上如果提示没有 tkinter，需要带 Tcl/Tk 的 Python（常见包名 `python3-tk`）。Windows 免安装包会尽量带上 `tkinterdnd2`；如果打包时没收集到，窗口里会说明只能用「选择文件…」。
@@ -136,7 +140,7 @@ python tools/make_samples.py
 
 **Word。** 遍历正文段落、表格（递归嵌套表格），以及每个 section 自己定义的页眉页脚（默认、首页、奇偶页）。命中如果跨了多个 run，占位符写在第一个涉及的 run 上，并保留这个 run 的格式；后面那些 run 里属于命中的文字删掉。`word/media/` 下的 `png` / `jpg` / `jpeg` 会脱敏后再写回同名文件。
 
-**PDF 文本。** 对每一页用 Presidio 看 `page.get_text()` 的文本，再用 `page.search_for()` 找矩形，然后 `add_redact_annot` 和 `apply_redactions` 把文字从内容流里删掉，不是只盖一个黑框。写出前会清空文档属性（标题、作者、主题、关键词、创建者、制作者）和 XMP，并删除全部批注（含表单控件）、书签和嵌入附件。保存时使用 `garbage` 和 `clean`。命令行和窗口走同一个清理函数。
+**PDF 文本。** 对每一页用 Presidio 看 `page.get_text()` 的文本，再用 `page.search_for()` 找矩形，然后 `add_redact_annot` 和 `apply_redactions` 把文字从内容流里删掉，不是只盖一个黑框。删完后在原来的框里写入该类占位符；框太窄会自动缩小字号，缩到最小仍放不下就截断，不会留下原文。写出前会清空文档属性（标题、作者、主题、关键词、创建者、制作者）和 XMP，并删除全部批注（含表单控件）、书签和嵌入附件。保存时使用 `garbage` 和 `clean`。命令行和窗口走同一个清理函数。
 
 **PDF 图片。** 对有 xref 的位图取出像素，走和独立图片一样的 OCR 与涂黑，再用 `page.replace_image` 写回。没有独立 xref 的内联图片替换不到。
 
@@ -194,7 +198,7 @@ pyinstaller --noconfirm --clean --distpath dist --workpath build/pyi doc-redacto
 TESSERACT_CMD=/path/to/tesseract PYTHONPATH=src pytest
 ```
 
-覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run）、PDF 文本删除（含文档属性、XMP、批注、书签、表单、附件里不再留下原词）、报告不含原文、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。
+覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run）、PDF 文本删除（含文档属性、XMP、批注、书签、表单、附件里不再留下原词）并写入占位符（放不下会缩小或截断）、报告不含原文也不含占位符、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分、无 replacement 字段走默认表）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。同一类多处命中写成同一个占位符，不编号。
 
 ## 限制
 

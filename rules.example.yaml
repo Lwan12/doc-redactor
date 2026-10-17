@@ -1,12 +1,16 @@
 # 虚构规则。项目号、申办方和药名都不是真实数据。
+# replacement 可省略，缺省按类别走默认占位符。
 regex:
   - name: PROJECT_ID
     pattern: '\bABC-\d{4}-\d{3}\b'
     flags: ""
+    replacement: "[PROTOCOL]"
 wordlists:
   - path: wordlists/sponsors.example.txt
     case_sensitive: false
     category: SPONSOR
+    replacement: "[SPONSOR]"
   - path: wordlists/drugs.example.csv
     case_sensitive: true
     category: DRUG
+    replacement: "[STUDY DRUG]"

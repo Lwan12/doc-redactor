@@ -20,7 +20,7 @@ from doc_redactor.image_redactor import (
     is_raster_suffix,
     paint_image_boxes,
 )
-from doc_redactor.pdf_redactor import clear_pdf_hidden, find_hit_rects
+from doc_redactor.pdf_redactor import clear_pdf_hidden, fill_placeholder, find_hit_rects
 from doc_redactor.tesseract_cmd import require_tesseract
 
 FILE_HIT_WARN = 500
@@ -287,7 +287,7 @@ def write_scan(
     if scan.kind == KIND_WORD:
         return _write_docx(scan, dest, label, engine)
     if scan.kind == KIND_PDF:
-        return _write_pdf(scan, dest, engine)
+        return _write_pdf(scan, dest, label, engine)
     if scan.kind == KIND_IMAGE:
         return _write_image(scan, dest)
     raise ValueError(MSG_UNSUPPORTED)
@@ -537,22 +537,33 @@ def _write_docx_media(dest: Path, by_unit: dict[str, list[LocatedHit]]) -> dict[
     return counts
 
 
-def _write_pdf(scan: FileScan, dest: Path, engine: RedactionEngine | None) -> dict[str, int]:
+def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None) -> dict[str, int]:
     document = pymupdf.open(scan.path)
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
         placed = False
+        fills: list[tuple[int, tuple[float, float, float, float], str]] = []
         for hit in scan.enabled_hits:
             if not hit.rects:
                 continue
             page = document[hit.page]
+            usable = []
             for x0, y0, x1, y1 in hit.rects:
-                page.add_redact_annot(pymupdf.Rect(x0, y0, x1, y1))
+                rect = pymupdf.Rect(x0, y0, x1, y1)
+                if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+                    continue
+                page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
+                usable.append((x0, y0, x1, y1))
                 placed = True
+            if usable:
+                target = max(usable, key=lambda item: (item[2] - item[0]) * (item[3] - item[1]))
+                fills.append((hit.page, target, label(hit.category)))
         if placed:
             for page in document:
                 page.apply_redactions(images=0, graphics=0, text=0)
+            for page_index, box, text in fills:
+                fill_placeholder(document[page_index], pymupdf.Rect(*box), text)
         image_units = [hit for hit in scan.enabled_hits if hit.unit.startswith("pdfimg:")]
         if image_units:
             by_xref: dict[int, list[LocatedHit]] = {}

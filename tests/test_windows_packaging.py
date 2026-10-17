@@ -140,9 +140,9 @@ def test_check_redacted_output_accepts_clean_files_and_rejects_leaks(tmp_path: P
     clean = tmp_path / "clean"
     _write_output(
         clean,
-        docx_body="Keep fictizumab in lowercase. [REDACTED:PROJECT_ID]",
-        docx_header="[REDACTED:SPONSOR]",
-        pdf_text="fictizumab stays",
+        docx_body="Keep fictizumab in lowercase. [PROTOCOL]",
+        docx_header="[SPONSOR]",
+        pdf_text="fictizumab stays [PROTOCOL]",
     )
     tesseract = _fake_tesseract(tmp_path / "tesseract", "")
     ok = _run(CHECK_TOOL, ["--output", str(clean), "--tesseract", str(tesseract)])
@@ -151,9 +151,9 @@ def test_check_redacted_output_accepts_clean_files_and_rejects_leaks(tmp_path: P
     leaked = tmp_path / "leaked"
     _write_output(
         leaked,
-        docx_body="Keep fictizumab in lowercase. [REDACTED:PROJECT_ID]",
+        docx_body="Keep fictizumab in lowercase. [PROTOCOL]",
         docx_header="Acme Pharma",
-        pdf_text="fictizumab stays",
+        pdf_text="fictizumab stays [PROTOCOL]",
     )
     bad_docx = _run(CHECK_TOOL, ["--output", str(leaked), "--tesseract", str(tesseract)])
     assert bad_docx.returncode == 1
@@ -176,9 +176,9 @@ def test_checker_reads_tessdata_beside_symlink(tmp_path: Path):
     output = tmp_path / "out"
     _write_output(
         output,
-        docx_body="Keep fictizumab in lowercase. [REDACTED:PROJECT_ID]",
-        docx_header="[REDACTED:SPONSOR]",
-        pdf_text="fictizumab stays",
+        docx_body="Keep fictizumab in lowercase. [PROTOCOL]",
+        docx_header="[SPONSOR]",
+        pdf_text="fictizumab stays [PROTOCOL]",
     )
     real_dir = tmp_path / "real"
     real_dir.mkdir()
