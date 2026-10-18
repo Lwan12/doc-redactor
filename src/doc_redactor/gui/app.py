@@ -40,12 +40,31 @@ from doc_redactor.backpath import (
     without_paths,
     write_allowed,
 )
-from doc_redactor.gui.dialogs import confirm_dialog, show_toast
+from doc_redactor.gui.dialogs import confirm_dialog, prompt_dialog, show_toast
 from doc_redactor.gui.main_view import MainView
 from doc_redactor.gui.result_view import ResultView
 from doc_redactor.gui.rules_view import RulesView
 from doc_redactor.gui.theme import BG_PAGE, setup_style, marker_for
 from doc_redactor.pattern_guess import evaluate_rule_form
+from doc_redactor.persist import (
+    MSG_BAD_BODY,
+    MSG_BAD_FILE,
+    MSG_BAD_TITLE,
+    MSG_EXPORT_BODY,
+    MSG_OPENED,
+    MSG_RESET_CONFIRM,
+    MSG_RESET_DONE,
+    MSG_RESET_SAME,
+    MSG_RESET_TITLE,
+    changed_from_defaults,
+    check_output_dir,
+    default_output_dir,
+    load_session,
+    reset_body,
+    reveal_directory,
+    save_session,
+    settings_dir,
+)
 from doc_redactor.ruleset import (
     KIND_PATTERN,
     KIND_WORDLIST,
@@ -58,7 +77,7 @@ from doc_redactor.ruleset import (
     add_words,
     apply_library_toggle,
     common_library,
-    library_item_to_rule,
+    default_library_checked,
     word_dup_message,
 )
 from doc_redactor.scan import (
@@ -101,8 +120,6 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Configure>", self._on_configure)
 
-        self.ruleset = RuleSet()
-        self.ruleset.seed_defaults()
         self.files: list[Path] = []
         self.file_sizes: list[str] = []
         self.file_status: list[str] = []
@@ -119,8 +136,25 @@ class App:
         self.output_display: str | None = None
         self._step_tip = None
         self._step_tip_pinned = False
+        self.first_run_hint = False
+        self.save_failed = False
+        self.corrupt_name = None
+        self.settings_open_msg = None
+        self._reset_lib_snap = None
+        self.ruleset = RuleSet()
+        self.lib_checked = default_library_checked()
         # Screenshots use a fictional drive letter so the picture does not show this machine.
-        shown_output = r"D:\脱敏输出" if shoot else str(_default_output())
+        if shoot:
+            self.ruleset.seed_defaults()
+            shown_output = r"D:\脱敏输出"
+        else:
+            loaded = load_session(default_output=str(default_output_dir()))
+            self.ruleset = RuleSet(loaded.rules)
+            self.lib_checked = loaded.library_checked
+            shown_output = loaded.output_dir
+            self.first_run_hint = loaded.first_run
+            self.save_failed = loaded.save_failed
+            self.corrupt_name = loaded.corrupt_name
         self.output_var = tk.StringVar(value=shown_output)
         self.output_error: str | None = None
         self.running = False
@@ -138,7 +172,6 @@ class App:
         self.rules_page = "list"
         self.rule_form: dict = _empty_rule_form()
         self.word_form: dict = _empty_word_form()
-        self.lib_checked = [item.default_checked for item in common_library()]
         self.import_preview = None
         self.cancel_event: Event | None = None
         self.scan_generation = 0
@@ -155,6 +188,8 @@ class App:
         self.show("main")
         if not shoot:
             self._check_output()
+            if self.corrupt_name:
+                self.root.after_idle(self._show_corrupt_dialog)
 
     def show(self, name: str) -> None:
         self.screen = name
@@ -373,22 +408,87 @@ class App:
         if chosen:
             self.output_var.set(chosen)
             self._check_output()
+            self.persist_now()
             self.refresh()
 
     def _check_output(self) -> None:
-        path = Path(self.output_var.get().strip() or ".")
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            probe = path / ".doc_redactor_write_probe"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink()
-            self.output_error = None
-        except OSError:
-            self.output_error = "✕ 这个文件夹不能写入（没有权限，或磁盘已满）。请点「更改…」换一个，例如桌面。"
+        self.output_error = check_output_dir(self.output_var.get()).error
+
+    def persist_now(self) -> None:
+        if self.shoot:
+            return
+        ok = save_session(
+            self.ruleset.rules,
+            self.lib_checked,
+            self.output_var.get().strip() or str(default_output_dir()),
+        )
+        self.save_failed = not ok
+
+    def dismiss_first_run(self) -> None:
+        self.first_run_hint = False
+        self.refresh()
+
+    def open_settings_location(self) -> None:
+        result = reveal_directory(settings_dir())
+        if result.copied:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(result.path)
+            except tk.TclError:
+                pass
+        self.settings_open_msg = result.message
+        if self.screen == "rules":
+            self.refresh()
+
+    def _show_corrupt_dialog(self) -> None:
+        name = self.corrupt_name
+        extra = MSG_BAD_FILE.format(name=name) if name else None
+        prompt_dialog(
+            self.root,
+            MSG_BAD_TITLE,
+            MSG_BAD_BODY,
+            [("打开保存位置", "open", "normal"), ("知道了", "ok", "primary")],
+            extra=extra,
+            extra_mono=True,
+            fonts=self.fonts,
+            focus="ok",
+            stay_values=("open",),
+            on_stay=lambda _v: self.open_settings_location(),
+        )
+
+    def ask_restore_defaults(self) -> None:
+        n, x = changed_from_defaults(self.ruleset.rules)
+        if n == 0:
+            prompt_dialog(
+                self.root,
+                MSG_RESET_TITLE,
+                MSG_RESET_SAME,
+                [("知道了", "ok", "default")],
+                fonts=self.fonts,
+                focus="ok",
+            )
+            return
+        choice = prompt_dialog(
+            self.root,
+            MSG_RESET_TITLE,
+            reset_body(n, x),
+            [("取消", "cancel", "default"), (MSG_RESET_CONFIRM, "reset", "danger")],
+            fonts=self.fonts,
+            focus="cancel",
+        )
+        if choice != "reset":
+            return
+        self._reset_lib_snap = list(self.lib_checked)
+        self.ruleset.restore_defaults(label=MSG_RESET_DONE)
+        self.lib_checked = default_library_checked()
+        self.persist_now()
+        self._arm_undo_expiry()
+        self.refresh()
 
     def toggle_rule(self, index: int, enabled: bool) -> None:
         if 0 <= index < len(self.ruleset.rules):
             self.ruleset.set_enabled(index, enabled)
+            self.persist_now()
             self.refresh()
 
     def show_rules(self) -> None:
@@ -455,7 +555,9 @@ class App:
         self.refresh()
 
     def delete_rule(self, index: int) -> None:
+        self._reset_lib_snap = None
         rule = self.ruleset.delete(index)
+        self.persist_now()
         self.refresh()
         if self.toast is not None:
             try:
@@ -491,6 +593,10 @@ class App:
 
     def undo_rules(self) -> None:
         self.ruleset.undo()
+        if self._reset_lib_snap is not None:
+            self.lib_checked = self._reset_lib_snap
+            self._reset_lib_snap = None
+        self.persist_now()
         if self._undo_job is not None:
             try:
                 self.root.after_cancel(self._undo_job)
@@ -544,10 +650,12 @@ class App:
             case_sensitive=bool(form.get("case_sensitive")),
             replacement=form.get("replacement") or "",
         )
+        self._reset_lib_snap = None
         if form.get("index") is not None:
             self.ruleset.replace(form["index"], rule)
         else:
             self.ruleset.add(rule, overwrite=bool(form.get("overwrite")))
+        self.persist_now()
         self.rules_page = "list"
         self.refresh()
 
@@ -640,25 +748,32 @@ class App:
             case_sensitive=bool(form.get("case_sensitive")),
             replacement=form.get("replacement") or "",
         )
+        self._reset_lib_snap = None
         if form.get("index") is None:
             self.ruleset.add(rule)
         else:
             self.ruleset.replace(form["index"], rule)
+        self.persist_now()
         self.rules_page = "list"
         self.refresh()
 
     def show_library(self) -> None:
-        self.lib_checked = [item.default_checked for item in common_library()]
+        items = common_library()
+        if len(self.lib_checked) != len(items):
+            self.lib_checked = default_library_checked()
         self.rules_page = "lib"
         self.refresh()
 
     def toggle_library(self, index: int) -> None:
         items = common_library()
         self.lib_checked = apply_library_toggle(items, self.lib_checked, index)
+        self.persist_now()
         self.refresh()
 
     def add_library(self) -> None:
+        self._reset_lib_snap = None
         self.ruleset.add_from_library(common_library(), self.lib_checked)
+        self.persist_now()
         self.rules_page = "list"
         self.refresh()
 
@@ -673,7 +788,9 @@ class App:
     def confirm_import(self) -> None:
         if self.import_preview is None:
             return
+        self._reset_lib_snap = None
         self.ruleset.apply_import(self.import_preview)
+        self.persist_now()
         self.rules_page = "list"
         self.refresh()
 
@@ -681,7 +798,7 @@ class App:
         choice = confirm_dialog(
             self.root,
             "导出规则",
-            "得到一个规则文件，换电脑可导入。里面只有规则，没有测试用的文字，也没有任何被处理文件的内容。",
+            MSG_EXPORT_BODY,
             [
                 ("取消", "cancel", False),
                 ("只导出勾选的几条", "enabled", False),
@@ -968,6 +1085,12 @@ class App:
             except tk.TclError:
                 pass
             self._overlay_frame = None
+        menu = getattr(self.rules_view, "_more_menu", None)
+        if menu is not None:
+            try:
+                menu.unpost()
+            except tk.TclError:
+                pass
         self.cancelled = False
         self.running = False
         self.written = False
@@ -977,6 +1100,11 @@ class App:
         self.current_hit = None
         self.pdf_page = 0
         self.output_error = None
+        self.first_run_hint = False
+        self.save_failed = False
+        self.corrupt_name = None
+        self.settings_open_msg = None
+        self._reset_lib_snap = None
         self.rules_page = "list"
         self.rule_form = _empty_rule_form()
         self.word_form = _empty_word_form()
@@ -1015,12 +1143,37 @@ class App:
             self.file_status = []
             self.show("main")
             return
+        if key == "main-first":
+            self.files = []
+            self.file_sizes = []
+            self.file_status = []
+            self.first_run_hint = True
+            self.show("main")
+            return
         if key == "main-files":
             self.show("main")
             return
         if key == "main-outerr":
             self.output_error = "✕ 这个文件夹不能写入（没有权限，或磁盘已满）。请点「更改…」换一个，例如桌面。"
             self.show("main")
+            return
+        if key == "main-outmissing":
+            from doc_redactor.persist import MSG_OUTPUT_MISSING
+
+            self.output_error = MSG_OUTPUT_MISSING
+            self.show("main")
+            return
+        if key == "main-cfgbad":
+            self.files = []
+            self.file_sizes = []
+            self.file_status = []
+            self.show("main")
+            self._overlay(
+                MSG_BAD_TITLE,
+                MSG_BAD_BODY,
+                [("打开保存位置", False), ("知道了", True)],
+                extra=MSG_BAD_FILE.format(name=r"...\doc-redactor\settings.损坏.20261018-2054.json"),
+            )
             return
         if key == "main-running":
             self.running = True
@@ -1243,9 +1396,61 @@ class App:
             self.show_rules_page("list")
             self._overlay(
                 "导出规则",
-                "得到一个规则文件，换电脑可导入。里面只有规则，没有测试用的文字，也没有任何被处理文件的内容。\n\n○ 全部\n○ 只导出勾选的几条",
+                MSG_EXPORT_BODY + "\n\n○ 全部\n○ 只导出勾选的几条",
                 [("取消", False), ("导出…", True)],
             )
+            return
+        if key == "rules-more":
+            self.show_rules_page("list")
+            self.root.update_idletasks()
+            self.rules_view.post_more_menu()
+            return
+        if key == "rules-reset":
+            self.ruleset.add(
+                Rule(name="内部编号", kind=KIND_PATTERN, pattern=r"ZX-\d+", examples=["ZX-001"], enabled=True)
+            )
+            self.ruleset.add(
+                Rule(
+                    name="手机号（中国大陆）",
+                    kind=KIND_PATTERN,
+                    pattern=r"1[3-9]\d{9}",
+                    examples=["138 0000 0000"],
+                    enabled=True,
+                )
+            )
+            nct = self.ruleset.find_index("NCT 试验登记号")
+            if nct is not None:
+                self.ruleset.rules[nct].enabled = False
+            n, x = changed_from_defaults(self.ruleset.rules)
+            self.show_rules_page("list")
+            self._overlay(
+                MSG_RESET_TITLE,
+                reset_body(n, x),
+                [("取消", False), (MSG_RESET_CONFIRM, False)],
+                danger=MSG_RESET_CONFIRM,
+                focus="取消",
+            )
+            return
+        if key == "rules-reset-same":
+            self.show_rules_page("list")
+            self._overlay(
+                MSG_RESET_TITLE,
+                MSG_RESET_SAME,
+                [("知道了", False)],
+                focus="知道了",
+            )
+            return
+        if key == "rules-reset-done":
+            self.ruleset.restore_defaults(label=MSG_RESET_DONE)
+            self.show_rules_page("list")
+            return
+        if key == "rules-savefail":
+            self.save_failed = True
+            self.show_rules_page("list")
+            return
+        if key == "rules-opened":
+            self.settings_open_msg = MSG_OPENED
+            self.show_rules_page("list")
             return
         if key.startswith("words-"):
             sponsors = [
@@ -1319,8 +1524,17 @@ class App:
             return
         self.show("main")
 
-    def _overlay(self, title: str, body: str, buttons: list[tuple[str, bool]]) -> None:
-        from doc_redactor.gui.theme import BG_INSET, BG_SURFACE, INK, LINE2
+    def _overlay(
+        self,
+        title: str,
+        body: str,
+        buttons: list[tuple[str, bool]],
+        *,
+        extra: str | None = None,
+        danger: str | None = None,
+        focus: str | None = None,
+    ) -> None:
+        from doc_redactor.gui.theme import BAD, BG_INSET, BG_SURFACE, INK, INK2, LINE2
 
         if getattr(self, "_overlay_frame", None) is not None:
             try:
@@ -1334,15 +1548,49 @@ class App:
         head = tk.Frame(box, bg=BG_INSET)
         head.pack(fill="x")
         tk.Label(head, text=title, bg=BG_INSET, fg=INK, anchor="w").pack(fill="x", padx=14, pady=8)
-        tk.Label(box, text=body, bg=BG_SURFACE, fg=INK, justify="left", wraplength=400, anchor="w").pack(
-            fill="x", padx=14, pady=12
+        tk.Label(box, text=body, bg=BG_SURFACE, fg=INK, justify="left", wraplength=620, anchor="w").pack(
+            fill="x", padx=14, pady=(12, 4 if extra else 12)
         )
+        if extra:
+            tk.Label(box, text=extra, bg=BG_SURFACE, fg=INK2, justify="left", wraplength=620, anchor="w").pack(
+                fill="x", padx=14, pady=(0, 12)
+            )
         foot = tk.Frame(box, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         foot.pack(fill="x")
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=14, pady=8)
+        made = []
         for label, primary in reversed(buttons):
-            ttk.Button(inner, text=label, style="Primary.TButton" if primary else "TButton").pack(side="right", padx=(8, 0))
+            if danger and label == danger:
+                btn = tk.Button(
+                    inner,
+                    text=label,
+                    fg=BAD,
+                    bg=BG_SURFACE,
+                    relief="flat",
+                    bd=0,
+                    highlightthickness=0,
+                    padx=10,
+                    pady=4,
+                )
+            elif focus and label == focus:
+                btn = tk.Button(
+                    inner,
+                    text=label,
+                    fg=INK,
+                    bg=BG_INSET,
+                    relief="solid",
+                    bd=1,
+                    highlightthickness=2,
+                    highlightbackground=INK,
+                    highlightcolor=INK,
+                    padx=10,
+                    pady=2,
+                )
+            else:
+                btn = ttk.Button(inner, text=label, style="Primary.TButton" if primary else "TButton")
+            btn.pack(side="right", padx=(8, 0))
+            made.append((btn, label))
         self._overlay_frame = mask
 
 
@@ -1383,11 +1631,6 @@ def _empty_word_form() -> dict:
         "kind": "words",
         "replacement": "",
     }
-
-
-def _default_output() -> Path:
-    """Parent folder only. Each write adds its own YYYYMMDD-HHMM directory."""
-    return Path.home() / "脱敏输出"
 
 
 def run(*, shoot: bool = False) -> None:

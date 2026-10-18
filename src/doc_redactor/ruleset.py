@@ -273,6 +273,19 @@ def find_word_hits(terms: list[str], text: str, *, case_sensitive: bool) -> list
     return out
 
 
+def default_rules() -> list[Rule]:
+    """Factory defaults: library items with default_checked (not the 7-item library)."""
+    return [
+        library_item_to_rule(item, enabled=True)
+        for item in common_library()
+        if item.default_checked and not item.is_subitem
+    ]
+
+
+def default_library_checked() -> list[bool]:
+    return [item.default_checked for item in common_library()]
+
+
 def library_item_to_rule(item: LibraryItem, *, enabled: bool = True) -> Rule:
     replacement = item.replacement.strip() or redaction_label(item.name)
     if item.kind == KIND_WORDLIST:
@@ -432,10 +445,11 @@ class RuleSet:
     def seed_defaults(self) -> None:
         if self.rules:
             return
-        items = common_library()
-        for item in items:
-            if item.default_checked:
-                self.rules.append(library_item_to_rule(item, enabled=True))
+        self.rules = default_rules()
+
+    def restore_defaults(self, *, label: str) -> None:
+        self._push(label)
+        self.rules = default_rules()
 
     def to_engine(self) -> RedactionEngine:
         regex_rules: list[RegexRule] = []
@@ -751,6 +765,8 @@ __all__ = [
     "ImportPreview",
     "ImportItem",
     "common_library",
+    "default_rules",
+    "default_library_checked",
     "library_item_to_rule",
     "library_main_items",
     "apply_library_toggle",
