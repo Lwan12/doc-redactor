@@ -238,17 +238,6 @@ def report_for(path: Path, outdir: Path) -> Path:
     return Path(outdir) / f"{path.stem}.report.json"
 
 
-def conflicting_destinations(scans: list[FileScan], outdir: Path) -> list[Path]:
-    found: list[Path] = []
-    for scan in scans:
-        if scan.status == "fail" or scan.enabled_count() == 0:
-            continue
-        dest = destination_for(scan.path, outdir)
-        if dest.exists():
-            found.append(dest)
-    return found
-
-
 def sequenced_path(path: Path) -> Path:
     n = 2
     while True:

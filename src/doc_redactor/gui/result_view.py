@@ -67,31 +67,55 @@ def line_fully_inside(text: tk.Text, index: str) -> bool:
     return info[1] >= 0 and info[1] + info[3] <= text.winfo_height()
 
 
-def _fit_preview_view(text: tk.Text, end: str) -> None:
-    """Show the start of the text. If only a short tail is below the pane, bring
-    that tail on screen without slicing the line at the top.
+# The page marker sits on the first visible line. pady keeps that line a few
+# pixels under the widget edge; anything in this band still counts as the top.
+_MARKER_TOP = 12
 
-    A much longer document stays at the top; the scrollbar still reaches the rest.
+
+def scroll_page_marker(text: tk.Text, index: str, *, to_top: bool) -> None:
+    """Put 「—— 第 N 页 ——」 at the top of the preview.
+
+    Page 1 is the start of the text, so it goes back to the top. A later page
+    is scrolled to its marker. Tk will not scroll a short tail into empty
+    space, which left the previous page's last lines above the marker; blank
+    lines at the end give the marker room to sit on the first visible line.
+    The real last line stays reachable, and a line sliced by the top edge is
+    nudged down until it is whole.
     """
-    text.yview_moveto(0)
-    text.update_idletasks()
-    if line_fully_inside(text, end):
-        return
-    _top, bottom = text.yview()
-    if bottom < 0.65:
-        return
-    text.yview_moveto(1)
-    text.update_idletasks()
-    for _ in range(80):
-        top = text.dlineinfo(text.index("@0,0"))
-        if not top or top[1] >= 0:
-            break
+    if not to_top:
+        state = str(text.cget("state"))
+        text.configure(state="normal")
+        try:
+            height = max(text.winfo_height(), 1)
+            limit = max(4, height // 8 + 2)
+            for _ in range(limit):
+                text.yview(index)
+                text.update_idletasks()
+                info = _line_box(text, index)
+                if info is not None and 0 <= info[1] <= _MARKER_TOP:
+                    break
+                text.insert("end", "\n")
+            else:
+                text.yview(index)
+                text.update_idletasks()
+        finally:
+            text.configure(state=state)
+    else:
+        text.yview_moveto(0)
+        text.update_idletasks()
+    for _ in range(40):
+        info = _line_box(text, index)
+        if info is None or info[1] >= 0:
+            return
         text.yview_scroll(-1, "pixels")
         text.update_idletasks()
-        if not line_fully_inside(text, end):
-            text.yview_scroll(1, "pixels")
-            text.update_idletasks()
-            break
+
+
+def _line_box(text: tk.Text, index: str):
+    try:
+        return text.dlineinfo(index)
+    except tk.TclError:
+        return None
 
 
 class ResultView:
@@ -660,28 +684,26 @@ class ResultView:
 
         text.bind("<Button-1>", on_click)
         text.configure(state="disabled")
-        if self.app.current_hit is not None:
+        if page_starts:
+            self._reveal_open_page(text, page_starts)
+        elif self.app.current_hit is not None:
             tag = f"h{self.app.current_hit}"
             try:
                 text.see(f"{tag}.first")
             except tk.TclError:
                 pass
-        elif page_starts:
-            self._reveal_open_page(text, page_starts)
 
     def _reveal_open_page(self, text: tk.Text, page_starts: list[str]) -> None:
-        """Keep the open page's last line whole, without slicing a line at the top."""
+        """Scroll so the open page's 「—— 第 N 页 ——」 is the first visible line.
+
+        Page 1 returns to the top. The first configure is often the short
+        requested height, so align again when the pane grows.
+        """
         index = clamp_page(self.app.pdf_page, 0, len(page_starts))
-        if index + 1 < len(page_starts):
-            end = text.index(f"{page_starts[index + 1]} - 1 chars")
-        else:
-            end = text.index("end-1c")
+        marker = page_starts[index]
         state = {"height": 0, "busy": False}
 
         def show(_event=None) -> None:
-            # The first configure is often the short requested height. Align
-            # again when the pane grows, or the open page stays scrolled to
-            # the end and a line is cut at the top.
             if state["busy"] or not text.winfo_exists():
                 return
             height = text.winfo_height()
@@ -690,7 +712,7 @@ class ResultView:
             state["busy"] = True
             state["height"] = height
             try:
-                _fit_preview_view(text, end)
+                scroll_page_marker(text, marker, to_top=(index == 0))
             except tk.TclError:
                 state["height"] = 0
             finally:

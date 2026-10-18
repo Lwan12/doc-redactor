@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -30,15 +32,19 @@ def test_place_more_menu_drops_below_every_heading():
         (710, 134, 840, 163),
         (840, 134, 950, 163),
     ]
+    # First data row's 操作 cell: 修改 / 删除. The column continues downward.
+    action = (840, 163, 950, 400)
     x, y = place_more_menu(
         button=(860, 90, 80, 32),
         menu_size=(128, 30),
         window=(0, 0, 960, 640),
         headings=headings,
+        avoid=[action],
     )
     box = (x, y, x + 128, y + 30)
     for heading in headings:
         assert not rects_overlap(box, heading)
+    assert not rects_overlap(box, action)
     assert y >= 163
 
 
@@ -162,6 +168,40 @@ def test_pdf_preview_keeps_the_body_reachable(gui):
     assert line_fully_inside(text, last)
 
 
+def _assert_page_marker_at_top(app, page_number: int) -> None:
+    text = app.result_view._preview_text
+    assert text is not None and text.winfo_exists()
+    label = f"第 {page_number} 页"
+    idx = text.search(label, "1.0")
+    assert idx
+    assert line_visible(text, idx)
+    assert line_fully_inside(text, idx)
+    info = text.dlineinfo(idx)
+    assert info is not None and info[1] <= 12
+    top = text.get("@0,0 linestart", "@0,0 lineend")
+    assert label in top
+    if page_number == 1:
+        assert text.yview()[0] == 0
+
+
+def test_pdf_page_turn_scrolls_marker_to_the_top(gui):
+    app = gui
+    app.apply_shoot_state("res-pdf")
+    _settle(app)
+    assert app.pdf_page == 1
+    parts = _pager(app)
+    parts[0].invoke()
+    _settle(app)
+    assert app.pdf_page == 0
+    _assert_page_marker_at_top(app, 1)
+
+    parts = _pager(app)
+    parts[-1].invoke()
+    _settle(app)
+    assert app.pdf_page == 1
+    _assert_page_marker_at_top(app, 2)
+
+
 def test_more_menu_does_not_cover_rule_headings(gui):
     app = gui
     app.apply_shoot_state("rules-more")
@@ -181,3 +221,88 @@ def test_more_menu_does_not_cover_rule_headings(gui):
         assert not rects_overlap(box, rect), f"{name} {rect} overlaps menu {box}"
     header_bottom = max(rect[3] for rect in rects)
     assert box[1] >= header_bottom
+    kids = tree.get_children()
+    cell = tree.bbox(kids[0], "act")
+    assert cell and cell[2] > 0 and cell[3] > 0
+    rx, ry = tree.winfo_rootx(), tree.winfo_rooty()
+    action = (rx + cell[0], ry + cell[1], rx + cell[0] + cell[2], ry + cell[1] + cell[3])
+    assert not rects_overlap(box, action), f"操作 {action} overlaps menu {box}"
+    assert "修改" in tree.item(kids[0], "values")[-1]
+    assert "删除" in tree.item(kids[0], "values")[-1]
+
+
+def test_write_files_keeps_existing_output_and_source(gui, tmp_path: Path):
+    """A same-named output already on disk is left alone. The write makes a new folder."""
+    from docx import Document
+
+    from doc_redactor.scan import KIND_WORD, FileScan, LocatedHit
+
+    source = tmp_path / "notes.docx"
+    document = Document()
+    document.add_paragraph("ABC-2026-001")
+    document.save(source)
+    original = source.read_bytes()
+    out = tmp_path / "out"
+    out.mkdir()
+    prior_dir = out / "20200101-0000"
+    prior_dir.mkdir()
+    prior = prior_dir / "notes.redacted.docx"
+    prior.write_bytes(b"prior-output-do-not-touch")
+
+    app = gui
+    app.show("main")
+    _settle(app)
+    app.output_var.set(str(out))
+    app.scans = [
+        FileScan(
+            path=source,
+            kind=KIND_WORD,
+            status="ok",
+            hits=[
+                LocatedHit(
+                    hit_id=1,
+                    category="项目号",
+                    text="ABC-2026-001",
+                    location="第 1 段",
+                    unit="p:0",
+                    start=0,
+                    end=12,
+                )
+            ],
+            paragraphs=["ABC-2026-001"],
+        )
+    ]
+    app.running = False
+    app.written = False
+    app.write_errors = {}
+    app.batch_dir = None
+    app.kept_outputs = []
+
+    app.write_files()
+    _settle(app)
+    first_dir = app.batch_dir
+    assert first_dir is not None
+    assert first_dir.parent == out
+    assert first_dir != prior_dir
+    assert re.fullmatch(r"\d{8}-\d{4}(-\d+)?", first_dir.name)
+    first = first_dir / "notes.redacted.docx"
+    assert first.is_file()
+    assert first.resolve() != source.resolve()
+    assert first.resolve() != prior.resolve()
+    assert prior.read_bytes() == b"prior-output-do-not-touch"
+    assert source.read_bytes() == original
+    first_bytes = first.read_bytes()
+
+    app.write_files()
+    _settle(app)
+    second_dir = app.batch_dir
+    assert second_dir is not None
+    assert second_dir != first_dir
+    assert second_dir.parent == out
+    assert re.fullmatch(r"\d{8}-\d{4}(-\d+)?", second_dir.name)
+    second = second_dir / "notes.redacted.docx"
+    assert second.is_file()
+    assert second.resolve() != first.resolve()
+    assert first.read_bytes() == first_bytes
+    assert prior.read_bytes() == b"prior-output-do-not-touch"
+    assert source.read_bytes() == original
