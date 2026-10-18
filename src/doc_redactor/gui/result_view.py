@@ -16,6 +16,7 @@ from doc_redactor.backpath import (
     MSG_WRITTEN_TOP,
     partial_banner,
     unchecked_count,
+    unwritten_failure_banner,
     write_allowed,
 )
 from doc_redactor.gui.steps import StepBar
@@ -37,6 +38,61 @@ from doc_redactor.gui.theme import (
 from doc_redactor.engine import redaction_label
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
 
+# Left is the previous page, right is the next page.
+PDF_PAGER = (("‹", -1), ("›", 1))
+
+
+def clamp_page(index: int, delta: int, count: int) -> int:
+    """Page index after moving by delta, kept inside the document."""
+    if count <= 0:
+        return 0
+    return max(0, min(count - 1, index + delta))
+
+
+def line_visible(text: tk.Text, index: str) -> bool:
+    try:
+        return bool(text.dlineinfo(index))
+    except tk.TclError:
+        return False
+
+
+def line_fully_inside(text: tk.Text, index: str) -> bool:
+    """The whole display line is inside the widget, not sliced by its edge."""
+    try:
+        info = text.dlineinfo(index)
+    except tk.TclError:
+        return False
+    if not info:
+        return False
+    return info[1] >= 0 and info[1] + info[3] <= text.winfo_height()
+
+
+def _fit_preview_view(text: tk.Text, end: str) -> None:
+    """Show the start of the text. If only a short tail is below the pane, bring
+    that tail on screen without slicing the line at the top.
+
+    A much longer document stays at the top; the scrollbar still reaches the rest.
+    """
+    text.yview_moveto(0)
+    text.update_idletasks()
+    if line_fully_inside(text, end):
+        return
+    _top, bottom = text.yview()
+    if bottom < 0.65:
+        return
+    text.yview_moveto(1)
+    text.update_idletasks()
+    for _ in range(80):
+        top = text.dlineinfo(text.index("@0,0"))
+        if not top or top[1] >= 0:
+            break
+        text.yview_scroll(-1, "pixels")
+        text.update_idletasks()
+        if not line_fully_inside(text, end):
+            text.yview_scroll(1, "pixels")
+            text.update_idletasks()
+            break
+
 
 class ResultView:
     def __init__(self, app) -> None:
@@ -44,6 +100,9 @@ class ResultView:
         self.frame = ttk.Frame(app.container)
         self._photo = None
         self._hit_ranges: dict[str, int] = {}
+        self._pdf_pager = None
+        self._preview_text = None
+        self._preview_scroll = None
 
     def present(self) -> None:
         self.frame.pack(fill="both", expand=True)
@@ -54,6 +113,9 @@ class ResultView:
 
     def refresh(self) -> None:
         self._building = True
+        self._pdf_pager = None
+        self._preview_text = None
+        self._preview_scroll = None
         app = self.app
         app.drop_step_tip()
         for child in self.frame.winfo_children():
@@ -94,12 +156,12 @@ class ResultView:
             ).pack(side="right", padx=12)
 
         failures = app.write_failure_rows()
-        if app.written and failures:
+        if failures:
             err = tk.Frame(self.frame, bg="#fcecec")
             err.pack(fill="x")
             tk.Label(
                 err,
-                text=partial_banner(failures),
+                text=partial_banner(failures) if app.written else unwritten_failure_banner(failures),
                 bg="#fcecec",
                 fg="#cb2f39",
                 font=fonts["small"],
@@ -176,11 +238,11 @@ class ResultView:
             right = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
             right.grid(row=1, column=1, sticky="nsew", pady=(8, 0))
         else:
-            # 960px: side panes stay wide enough for full filenames and hit text.
-            # The middle preview takes whatever is left.
-            body.columnconfigure(0, minsize=300, weight=0)
-            body.columnconfigure(1, weight=1, minsize=180)
-            body.columnconfigure(2, minsize=360, weight=0)
+            # 960px: file names and hit text keep their columns. The middle
+            # column is what remains, wide enough for 「方案号清单」 on one line.
+            body.columnconfigure(0, minsize=280, weight=0)
+            body.columnconfigure(1, weight=1, minsize=200)
+            body.columnconfigure(2, minsize=340, weight=0)
             body.rowconfigure(0, weight=1)
             left = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
             left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
@@ -198,7 +260,7 @@ class ResultView:
         # Footer first (side=bottom) so the write bar keeps its height when the
         # preview panes want more than the 640px window.
         self._foot(scans, fonts, all_fail, nohit_all)
-        body.pack(fill="both", expand=True, padx=12, pady=8)
+        body.pack(fill="both", expand=True, padx=12, pady=(4, 4))
         self.app.root.after_idle(lambda: setattr(self, "_building", False))
 
     def _set_hide(self, value: bool) -> None:
@@ -220,7 +282,7 @@ class ResultView:
         bar = tk.Frame(self.frame, bg=BG_SURFACE)
         bar.pack(fill="x")
         inner = tk.Frame(bar, bg=BG_SURFACE)
-        inner.pack(fill="x", padx=12, pady=8)
+        inner.pack(fill="x", padx=12, pady=4)
         if all_fail:
             tk.Label(inner, text="0", bg=BG_SURFACE, fg=INK, font=fonts["mono_big"]).pack(side="left")
             tk.Label(inner, text=" 个文件可处理", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
@@ -268,8 +330,8 @@ class ResultView:
         tree = ttk.Treeview(parent, columns=("name", "n"), show="headings", selectmode="browse")
         tree.heading("name", text="文件")
         tree.heading("n", text="替换数")
-        # font_small: "⚠ 命中偏多  入组统计报告_V2.pdf" is about 214px.
-        tree.column("name", width=240, minwidth=200, stretch=True)
+        # "⚠ 命中偏多  入组统计报告_V2.pdf" is about 227px in the UI font.
+        tree.column("name", width=240, minwidth=220, stretch=True)
         tree.column("n", width=56, minwidth=48, stretch=False, anchor="e")
         tree.tag_configure("ok", foreground="#008035")
         tree.tag_configure("bad", foreground="#cb2f39")
@@ -330,34 +392,72 @@ class ResultView:
             return
         cats = self.app.category_order()
         ok_scans = [s for s in scans if s.status != "fail"]
-        columns = ["cat"] + [f"f{i}" for i in range(len(ok_scans))] + ["sum"]
-        tree = ttk.Treeview(body, columns=columns, show="headings")
-        tree.heading("cat", text="类别")
-        tree.column("cat", width=90, stretch=True)
-        for i, scan in enumerate(ok_scans):
-            key = f"f{i}"
-            tree.heading(key, text=_short_type(scan))
-            tree.column(key, width=50, anchor="e", stretch=False)
-        tree.heading("sum", text="合计")
-        tree.column("sum", width=50, anchor="e", stretch=False)
-        for ci, cat in enumerate(cats):
-            row = [f"{marker_for(ci)} {cat}"]
+        self._category_matrix(body, cats, ok_scans, fonts)
+
+    def _category_matrix(self, parent, cats, ok_scans, fonts) -> None:
+        """Category names stay inside the name column. Count columns match the header text."""
+        table = tk.Frame(parent, bg=BG_SURFACE)
+        table.pack(fill="both", expand=True, padx=1, pady=2)
+        headers = ["类别"] + [_short_type(scan) for scan in ok_scans] + ["合计"]
+        ncols = len(headers)
+        small = fonts["small"]
+        count_w = max(small.measure("Word"), small.measure("88")) + 2
+        # 「方案号清单」 fits on one line. Longer names wrap inside this column.
+        name_w = small.measure("② 方案号清单") + 8
+        table.columnconfigure(0, weight=1, minsize=name_w)
+        for col in range(1, ncols):
+            table.columnconfigure(col, minsize=count_w, weight=0)
+        name_labels: list[tk.Label] = []
+
+        def cell(row: int, col: int, text: str, *, header: bool = False, name: bool = False) -> None:
+            bg = BG_INSET if header or row == len(cats) + 1 else BG_SURFACE
+            fg = INK2 if header else INK
+            lab = tk.Label(
+                table,
+                text=text,
+                bg=bg,
+                fg=fg,
+                font=small,
+                anchor="w" if col == 0 else "center",
+                justify="left",
+                padx=0,
+                pady=1,
+                wraplength=(name_w - 4) if name else 0,
+            )
+            lab.grid(row=row, column=col, sticky="nsew")
+            if name:
+                name_labels.append(lab)
+
+        for col, title in enumerate(headers):
+            cell(0, col, title, header=True)
+        for index, cat in enumerate(cats):
+            cell(index + 1, 0, f"{marker_for(index)} {cat}", name=True)
             total = 0
-            for scan in ok_scans:
-                n = sum(1 for h in scan.enabled_hits if h.category == cat)
-                row.append(n)
-                total += n
-            row.append(total)
-            tree.insert("", "end", values=row)
-        sum_row = ["合计"]
+            for file_index, scan in enumerate(ok_scans):
+                count = sum(1 for hit in scan.enabled_hits if hit.category == cat)
+                total += count
+                cell(index + 1, file_index + 1, str(count))
+            cell(index + 1, ncols - 1, str(total))
+        cell(len(cats) + 1, 0, "合计", name=True)
         grand = 0
-        for scan in ok_scans:
-            n = scan.enabled_count()
-            sum_row.append(n)
-            grand += n
-        sum_row.append(grand)
-        tree.insert("", "end", values=sum_row)
-        tree.pack(fill="both", expand=True, padx=8, pady=8)
+        for file_index, scan in enumerate(ok_scans):
+            count = scan.enabled_count()
+            grand += count
+            cell(len(cats) + 1, file_index + 1, str(count))
+        cell(len(cats) + 1, ncols - 1, str(grand))
+
+        def sync(_event=None) -> None:
+            bbox = table.grid_bbox(0, 0)
+            if not bbox or bbox[2] < 40:
+                return
+            # Wrap inside the name cell. Wider than the cell clips the last glyph.
+            wrap = max(40, bbox[2] - 4)
+            for lab in name_labels:
+                if int(lab.cget("wraplength")) != wrap:
+                    lab.configure(wraplength=wrap)
+
+        table.bind("<Configure>", sync)
+        table.after_idle(sync)
 
     def _file_preview(self, parent, scan: FileScan, fonts) -> None:
         head = tk.Frame(parent, bg=BG_INSET)
@@ -395,15 +495,20 @@ class ResultView:
         if scan.kind == KIND_PDF and has_prev and scan.pages:
             pager = tk.Frame(head, bg=BG_INSET)
             pager.pack(fill="x")
-            ttk.Button(pager, text="‹", command=lambda: self._turn(-1), width=2).pack(side="right", padx=(0, 4))
-            tk.Label(
-                pager,
-                text=f"第 {self.app.pdf_page + 1} / {len(scan.pages)} 页",
-                bg=BG_INSET,
-                fg=INK,
-                font=fonts["mono_font"],
-            ).pack(side="right")
-            ttk.Button(pager, text="›", command=lambda: self._turn(1), width=2).pack(side="right", padx=4)
+            self._pdf_pager = pager
+            # Pack left to right: previous, page label, next.
+            for glyph, delta in PDF_PAGER:
+                ttk.Button(pager, text=glyph, command=lambda d=delta: self._turn(d), width=2).pack(
+                    side="left", padx=(8, 0) if delta < 0 else (0, 4)
+                )
+                if delta < 0:
+                    tk.Label(
+                        pager,
+                        text=f"第 {self.app.pdf_page + 1} / {len(scan.pages)} 页",
+                        bg=BG_INSET,
+                        fg=INK,
+                        font=fonts["mono_font"],
+                    ).pack(side="left", padx=4)
 
         body = tk.Frame(parent, bg=BG_SURFACE)
         if scan.status == "fail":
@@ -453,12 +558,37 @@ class ResultView:
     def _turn(self, delta: int) -> None:
         scan = self.app.scans[self.app.selected]
         n = len(scan.pages) if scan.pages else 1
-        self.app.pdf_page = max(0, min(n - 1, self.app.pdf_page + delta))
+        self.app.pdf_page = clamp_page(self.app.pdf_page, delta, n)
         self.refresh()
 
     def _text_preview(self, parent, scan: FileScan, fonts) -> None:
-        text = tk.Text(parent, wrap="word", relief="flat", bd=0, padx=14, pady=12, font=fonts["ui"], bg=BG_SURFACE, fg=INK)
+        host = parent
+        scroll = None
+        # PDF text is taller than the middle column. A scrollbar keeps the
+        # rest of the page reachable instead of clipping the last lines.
+        if scan.kind == KIND_PDF:
+            host = tk.Frame(parent, bg=BG_SURFACE)
+            host.pack(fill="both", expand=True)
+            scroll = ttk.Scrollbar(host, orient="vertical")
+            scroll.pack(side="right", fill="y")
+        text = tk.Text(
+            host,
+            height=6,
+            wrap="word",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=4,
+            font=fonts["ui"],
+            bg=BG_SURFACE,
+            fg=INK,
+            yscrollcommand=(scroll.set if scroll is not None else None),
+        )
         text.pack(fill="both", expand=True)
+        if scroll is not None:
+            scroll.configure(command=text.yview)
+        self._preview_text = text
+        self._preview_scroll = scroll
         text.tag_configure("hit", background=HL, underline=True)
         text.tag_configure("cur", background=HL2, underline=True)
         text.tag_configure("off", foreground=PLACE, underline=True)
@@ -491,6 +621,7 @@ class ResultView:
                 text.insert("end", block[pos:], ("title",) if title else ())
             text.insert("end", "\n")
 
+        page_starts: list[str] = []
         if scan.kind == KIND_WORD:
             by_unit: dict[str, list] = {}
             for hit in scan.hits:
@@ -499,6 +630,7 @@ class ResultView:
                 insert_run(para, by_unit.get(f"p:{i}", []), title=(i == 0))
         else:
             for pi, page in enumerate(scan.pages):
+                page_starts.append(text.index("end-1c"))
                 text.insert("end", f"—— 第 {pi + 1} 页 ——\n", ("page",))
                 page_hits = [h for h in scan.hits if h.page == pi and h.unit.startswith("page:")]
                 offset = 0
@@ -534,6 +666,38 @@ class ResultView:
                 text.see(f"{tag}.first")
             except tk.TclError:
                 pass
+        elif page_starts:
+            self._reveal_open_page(text, page_starts)
+
+    def _reveal_open_page(self, text: tk.Text, page_starts: list[str]) -> None:
+        """Keep the open page's last line whole, without slicing a line at the top."""
+        index = clamp_page(self.app.pdf_page, 0, len(page_starts))
+        if index + 1 < len(page_starts):
+            end = text.index(f"{page_starts[index + 1]} - 1 chars")
+        else:
+            end = text.index("end-1c")
+        state = {"height": 0, "busy": False}
+
+        def show(_event=None) -> None:
+            # The first configure is often the short requested height. Align
+            # again when the pane grows, or the open page stays scrolled to
+            # the end and a line is cut at the top.
+            if state["busy"] or not text.winfo_exists():
+                return
+            height = text.winfo_height()
+            if height < 80 or height == state["height"]:
+                return
+            state["busy"] = True
+            state["height"] = height
+            try:
+                _fit_preview_view(text, end)
+            except tk.TclError:
+                state["height"] = 0
+            finally:
+                state["busy"] = False
+
+        text.bind("<Configure>", show, add="+")
+        text.after_idle(show)
 
     def _hit_display(self, scan, hit, replacements):
         hide = self.app.hide_text
@@ -692,9 +856,9 @@ class ResultView:
         loc.heading("text", text="内容")
         # Room for "第 501 页 · 第 1 行" and "PRJ-2026-017-S02", plus the scrollbar.
         loc.column("on", width=32, minwidth=32, stretch=False, anchor="center")
-        loc.column("loc", width=148, minwidth=130, stretch=False)
+        loc.column("loc", width=140, minwidth=132, stretch=False)
         loc.column("cat", width=28, minwidth=28, stretch=False)
-        loc.column("text", width=136, minwidth=120, stretch=True)
+        loc.column("text", width=132, minwidth=124, stretch=True)
         cat_index = {c: i for i, c in enumerate(cats)}
         for hit in hits:
             mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
@@ -773,7 +937,7 @@ class ResultView:
                 fg=INK2,
                 font=fonts["small"],
                 anchor="w",
-                wraplength=320,
+                wraplength=480,
                 justify="left",
             ).pack(fill="x")
         tk.Label(left, text=path, bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"], anchor="w").pack(fill="x")

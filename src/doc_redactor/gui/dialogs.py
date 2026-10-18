@@ -62,6 +62,72 @@ def confirm_dialog(
     return result["value"]
 
 
+def radio_dialog(
+    parent: tk.Tk | tk.Toplevel,
+    title: str,
+    body: str,
+    options: list[tuple[str, str]],
+    *,
+    default: str | None = None,
+    ok_label: str = "确定",
+    cancel_label: str = "取消",
+) -> str | None:
+    """One radio stays selected. Returns the chosen value, or None if cancelled."""
+    if not options:
+        return None
+    values = [value for _label, value in options]
+    picked = default if default in values else values[0]
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.configure(bg=BG_SURFACE)
+    dialog.transient(parent)
+    dialog.resizable(False, False)
+    result: dict[str, str | None] = {"value": None}
+    var = tk.StringVar(value=picked)
+
+    def finish(value: str | None) -> None:
+        result["value"] = value
+        dialog.destroy()
+
+    def accept() -> None:
+        choice = var.get()
+        if choice not in values:
+            choice = values[0]
+        finish(choice)
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: finish(None))
+    dialog.bind("<Escape>", lambda _e: finish(None))
+
+    head = tk.Frame(dialog, bg=BG_INSET)
+    head.pack(fill="x")
+    tk.Label(head, text=title, bg=BG_INSET, fg=INK, anchor="w").pack(fill="x", padx=14, pady=8)
+
+    wrap = tk.Frame(dialog, bg=BG_SURFACE)
+    wrap.pack(fill="both", expand=True, padx=14, pady=12)
+    tk.Label(wrap, text=body, bg=BG_SURFACE, fg=INK, justify="left", wraplength=460, anchor="w").pack(fill="x")
+    radios = tk.Frame(wrap, bg=BG_SURFACE)
+    radios.pack(fill="x", pady=(10, 0))
+    for label, value in options:
+        ttk.Radiobutton(radios, text=label, value=value, variable=var).pack(anchor="w", pady=2)
+
+    foot = tk.Frame(dialog, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+    foot.pack(fill="x")
+    inner = tk.Frame(foot, bg=BG_SURFACE)
+    inner.pack(fill="x", padx=14, pady=8)
+    ttk.Button(inner, text=ok_label, style="Primary.TButton", command=accept).pack(side="right")
+    ttk.Button(inner, text=cancel_label, command=lambda: finish(None)).pack(side="right", padx=(0, 8))
+
+    dialog.update_idletasks()
+    pw, ph = parent.winfo_width(), parent.winfo_height()
+    dw, dh = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+    x = parent.winfo_rootx() + max(0, (pw - dw) // 2)
+    y = parent.winfo_rooty() + max(0, (ph - dh) // 2)
+    dialog.geometry(f"+{x}+{y}")
+    dialog.grab_set()
+    parent.wait_window(dialog)
+    return result["value"]
+
+
 def prompt_dialog(
     parent: tk.Tk | tk.Toplevel,
     title: str,

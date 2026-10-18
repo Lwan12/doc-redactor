@@ -50,6 +50,57 @@ from doc_redactor.ruleset import (
 )
 
 
+def rects_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    """True when the two (x1, y1, x2, y2) boxes share any pixel."""
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def place_more_menu(
+    *,
+    button: tuple[int, int, int, int],
+    menu_size: tuple[int, int],
+    window: tuple[int, int, int, int],
+    headings: list[tuple[int, int, int, int]],
+    margin: int = 4,
+    gap: int = 2,
+) -> tuple[int, int]:
+    """Top-left of the rules 「更多」 menu.
+
+    Prefer the spot under the button, right-aligned. If that would cover a
+    table heading (例子, 操作, or any other), drop the menu to just below the
+    heading row. Stay inside the window when that still clears the headings.
+    ``button`` and ``window`` are (x, y, w, h). ``headings`` are (x1, y1, x2, y2).
+    """
+    bx, by, bw, bh = button
+    mw, mh = max(menu_size[0], 1), max(menu_size[1], 1)
+    wx, wy, ww, wh = window
+    x = bx + bw - mw
+    left_limit = wx + margin
+    right_limit = wx + ww - margin - mw
+    if right_limit < left_limit:
+        x = left_limit
+    else:
+        x = min(max(x, left_limit), right_limit)
+    y = by + bh
+
+    def box(ox: int, oy: int) -> tuple[int, int, int, int]:
+        return (ox, oy, ox + mw, oy + mh)
+
+    if any(rects_overlap(box(x, y), heading) for heading in headings):
+        crossed = [heading for heading in headings if x < heading[2] and heading[0] < x + mw]
+        band = crossed or list(headings)
+        y = max(heading[3] for heading in band) + gap
+        for _ in range(8):
+            if not any(rects_overlap(box(x, y), heading) for heading in headings):
+                break
+            y += 1
+    bottom_limit = wy + wh - margin - mh
+    lifted = box(x, bottom_limit)
+    if y > bottom_limit >= wy + margin and not any(rects_overlap(lifted, heading) for heading in headings):
+        y = bottom_limit
+    return x, y
+
+
 class RulesView:
     def __init__(self, app) -> None:
         self.app = app
@@ -59,6 +110,7 @@ class RulesView:
         self._msg = None
         self._more_menu = None
         self._more_btn = None
+        self._rules_tree = None
 
     def present(self) -> None:
         self.frame.pack(fill="both", expand=True)
@@ -155,6 +207,7 @@ class RulesView:
             side="right", padx=8
         )
 
+        self._rules_tree = None
         pane = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         pane.pack(fill="both", expand=True)
         if not self.app.ruleset.rules:
@@ -174,6 +227,7 @@ class RulesView:
                 show="headings",
                 selectmode="browse",
             )
+            self._rules_tree = tree
             tree.heading("on", text="启用")
             tree.heading("name", text="规则名")
             tree.heading("kind", text="类型")
@@ -227,7 +281,7 @@ class RulesView:
             tree.bind("<Double-1>", lambda e: self._edit_selected(tree))
         tk.Label(
             body,
-            text="改动要点「确定」才生效。停用不会删掉规则，只是这次不遮。",
+            text="停用不会删掉规则，只是这次不遮。启用和停用会马上改好，并自动保存。",
             bg=BG_PAGE,
             fg=INK2,
             font=fonts["small"],
@@ -430,7 +484,7 @@ class RulesView:
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=8)
         why = (
-            "点「确定」才会保存。没点之前，现有规则和原文件都不会变。"
+            "点「确定」后这条规则才会改好，并自动保存。没点之前，现有规则和原文件都不会变。"
             if ev.can_save
             else f"还不能确定：{ev.message}"
         )
@@ -672,8 +726,10 @@ class RulesView:
         elif not words:
             why = f"还不能确定：{MSG_PLAN_EMPTY}。" if is_plan else "还不能确定：词表还是空的，先加几个词。"
         else:
-            why = "点「确定」才会保存。没点之前，现有规则不变。"
-        tk.Label(inner, text=why, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="left")
+            why = "点「确定」后这条规则才会改好，并自动保存。没点之前，现有规则不变。"
+        tk.Label(inner, text=why, bg=BG_SURFACE, fg=INK2, font=fonts["small"], wraplength=560, justify="left").pack(
+            side="left"
+        )
         ttk.Button(inner, text="取消", command=self.app.cancel_rule_edit).pack(side="right")
         ttk.Button(
             inner,
@@ -890,15 +946,75 @@ class RulesView:
         ).pack(side="right", padx=8)
 
 
+    def heading_rects(self) -> list[tuple[int, int, int, int]]:
+        """Root boxes of each rules-table heading, from the column's left to its right.
+
+        The bottom edge is the top of the first data row, so the whole heading
+        strip (例子, 操作, and the rest) is included, including padding between
+        the heading text and the first row.
+        """
+        tree = self._rules_tree
+        if tree is None:
+            return []
+        try:
+            if not tree.winfo_exists():
+                return []
+        except tk.TclError:
+            return []
+        tree.update_idletasks()
+        kids = tree.get_children()
+        if not kids:
+            return []
+        row = tree.bbox(kids[0])
+        if not row or row[1] <= 0:
+            return []
+        header_bottom = row[1]
+        rx = tree.winfo_rootx()
+        ry = tree.winfo_rooty()
+        rects = []
+        for col in tree.cget("columns"):
+            cell = tree.bbox(kids[0], col)
+            if not cell or cell[2] <= 0:
+                continue
+            rects.append((rx + cell[0], ry, rx + cell[0] + cell[2], ry + header_bottom))
+        if rects:
+            return rects
+        return [(rx, ry, rx + max(tree.winfo_width(), 1), ry + header_bottom)]
+
     def post_more_menu(self) -> None:
         btn = self._more_btn
         menu = self._more_menu
         if btn is None or menu is None:
             return
         btn.update_idletasks()
-        x = btn.winfo_rootx()
-        y = btn.winfo_rooty() + btn.winfo_height()
+        root = btn.winfo_toplevel()
+        root.update_idletasks()
+        # A menu reports width 1 until it has been posted once.
+        y0 = btn.winfo_rooty() + btn.winfo_height()
+        menu.post(btn.winfo_rootx(), y0)
+        menu.update_idletasks()
+        width = max(menu.winfo_width(), menu.winfo_reqwidth(), 1)
+        height = max(menu.winfo_height(), menu.winfo_reqheight(), 1)
+        headings = self.heading_rects()
+        if self._rules_tree is not None and not headings:
+            root.update()
+            headings = self.heading_rects()
+        x, y = place_more_menu(
+            button=(btn.winfo_rootx(), btn.winfo_rooty(), btn.winfo_width(), btn.winfo_height()),
+            menu_size=(width, height),
+            window=(root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()),
+            headings=headings,
+        )
+        menu.unpost()
         menu.post(x, y)
+        menu.update_idletasks()
+        actual_w = max(menu.winfo_width(), width)
+        actual_h = max(menu.winfo_height(), height)
+        actual = (menu.winfo_rootx(), menu.winfo_rooty(), menu.winfo_rootx() + actual_w, menu.winfo_rooty() + actual_h)
+        if headings and any(rects_overlap(actual, heading) for heading in headings):
+            y = max(heading[3] for heading in headings) + 2
+            menu.unpost()
+            menu.post(x, y)
 
 
 def _int(value: str, default: int) -> int:

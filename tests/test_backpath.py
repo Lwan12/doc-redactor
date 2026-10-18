@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
 from datetime import datetime
 from pathlib import Path
 
 import pymupdf
+import pytest
 from docx import Document
 
 from doc_redactor.backpath import (
@@ -38,6 +40,7 @@ from doc_redactor.backpath import (
     protect_written,
     rescan_hint,
     retain_editor_draft,
+    unwritten_failure_banner,
     rules_signature,
     session_signature,
     step_clickable,
@@ -45,7 +48,7 @@ from doc_redactor.backpath import (
     write_allowed,
 )
 from doc_redactor.engine import RegexRule, build_engine
-from doc_redactor.scan import FileScan, KIND_PDF, KIND_WORD, LocatedHit, WriteResult, scan_path, write_scans
+from doc_redactor.scan import FileScan, KIND_PDF, KIND_WORD, LocatedHit, WriteResult, scan_path, write_scan, write_scans
 
 
 def _rule(name="项目号", *, enabled=True, pattern=r"ABC-\d{4}-\d{3}", replacement="", terms=None):
@@ -406,6 +409,59 @@ def test_all_failed_writes_stay_unwritten_until_one_succeeds():
     assert decide_close(on_result=True, written=decide_written(False, partial), has_preview=True) is False
     # A retry that fails again must not clear a file that already landed.
     assert decide_written(True, failed) is True
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (PermissionError(13, "Permission denied", "SECRET-PATH"), "输出文件夹不能写入：没有权限"),
+        (OSError(errno.ENOSPC, "No space left on device", "SECRET-PATH"), "输出文件夹不能写入：磁盘已满"),
+        (OSError(errno.EIO, "Input/output error", "SECRET-PATH"), "输出文件夹不能写入：无法创建"),
+    ],
+)
+def test_write_scans_mkdir_oserror_stays_unwritten(tmp_path: Path, monkeypatch, error, expected):
+    source = tmp_path / "notes.docx"
+    _docx(source, "ABC-2026-001")
+    scan = scan_path(source, _engine())
+    out = tmp_path / "blocked" / "batch"
+
+    def boom(self, mode=0o777, parents=False, exist_ok=False):
+        raise error
+
+    monkeypatch.setattr(Path, "mkdir", boom)
+    results = write_scans([scan], out)
+    assert len(results) == 1
+    assert results[0].dest is None
+    assert results[0].error == expected
+    assert "ABC-2026-001" not in results[0].error
+    assert "SECRET-PATH" not in results[0].error
+    assert "Permission denied" not in (results[0].error or "")
+    assert "No space" not in (results[0].error or "")
+    assert decide_written(False, results) is False
+    assert unwritten_failure_banner([(source.name, results[0].error or "")]) == f"✕ {expected}"
+    kept = "\n".join(paragraph.text for paragraph in Document(str(source)).paragraphs)
+    assert "ABC-2026-001" in kept
+    assert not out.exists()
+
+
+def test_write_scan_mkdir_permission_error(tmp_path: Path, monkeypatch):
+    source = tmp_path / "notes.docx"
+    _docx(source, "ABC-2026-001")
+    scan = scan_path(source, _engine())
+
+    def boom(self, mode=0o777, parents=False, exist_ok=False):
+        raise PermissionError(13, "Permission denied", "SECRET-PATH")
+
+    monkeypatch.setattr(Path, "mkdir", boom)
+    try:
+        write_scan(scan, tmp_path / "out" / "notes.redacted.docx")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("mkdir PermissionError was not reported")
+    assert message == "输出文件夹不能写入：没有权限"
+    assert "SECRET-PATH" not in message
+    assert "ABC-2026-001" not in message
 
 
 def test_cancel_then_rescan_drops_the_previous_generation():
