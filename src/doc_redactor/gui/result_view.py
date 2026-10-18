@@ -38,6 +38,61 @@ from doc_redactor.gui.theme import (
 from doc_redactor.engine import redaction_label
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
 
+# Left is the previous page, right is the next page.
+PDF_PAGER = (("‹", -1), ("›", 1))
+
+
+def clamp_page(index: int, delta: int, count: int) -> int:
+    """Page index after moving by delta, kept inside the document."""
+    if count <= 0:
+        return 0
+    return max(0, min(count - 1, index + delta))
+
+
+def line_visible(text: tk.Text, index: str) -> bool:
+    try:
+        return bool(text.dlineinfo(index))
+    except tk.TclError:
+        return False
+
+
+def line_fully_inside(text: tk.Text, index: str) -> bool:
+    """The whole display line is inside the widget, not sliced by its edge."""
+    try:
+        info = text.dlineinfo(index)
+    except tk.TclError:
+        return False
+    if not info:
+        return False
+    return info[1] >= 0 and info[1] + info[3] <= text.winfo_height()
+
+
+def _fit_preview_view(text: tk.Text, end: str) -> None:
+    """Show the start of the text. If only a short tail is below the pane, bring
+    that tail on screen without slicing the line at the top.
+
+    A much longer document stays at the top; the scrollbar still reaches the rest.
+    """
+    text.yview_moveto(0)
+    text.update_idletasks()
+    if line_fully_inside(text, end):
+        return
+    _top, bottom = text.yview()
+    if bottom < 0.65:
+        return
+    text.yview_moveto(1)
+    text.update_idletasks()
+    for _ in range(80):
+        top = text.dlineinfo(text.index("@0,0"))
+        if not top or top[1] >= 0:
+            break
+        text.yview_scroll(-1, "pixels")
+        text.update_idletasks()
+        if not line_fully_inside(text, end):
+            text.yview_scroll(1, "pixels")
+            text.update_idletasks()
+            break
+
 
 class ResultView:
     def __init__(self, app) -> None:
@@ -45,6 +100,9 @@ class ResultView:
         self.frame = ttk.Frame(app.container)
         self._photo = None
         self._hit_ranges: dict[str, int] = {}
+        self._pdf_pager = None
+        self._preview_text = None
+        self._preview_scroll = None
 
     def present(self) -> None:
         self.frame.pack(fill="both", expand=True)
@@ -55,6 +113,9 @@ class ResultView:
 
     def refresh(self) -> None:
         self._building = True
+        self._pdf_pager = None
+        self._preview_text = None
+        self._preview_scroll = None
         app = self.app
         app.drop_step_tip()
         for child in self.frame.winfo_children():
@@ -434,15 +495,20 @@ class ResultView:
         if scan.kind == KIND_PDF and has_prev and scan.pages:
             pager = tk.Frame(head, bg=BG_INSET)
             pager.pack(fill="x")
-            ttk.Button(pager, text="‹", command=lambda: self._turn(-1), width=2).pack(side="right", padx=(0, 4))
-            tk.Label(
-                pager,
-                text=f"第 {self.app.pdf_page + 1} / {len(scan.pages)} 页",
-                bg=BG_INSET,
-                fg=INK,
-                font=fonts["mono_font"],
-            ).pack(side="right")
-            ttk.Button(pager, text="›", command=lambda: self._turn(1), width=2).pack(side="right", padx=4)
+            self._pdf_pager = pager
+            # Pack left to right: previous, page label, next.
+            for glyph, delta in PDF_PAGER:
+                ttk.Button(pager, text=glyph, command=lambda d=delta: self._turn(d), width=2).pack(
+                    side="left", padx=(8, 0) if delta < 0 else (0, 4)
+                )
+                if delta < 0:
+                    tk.Label(
+                        pager,
+                        text=f"第 {self.app.pdf_page + 1} / {len(scan.pages)} 页",
+                        bg=BG_INSET,
+                        fg=INK,
+                        font=fonts["mono_font"],
+                    ).pack(side="left", padx=4)
 
         body = tk.Frame(parent, bg=BG_SURFACE)
         if scan.status == "fail":
@@ -492,12 +558,37 @@ class ResultView:
     def _turn(self, delta: int) -> None:
         scan = self.app.scans[self.app.selected]
         n = len(scan.pages) if scan.pages else 1
-        self.app.pdf_page = max(0, min(n - 1, self.app.pdf_page + delta))
+        self.app.pdf_page = clamp_page(self.app.pdf_page, delta, n)
         self.refresh()
 
     def _text_preview(self, parent, scan: FileScan, fonts) -> None:
-        text = tk.Text(parent, height=6, wrap="word", relief="flat", bd=0, padx=8, pady=4, font=fonts["ui"], bg=BG_SURFACE, fg=INK)
+        host = parent
+        scroll = None
+        # PDF text is taller than the middle column. A scrollbar keeps the
+        # rest of the page reachable instead of clipping the last lines.
+        if scan.kind == KIND_PDF:
+            host = tk.Frame(parent, bg=BG_SURFACE)
+            host.pack(fill="both", expand=True)
+            scroll = ttk.Scrollbar(host, orient="vertical")
+            scroll.pack(side="right", fill="y")
+        text = tk.Text(
+            host,
+            height=6,
+            wrap="word",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=4,
+            font=fonts["ui"],
+            bg=BG_SURFACE,
+            fg=INK,
+            yscrollcommand=(scroll.set if scroll is not None else None),
+        )
         text.pack(fill="both", expand=True)
+        if scroll is not None:
+            scroll.configure(command=text.yview)
+        self._preview_text = text
+        self._preview_scroll = scroll
         text.tag_configure("hit", background=HL, underline=True)
         text.tag_configure("cur", background=HL2, underline=True)
         text.tag_configure("off", foreground=PLACE, underline=True)
@@ -530,6 +621,7 @@ class ResultView:
                 text.insert("end", block[pos:], ("title",) if title else ())
             text.insert("end", "\n")
 
+        page_starts: list[str] = []
         if scan.kind == KIND_WORD:
             by_unit: dict[str, list] = {}
             for hit in scan.hits:
@@ -538,6 +630,7 @@ class ResultView:
                 insert_run(para, by_unit.get(f"p:{i}", []), title=(i == 0))
         else:
             for pi, page in enumerate(scan.pages):
+                page_starts.append(text.index("end-1c"))
                 text.insert("end", f"—— 第 {pi + 1} 页 ——\n", ("page",))
                 page_hits = [h for h in scan.hits if h.page == pi and h.unit.startswith("page:")]
                 offset = 0
@@ -573,6 +666,38 @@ class ResultView:
                 text.see(f"{tag}.first")
             except tk.TclError:
                 pass
+        elif page_starts:
+            self._reveal_open_page(text, page_starts)
+
+    def _reveal_open_page(self, text: tk.Text, page_starts: list[str]) -> None:
+        """Keep the open page's last line whole, without slicing a line at the top."""
+        index = clamp_page(self.app.pdf_page, 0, len(page_starts))
+        if index + 1 < len(page_starts):
+            end = text.index(f"{page_starts[index + 1]} - 1 chars")
+        else:
+            end = text.index("end-1c")
+        state = {"height": 0, "busy": False}
+
+        def show(_event=None) -> None:
+            # The first configure is often the short requested height. Align
+            # again when the pane grows, or the open page stays scrolled to
+            # the end and a line is cut at the top.
+            if state["busy"] or not text.winfo_exists():
+                return
+            height = text.winfo_height()
+            if height < 80 or height == state["height"]:
+                return
+            state["busy"] = True
+            state["height"] = height
+            try:
+                _fit_preview_view(text, end)
+            except tk.TclError:
+                state["height"] = 0
+            finally:
+                state["busy"] = False
+
+        text.bind("<Configure>", show, add="+")
+        text.after_idle(show)
 
     def _hit_display(self, scan, hit, replacements):
         hide = self.app.hide_text
