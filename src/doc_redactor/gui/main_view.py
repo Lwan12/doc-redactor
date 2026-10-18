@@ -14,6 +14,7 @@ from doc_redactor.backpath import (
     MSG_REMOVE_SELECTED,
     rescan_hint,
 )
+from doc_redactor.persist import MSG_FIRST, MSG_OUTPUT_REMEMBER
 from doc_redactor.gui.steps import StepBar
 from doc_redactor.gui.theme import (
     BG_INSET,
@@ -74,6 +75,20 @@ class MainView:
         app = self.app
         fonts = app.fonts
         self._head(parent)
+        if app.first_run_hint:
+            bar = tk.Frame(parent, bg=BG_INSET, highlightthickness=1, highlightbackground=LINE2)
+            bar.pack(fill="x")
+            inner = tk.Frame(bar, bg=BG_INSET)
+            inner.pack(fill="x", padx=12, pady=6)
+            tk.Label(
+                inner,
+                text="ⓘ " + MSG_FIRST,
+                bg=BG_INSET,
+                fg=INK,
+                font=fonts["small"],
+                anchor="w",
+            ).pack(side="left")
+            ttk.Button(inner, text="知道了", command=app.dismiss_first_run).pack(side="right")
         body = tk.Frame(parent, bg=BG_PAGE)
         body.pack(fill="both", expand=True, padx=12, pady=8)
         pane = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
@@ -207,9 +222,14 @@ class MainView:
                 fill="x", pady=(4, 0)
             )
         else:
-            tk.Label(left, text=MSG_OUTPUT_PARENT, bg=BG_SURFACE, fg=INK2, font=fonts["small"], anchor="w").pack(
-                fill="x", pady=(2, 0)
-            )
+            tk.Label(
+                left,
+                text=MSG_OUTPUT_PARENT + MSG_OUTPUT_REMEMBER,
+                bg=BG_SURFACE,
+                fg=INK2,
+                font=fonts["small"],
+                anchor="w",
+            ).pack(fill="x", pady=(2, 0))
         can_next = bool(app.files) and not app.output_error
         ttk.Button(
             inner,

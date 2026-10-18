@@ -19,6 +19,7 @@ if str(SRC) not in sys.path:
 _FONTS_CONF = Path(os.environ.get("DOC_REDACTOR_FONTS_CONF", ""))
 if _FONTS_CONF.is_file():
     os.environ.setdefault("FONTCONFIG_FILE", str(_FONTS_CONF))
+os.environ.setdefault("DOC_REDACTOR_HOME", "/tmp/doc-redactor-shoot-home")
 
 OUT = Path(os.environ.get("DOC_REDACTOR_SHOTS", "screenshots-out"))
 
@@ -78,6 +79,15 @@ STATES = [
     ("54-res-partial", "res-partial"),
     ("55-main-rules-kept", "main-rules-kept"),
     ("56-main-rules-changed", "main-rules-changed"),
+    ("57-main-first", "main-first"),
+    ("58-rules-more", "rules-more"),
+    ("59-rules-reset", "rules-reset"),
+    ("60-rules-reset-same", "rules-reset-same"),
+    ("61-rules-reset-done", "rules-reset-done"),
+    ("62-main-cfgbad", "main-cfgbad"),
+    ("63-rules-savefail", "rules-savefail"),
+    ("64-main-outmissing", "main-outmissing"),
+    ("65-rules-opened", "rules-opened"),
 ]
 
 

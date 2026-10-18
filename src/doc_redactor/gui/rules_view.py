@@ -26,6 +26,13 @@ from doc_redactor.pattern_guess import (
     TestHit,
     evaluate_rule_form,
 )
+from doc_redactor.persist import (
+    MSG_IMPORT_FOOT,
+    MSG_OPEN_DIR,
+    MSG_PERSIST_FOOT,
+    MSG_RESET_MENU,
+    MSG_SAVE_FAIL,
+)
 from doc_redactor.ruleset import (
     DUP_OVERWRITE,
     DUP_RENAME,
@@ -50,6 +57,8 @@ class RulesView:
         self._eval_job = None
         self._test = None
         self._msg = None
+        self._more_menu = None
+        self._more_btn = None
 
     def present(self) -> None:
         self.frame.pack(fill="both", expand=True)
@@ -83,10 +92,35 @@ class RulesView:
         inner.pack(fill="x", padx=12, pady=8)
         ttk.Button(inner, text="‹ 返回", command=self.app.rules_back).pack(side="left")
         tk.Label(inner, text=title, bg=BG_SURFACE, fg=INK, font=fonts["title"]).pack(side="left", padx=12)
+        if self.app.save_failed and self.app.rules_page == "list":
+            fail = tk.Frame(self.frame, bg="#fdf1e5")
+            fail.pack(fill="x")
+            row = tk.Frame(fail, bg="#fdf1e5")
+            row.pack(fill="x", padx=12, pady=6)
+            tk.Label(
+                row,
+                text="⚠ " + MSG_SAVE_FAIL,
+                bg="#fdf1e5",
+                fg="#c04700",
+                font=fonts["small"],
+                anchor="w",
+                wraplength=560,
+                justify="left",
+            ).pack(side="left", fill="x", expand=True)
+            ttk.Button(row, text="导出…", command=self.app.export_rules_dialog).pack(side="right")
+            ttk.Button(row, text=MSG_OPEN_DIR, command=self.app.open_settings_location).pack(side="right", padx=6)
         label = self.app.ruleset.undo_label()
         if label and self.app.rules_page == "list":
-            tk.Label(inner, text=label, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="right", padx=8)
             ttk.Button(inner, text="撤销", command=self.app.undo_rules).pack(side="right")
+            tk.Label(
+                inner,
+                text=label,
+                bg=BG_SURFACE,
+                fg=INK2,
+                font=fonts["small"],
+                wraplength=420,
+                justify="right",
+            ).pack(side="right", padx=8)
         elif self.app.rules_page == "words" and self.app.word_form.get("snap") is not None:
             snap_at = self.app.word_form.get("snap_at") or 0
             if snap_at and time.monotonic() - snap_at >= UNDO_TTL_SECONDS:
@@ -109,9 +143,17 @@ class RulesView:
         ttk.Button(bar, text="从常用规则库添加", command=self.app.show_library).pack(side="left")
         ttk.Button(bar, text="导入…", command=self.app.browse_import).pack(side="left", padx=6)
         ttk.Button(bar, text="导出…", command=self.app.export_rules_dialog).pack(side="left")
+        more = ttk.Button(bar, text="更多 ▾", command=self.post_more_menu)
+        more.pack(side="right")
+        menu = tk.Menu(self.app.root, tearoff=0)
+        menu.add_command(label=MSG_RESET_MENU, command=self.app.ask_restore_defaults)
+        self._more_btn = more
+        self._more_menu = menu
         n = len(self.app.ruleset.rules)
         on = len(self.app.ruleset.enabled_rules())
-        tk.Label(bar, text=f"共 {n} 条 · 启用 {on}", bg=BG_PAGE, fg=INK2, font=fonts["small"]).pack(side="right")
+        tk.Label(bar, text=f"共 {n} 条 · 启用 {on}", bg=BG_PAGE, fg=INK2, font=fonts["small"]).pack(
+            side="right", padx=8
+        )
 
         pane = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         pane.pack(fill="both", expand=True)
@@ -190,6 +232,29 @@ class RulesView:
             fg=INK2,
             font=fonts["small"],
         ).pack(anchor="w", pady=(8, 0))
+        foot = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
+        foot.pack(fill="x")
+        inner = tk.Frame(foot, bg=BG_SURFACE)
+        inner.pack(fill="x", padx=12, pady=8)
+        tk.Label(
+            inner,
+            text=MSG_PERSIST_FOOT,
+            bg=BG_SURFACE,
+            fg=INK2,
+            font=fonts["small"],
+            anchor="w",
+            wraplength=680,
+            justify="left",
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Button(inner, text=MSG_OPEN_DIR, command=self.app.open_settings_location).pack(side="right")
+        if self.app.settings_open_msg:
+            tk.Label(
+                inner,
+                text=self.app.settings_open_msg,
+                bg=BG_SURFACE,
+                fg="#008035",
+                font=fonts["small"],
+            ).pack(side="right", padx=8)
 
     def _edit_selected(self, tree) -> None:
         sel = tree.selection()
@@ -808,9 +873,13 @@ class RulesView:
         foot.pack(fill="x")
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=8)
-        tk.Label(inner, text=f"将导入 {n} 条。重名的默认跳过，现有规则不变。", bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(
-            side="left"
-        )
+        tk.Label(
+            inner,
+            text=MSG_IMPORT_FOOT.format(n=n),
+            bg=BG_SURFACE,
+            fg=INK2,
+            font=fonts["small"],
+        ).pack(side="left")
         ttk.Button(inner, text="取消", command=lambda: self.app.show_rules_page("list")).pack(side="right")
         ttk.Button(
             inner,
@@ -819,6 +888,17 @@ class RulesView:
             command=self.app.confirm_import,
             state=("normal" if n else "disabled"),
         ).pack(side="right", padx=8)
+
+
+    def post_more_menu(self) -> None:
+        btn = self._more_btn
+        menu = self._more_menu
+        if btn is None or menu is None:
+            return
+        btn.update_idletasks()
+        x = btn.winfo_rootx()
+        y = btn.winfo_rooty() + btn.winfo_height()
+        menu.post(x, y)
 
 
 def _int(value: str, default: int) -> int:
