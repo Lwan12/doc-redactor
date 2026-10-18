@@ -59,6 +59,7 @@ class RulesView:
         self._msg = None
         self._more_menu = None
         self._more_btn = None
+        self._rules_tree = None
 
     def present(self) -> None:
         self.frame.pack(fill="both", expand=True)
@@ -155,6 +156,7 @@ class RulesView:
             side="right", padx=8
         )
 
+        self._rules_tree = None
         pane = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         pane.pack(fill="both", expand=True)
         if not self.app.ruleset.rules:
@@ -174,6 +176,7 @@ class RulesView:
                 show="headings",
                 selectmode="browse",
             )
+            self._rules_tree = tree
             tree.heading("on", text="启用")
             tree.heading("name", text="规则名")
             tree.heading("kind", text="类型")
@@ -227,7 +230,7 @@ class RulesView:
             tree.bind("<Double-1>", lambda e: self._edit_selected(tree))
         tk.Label(
             body,
-            text="改动要点「确定」才生效。停用不会删掉规则，只是这次不遮。",
+            text="停用不会删掉规则，只是这次不遮。启用和停用会马上改好，并自动保存。",
             bg=BG_PAGE,
             fg=INK2,
             font=fonts["small"],
@@ -430,7 +433,7 @@ class RulesView:
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=8)
         why = (
-            "点「确定」才会保存。没点之前，现有规则和原文件都不会变。"
+            "点「确定」后这条规则才会改好，并自动保存。没点之前，现有规则和原文件都不会变。"
             if ev.can_save
             else f"还不能确定：{ev.message}"
         )
@@ -672,8 +675,10 @@ class RulesView:
         elif not words:
             why = f"还不能确定：{MSG_PLAN_EMPTY}。" if is_plan else "还不能确定：词表还是空的，先加几个词。"
         else:
-            why = "点「确定」才会保存。没点之前，现有规则不变。"
-        tk.Label(inner, text=why, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="left")
+            why = "点「确定」后这条规则才会改好，并自动保存。没点之前，现有规则不变。"
+        tk.Label(inner, text=why, bg=BG_SURFACE, fg=INK2, font=fonts["small"], wraplength=560, justify="left").pack(
+            side="left"
+        )
         ttk.Button(inner, text="取消", command=self.app.cancel_rule_edit).pack(side="right")
         ttk.Button(
             inner,
@@ -890,14 +895,53 @@ class RulesView:
         ).pack(side="right", padx=8)
 
 
+    def _action_column_left(self) -> int | None:
+        """Root x of the 操作 column, so the more-menu can sit entirely to its left."""
+        tree = self._rules_tree
+        if tree is None:
+            return None
+        try:
+            if not tree.winfo_exists():
+                return None
+        except tk.TclError:
+            return None
+        kids = tree.get_children()
+        if kids:
+            box = tree.bbox(kids[0], "act")
+            if box:
+                return tree.winfo_rootx() + box[0]
+        left = tree.winfo_rootx()
+        for col in tree.cget("columns"):
+            if col == "act":
+                return left
+            left += int(tree.column(col, "width"))
+        return None
+
     def post_more_menu(self) -> None:
         btn = self._more_btn
         menu = self._more_menu
         if btn is None or menu is None:
             return
         btn.update_idletasks()
-        x = btn.winfo_rootx()
         y = btn.winfo_rooty() + btn.winfo_height()
+        # Measure after a first post; a menu's width is 1 until it is mapped.
+        menu.post(btn.winfo_rootx(), y)
+        menu.update_idletasks()
+        width = max(menu.winfo_width(), menu.winfo_reqwidth(), 1)
+        root = btn.winfo_toplevel()
+        limit = self._action_column_left()
+        if limit is None:
+            x = btn.winfo_rootx() + btn.winfo_width() - width
+        else:
+            x = limit - width - 8
+        x = max(root.winfo_rootx() + 4, x)
+        right = root.winfo_rootx() + root.winfo_width() - 4
+        if x + width > right:
+            x = max(root.winfo_rootx() + 4, right - width)
+        # Still keep clear of 操作 if the window is wide enough.
+        if limit is not None and x + width > limit - 4 and limit - width - 8 >= root.winfo_rootx() + 4:
+            x = limit - width - 8
+        menu.unpost()
         menu.post(x, y)
 
 

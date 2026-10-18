@@ -40,7 +40,7 @@ from doc_redactor.backpath import (
     without_paths,
     write_allowed,
 )
-from doc_redactor.gui.dialogs import confirm_dialog, prompt_dialog, show_toast
+from doc_redactor.gui.dialogs import confirm_dialog, prompt_dialog, radio_dialog, show_toast
 from doc_redactor.gui.main_view import MainView
 from doc_redactor.gui.result_view import ResultView
 from doc_redactor.gui.rules_view import RulesView
@@ -82,11 +82,15 @@ from doc_redactor.ruleset import (
 )
 from doc_redactor.scan import (
     FileScan,
+    blocked_write_results,
     conflicting_destinations,
+    output_dir_unwritable,
     scan_paths,
     size_label,
     write_scans,
 )
+
+_EXPORT_CHOICES = (("全部规则", "all"), ("只导出勾选的几条", "enabled"))
 
 
 SUPPORTED = [
@@ -795,17 +799,16 @@ class App:
         self.refresh()
 
     def export_rules_dialog(self) -> None:
-        choice = confirm_dialog(
+        choice = radio_dialog(
             self.root,
             "导出规则",
             MSG_EXPORT_BODY,
-            [
-                ("取消", "cancel", False),
-                ("只导出勾选的几条", "enabled", False),
-                ("导出全部", "all", True),
-            ],
+            list(_EXPORT_CHOICES),
+            default="all",
+            ok_label="导出…",
+            cancel_label="取消",
         )
-        if choice in (None, "cancel"):
+        if not choice:
             return
         path = filedialog.asksaveasfilename(
             title="导出规则",
@@ -1009,14 +1012,22 @@ class App:
                 return
             sequence = choice == "seq"
             overwrite = choice == "over"
-        results = write_scans(
-            targets,
-            batch,
-            replacements=self.ruleset.replacements(),
-            overwrite=overwrite,
-            sequence=sequence,
-            engine=self.ruleset.to_engine(),
-        )
+        try:
+            results = write_scans(
+                targets,
+                batch,
+                replacements=self.ruleset.replacements(),
+                overwrite=overwrite,
+                sequence=sequence,
+                engine=self.ruleset.to_engine(),
+            )
+        except OSError as exc:
+            results = blocked_write_results(targets, output_dir_unwritable(exc))
+        except ValueError as exc:
+            message = str(exc)
+            if not message.startswith("输出文件夹不能写入"):
+                message = "输出文件夹不能写入：无法创建"
+            results = blocked_write_results(targets, message)
         new_paths = []
         for scan, item in zip(targets, results):
             key = str(scan.path)
@@ -1396,8 +1407,10 @@ class App:
             self.show_rules_page("list")
             self._overlay(
                 "导出规则",
-                MSG_EXPORT_BODY + "\n\n○ 全部\n○ 只导出勾选的几条",
+                MSG_EXPORT_BODY,
                 [("取消", False), ("导出…", True)],
+                choices=list(_EXPORT_CHOICES),
+                choice_default="all",
             )
             return
         if key == "rules-more":
@@ -1533,6 +1546,8 @@ class App:
         extra: str | None = None,
         danger: str | None = None,
         focus: str | None = None,
+        choices: list[tuple[str, str]] | None = None,
+        choice_default: str | None = None,
     ) -> None:
         from doc_redactor.gui.theme import BAD, BG_INSET, BG_SURFACE, INK, INK2, LINE2
 
@@ -1549,8 +1564,18 @@ class App:
         head.pack(fill="x")
         tk.Label(head, text=title, bg=BG_INSET, fg=INK, anchor="w").pack(fill="x", padx=14, pady=8)
         tk.Label(box, text=body, bg=BG_SURFACE, fg=INK, justify="left", wraplength=620, anchor="w").pack(
-            fill="x", padx=14, pady=(12, 4 if extra else 12)
+            fill="x", padx=14, pady=(12, 4 if (extra or choices) else 12)
         )
+        if choices:
+            picked = choice_default if choice_default else choices[0][1]
+            if picked not in {value for _label, value in choices}:
+                picked = choices[0][1]
+            var = tk.StringVar(value=picked)
+            self._overlay_choice = var
+            radios = tk.Frame(box, bg=BG_SURFACE)
+            radios.pack(fill="x", padx=14, pady=(0, 12))
+            for label, value in choices:
+                ttk.Radiobutton(radios, text=label, value=value, variable=var).pack(anchor="w", pady=1)
         if extra:
             tk.Label(box, text=extra, bg=BG_SURFACE, fg=INK2, justify="left", wraplength=620, anchor="w").pack(
                 fill="x", padx=14, pady=(0, 12)

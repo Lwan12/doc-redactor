@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import zipfile
@@ -35,6 +36,50 @@ MSG_ENCRYPTED_PDF = (
 MSG_UNSUPPORTED = "不支持这个文件类型。请用 Word（.docx）、PDF 或图片（.png .jpg）。"
 MSG_MISSING = "找不到这个文件。"
 MSG_OPEN_FAIL = "打不开这个文件。请确认文件没有损坏，再试一次。"
+
+
+def output_dir_unwritable(exc: OSError) -> str:
+    """Friendly write-folder reason. No exception text, path, or source text."""
+    err = getattr(exc, "errno", None)
+    if isinstance(exc, PermissionError) or err in {errno.EACCES, errno.EPERM}:
+        why = "没有权限"
+    elif err in {errno.ENOSPC, errno.EDQUOT}:
+        why = "磁盘已满"
+    elif err == errno.EROFS:
+        why = "只读"
+    else:
+        why = "无法创建"
+    return f"输出文件夹不能写入：{why}"
+
+
+def mkdir_output(path: Path) -> None:
+    """Create an output directory. OSError becomes ValueError with a safe message."""
+    try:
+        Path(path).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(output_dir_unwritable(exc)) from exc
+
+
+def blocked_write_results(scans: list[FileScan], message: str) -> list[WriteResult]:
+    """Nothing was written. Writable files carry the folder reason; others stay skipped."""
+    results: list[WriteResult] = []
+    for scan in scans:
+        if scan.status == "fail" or not scan.enabled_hits:
+            results.append(
+                WriteResult(
+                    path=scan.path,
+                    dest=None,
+                    report=None,
+                    counts={},
+                    skipped=True,
+                    error=scan.error if scan.status == "fail" else None,
+                )
+            )
+        else:
+            results.append(
+                WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=message)
+            )
+    return results
 
 
 def too_many_file_hits(count: int) -> bool:
@@ -223,7 +268,10 @@ def write_scans(
     engine: RedactionEngine | None = None,
 ) -> list[WriteResult]:
     destination = Path(outdir)
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        mkdir_output(destination)
+    except ValueError as exc:
+        return blocked_write_results(scans, str(exc))
     mapping = replacements or {}
     written: list[WriteResult] = []
     for scan in scans:
@@ -285,7 +333,7 @@ def write_scan(
     def label(category: str) -> str:
         return mapping.get(category) or redaction_label(category)
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_output(dest.parent)
     if scan.kind == KIND_WORD:
         return _write_docx(scan, dest, label, engine)
     if scan.kind == KIND_PDF:
@@ -482,7 +530,7 @@ def _write_docx(scan: FileScan, dest: Path, label, engine: RedactionEngine | Non
             Hit(start=hit.start, end=hit.end, category=hit.category, text=hit.text) for hit in unit_hits
         ]
         categories.extend(apply_hits_to_paragraph(paragraph, engine_hits, label))
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_output(dest.parent)
     document.save(str(dest))
     media_counts = _write_docx_media(dest, by_unit)
     counts = counts_from_categories(categories)
@@ -590,7 +638,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                     painted.save(buf, format="PNG")
                     page.replace_image(xref, stream=buf.getvalue())
         clear_pdf_hidden(document)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_output(dest.parent)
         document.save(dest, garbage=4, clean=True)
     finally:
         document.close()

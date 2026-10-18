@@ -285,6 +285,17 @@ def decide_written(written: bool, results) -> bool:
     return written
 
 
+def unwritten_failure_banner(failures: list[tuple[str, str]]) -> str:
+    """Every target failed, so the batch is not marked written. Say the reason once."""
+    if not failures:
+        return ""
+    reasons = {reason for _name, reason in failures}
+    if len(reasons) == 1:
+        return f"✕ {next(iter(reasons))}"
+    parts = "；".join(f"{name}：{reason}" for name, reason in failures)
+    return f"✕ 没写出。{parts}"
+
+
 def partial_banner(failures: list[tuple[str, str]]) -> str:
     if not failures:
         return ""
