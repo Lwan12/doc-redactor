@@ -83,7 +83,6 @@ from doc_redactor.ruleset import (
 from doc_redactor.scan import (
     FileScan,
     blocked_write_results,
-    conflicting_destinations,
     output_dir_unwritable,
     scan_paths,
     size_label,
@@ -993,32 +992,15 @@ class App:
             targets = list(self.scans)
         if not targets:
             return
-        conflicts = conflicting_destinations(targets, batch)
-        overwrite = False
-        sequence = False
-        if conflicts:
-            names = "\n".join(path.name for path in conflicts)
-            choice = confirm_dialog(
-                self.root,
-                "输出文件夹里已经有同名文件",
-                f"输出文件夹里已有 {len(conflicts)} 个同名文件：\n{names}\n写出会覆盖它们，覆盖后无法恢复。",
-                [
-                    ("取消，先不写出", "cancel", False),
-                    ("都另存，名字后加序号", "seq", True),
-                    (f"覆盖这 {len(conflicts)} 个", "over", False),
-                ],
-            )
-            if choice in (None, "cancel"):
-                return
-            sequence = choice == "seq"
-            overwrite = choice == "over"
+        # A fresh write always gets a new timestamp folder, so it never meets an
+        # existing file. Retry stays in that folder and still does not overwrite.
         try:
             results = write_scans(
                 targets,
                 batch,
                 replacements=self.ruleset.replacements(),
-                overwrite=overwrite,
-                sequence=sequence,
+                overwrite=False,
+                sequence=False,
                 engine=self.ruleset.to_engine(),
             )
         except OSError as exc:

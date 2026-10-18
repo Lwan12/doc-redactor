@@ -61,44 +61,61 @@ def place_more_menu(
     menu_size: tuple[int, int],
     window: tuple[int, int, int, int],
     headings: list[tuple[int, int, int, int]],
+    avoid: list[tuple[int, int, int, int]] | None = None,
     margin: int = 4,
     gap: int = 2,
 ) -> tuple[int, int]:
     """Top-left of the rules 「更多」 menu.
 
-    Prefer the spot under the button, right-aligned. If that would cover a
-    table heading (例子, 操作, or any other), drop the menu to just below the
-    heading row. Stay inside the window when that still clears the headings.
-    ``button`` and ``window`` are (x, y, w, h). ``headings`` are (x1, y1, x2, y2).
+    Prefer the spot under the button, right-aligned. Never cover a table
+    heading. ``avoid`` is the 操作 column (first row's 修改 / 删除, and the
+    cells under it): if the right-aligned spot would land on that column,
+    shift left so the menu ends just before it, and drop below the heading
+    row when the button sits on top of the headings. Stay inside the window.
+    ``button`` and ``window`` are (x, y, w, h). Rects are (x1, y1, x2, y2).
     """
+    blocked_rects = list(headings) + list(avoid or [])
     bx, by, bw, bh = button
     mw, mh = max(menu_size[0], 1), max(menu_size[1], 1)
     wx, wy, ww, wh = window
-    x = bx + bw - mw
-    left_limit = wx + margin
-    right_limit = wx + ww - margin - mw
-    if right_limit < left_limit:
-        x = left_limit
-    else:
-        x = min(max(x, left_limit), right_limit)
-    y = by + bh
 
-    def box(ox: int, oy: int) -> tuple[int, int, int, int]:
-        return (ox, oy, ox + mw, oy + mh)
+    def clamp_x(x: int) -> int:
+        left_limit = wx + margin
+        right_limit = wx + ww - margin - mw
+        if right_limit < left_limit:
+            return left_limit
+        return min(max(x, left_limit), right_limit)
 
-    if any(rects_overlap(box(x, y), heading) for heading in headings):
-        crossed = [heading for heading in headings if x < heading[2] and heading[0] < x + mw]
-        band = crossed or list(headings)
-        y = max(heading[3] for heading in band) + gap
-        for _ in range(8):
-            if not any(rects_overlap(box(x, y), heading) for heading in headings):
-                break
-            y += 1
-    bottom_limit = wy + wh - margin - mh
-    lifted = box(x, bottom_limit)
-    if y > bottom_limit >= wy + margin and not any(rects_overlap(lifted, heading) for heading in headings):
-        y = bottom_limit
-    return x, y
+    def hits(x: int, y: int) -> bool:
+        rect = (x, y, x + mw, y + mh)
+        return any(rects_overlap(rect, item) for item in blocked_rects)
+
+    right_aligned = clamp_x(bx + bw - mw)
+    under = by + bh
+    candidates = [(right_aligned, under)]
+    if avoid:
+        action_left = min(item[0] for item in avoid)
+        candidates.append((clamp_x(action_left - gap - mw), under))
+    if headings:
+        below = max(item[3] for item in headings) + gap
+        candidates.append((right_aligned, below))
+        if avoid:
+            action_left = min(item[0] for item in avoid)
+            candidates.append((clamp_x(action_left - gap - mw), below))
+    candidates.append((clamp_x(bx - gap - mw), by))
+
+    for x, y in candidates:
+        if hits(x, y):
+            continue
+        bottom_limit = wy + wh - margin - mh
+        if y > bottom_limit >= wy + margin and not hits(x, bottom_limit):
+            y = bottom_limit
+        return x, y
+
+    y = under
+    if blocked_rects:
+        y = max(item[3] for item in blocked_rects) + gap
+    return right_aligned, y
 
 
 class RulesView:
@@ -981,6 +998,34 @@ class RulesView:
             return rects
         return [(rx, ry, rx + max(tree.winfo_width(), 1), ry + header_bottom)]
 
+    def action_rects(self) -> list[tuple[int, int, int, int]]:
+        """Root box of the 操作 column from the first data row down.
+
+        「修改」「删除」 live in that column. The menu must miss the first
+        row's cell and the same cells on the rows under it.
+        """
+        tree = self._rules_tree
+        if tree is None:
+            return []
+        try:
+            if not tree.winfo_exists():
+                return []
+        except tk.TclError:
+            return []
+        tree.update_idletasks()
+        kids = tree.get_children()
+        if not kids:
+            return []
+        cell = tree.bbox(kids[0], "act")
+        if not cell or cell[2] <= 0 or cell[3] <= 0:
+            return []
+        rx = tree.winfo_rootx()
+        ry = tree.winfo_rooty()
+        x1 = rx + cell[0]
+        y1 = ry + cell[1]
+        y2 = ry + max(tree.winfo_height(), cell[1] + cell[3])
+        return [(x1, y1, x1 + cell[2], y2)]
+
     def post_more_menu(self) -> None:
         btn = self._more_btn
         menu = self._more_menu
@@ -995,24 +1040,28 @@ class RulesView:
         menu.update_idletasks()
         width = max(menu.winfo_width(), menu.winfo_reqwidth(), 1)
         height = max(menu.winfo_height(), menu.winfo_reqheight(), 1)
-        headings = self.heading_rects()
-        if self._rules_tree is not None and not headings:
-            root.update()
-            headings = self.heading_rects()
-        x, y = place_more_menu(
-            button=(btn.winfo_rootx(), btn.winfo_rooty(), btn.winfo_width(), btn.winfo_height()),
-            menu_size=(width, height),
-            window=(root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()),
-            headings=headings,
-        )
         menu.unpost()
+
+        def place(mw: int, mh: int) -> tuple[int, int]:
+            headings = self.heading_rects()
+            if self._rules_tree is not None and not headings:
+                root.update()
+                headings = self.heading_rects()
+            return place_more_menu(
+                button=(btn.winfo_rootx(), btn.winfo_rooty(), btn.winfo_width(), btn.winfo_height()),
+                menu_size=(mw, mh),
+                window=(root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()),
+                headings=headings,
+                avoid=self.action_rects(),
+            )
+
+        x, y = place(width, height)
         menu.post(x, y)
         menu.update_idletasks()
         actual_w = max(menu.winfo_width(), width)
         actual_h = max(menu.winfo_height(), height)
-        actual = (menu.winfo_rootx(), menu.winfo_rooty(), menu.winfo_rootx() + actual_w, menu.winfo_rooty() + actual_h)
-        if headings and any(rects_overlap(actual, heading) for heading in headings):
-            y = max(heading[3] for heading in headings) + 2
+        if (actual_w, actual_h) != (width, height):
+            x, y = place(actual_w, actual_h)
             menu.unpost()
             menu.post(x, y)
 
