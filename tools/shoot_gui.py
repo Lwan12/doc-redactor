@@ -43,7 +43,8 @@ STATES = [
     ("17-res-close", "res-close"),
     ("18-res-written", "res-written"),
     ("19-res-many", "res-many"),
-    ("20-res-conflict", "res-conflict"),
+    # 20 was the leftover overwrite dialog; retry now skips an already-written dest.
+    ("20-res-skipped", "res-skipped"),
     ("21-rules-list", "rules-list"),
     ("22-rules-deleted", "rules-deleted"),
     ("23-rule-new", "rule-new"),

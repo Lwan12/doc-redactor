@@ -68,10 +68,10 @@ def place_more_menu(
     """Top-left of the rules 「更多」 menu.
 
     Prefer the spot under the button, right-aligned. Never cover a table
-    heading. ``avoid`` is the 操作 column (first row's 修改 / 删除, and the
-    cells under it): if the right-aligned spot would land on that column,
-    shift left so the menu ends just before it, and drop below the heading
-    row when the button sits on top of the headings. Stay inside the window.
+    heading, the 操作 column, or the first data row (including 替换成).
+    ``avoid`` is those extra boxes. The list opens a gap under the button
+    so that slot is empty; if the slot still hits a blocked rect, shift
+    left of 操作 or drop below the blocked boxes. Stay inside the window.
     ``button`` and ``window`` are (x, y, w, h). Rects are (x1, y1, x2, y2).
     """
     blocked_rects = list(headings) + list(avoid or [])
@@ -128,6 +128,8 @@ class RulesView:
         self._more_menu = None
         self._more_btn = None
         self._rules_tree = None
+        self._menu_gap = None
+        self._placing_menu = False
 
     def present(self) -> None:
         self.frame.pack(fill="both", expand=True)
@@ -216,6 +218,7 @@ class RulesView:
         more.pack(side="right")
         menu = tk.Menu(self.app.root, tearoff=0)
         menu.add_command(label=MSG_RESET_MENU, command=self.app.ask_restore_defaults)
+        menu.bind("<Unmap>", lambda _e: self._on_more_unmap())
         self._more_btn = more
         self._more_menu = menu
         n = len(self.app.ruleset.rules)
@@ -225,6 +228,10 @@ class RulesView:
         )
 
         self._rules_tree = None
+        gap = tk.Frame(body, bg=BG_PAGE, height=0)
+        gap.pack_propagate(False)
+        gap.pack(fill="x")
+        self._menu_gap = gap
         pane = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         pane.pack(fill="both", expand=True)
         if not self.app.ruleset.rules:
@@ -998,6 +1005,33 @@ class RulesView:
             return rects
         return [(rx, ry, rx + max(tree.winfo_width(), 1), ry + header_bottom)]
 
+    def first_row_rects(self) -> list[tuple[int, int, int, int]]:
+        """Root boxes of every cell in the first data row, column order.
+
+        Includes 替换成 and 操作. The menu must miss all of them.
+        """
+        tree = self._rules_tree
+        if tree is None:
+            return []
+        try:
+            if not tree.winfo_exists():
+                return []
+        except tk.TclError:
+            return []
+        tree.update_idletasks()
+        kids = tree.get_children()
+        if not kids:
+            return []
+        rx = tree.winfo_rootx()
+        ry = tree.winfo_rooty()
+        rects = []
+        for col in tree.cget("columns"):
+            cell = tree.bbox(kids[0], col)
+            if not cell or cell[2] <= 0 or cell[3] <= 0:
+                continue
+            rects.append((rx + cell[0], ry + cell[1], rx + cell[0] + cell[2], ry + cell[1] + cell[3]))
+        return rects
+
     def action_rects(self) -> list[tuple[int, int, int, int]]:
         """Root box of the 操作 column from the first data row down.
 
@@ -1026,6 +1060,33 @@ class RulesView:
         y2 = ry + max(tree.winfo_height(), cell[1] + cell[3])
         return [(x1, y1, x1 + cell[2], y2)]
 
+    def _open_menu_gap(self, height: int) -> None:
+        gap = self._menu_gap
+        if gap is None:
+            return
+        try:
+            if not gap.winfo_exists():
+                return
+            gap.configure(height=max(int(height), 0))
+            gap.update_idletasks()
+        except tk.TclError:
+            return
+
+    def _close_menu_gap(self) -> None:
+        gap = self._menu_gap
+        if gap is None:
+            return
+        try:
+            if gap.winfo_exists():
+                gap.configure(height=0)
+        except tk.TclError:
+            return
+
+    def _on_more_unmap(self) -> None:
+        if self._placing_menu:
+            return
+        self._close_menu_gap()
+
     def post_more_menu(self) -> None:
         btn = self._more_btn
         menu = self._more_menu
@@ -1034,36 +1095,46 @@ class RulesView:
         btn.update_idletasks()
         root = btn.winfo_toplevel()
         root.update_idletasks()
-        # A menu reports width 1 until it has been posted once.
-        y0 = btn.winfo_rooty() + btn.winfo_height()
-        menu.post(btn.winfo_rootx(), y0)
-        menu.update_idletasks()
-        width = max(menu.winfo_width(), menu.winfo_reqwidth(), 1)
-        height = max(menu.winfo_height(), menu.winfo_reqheight(), 1)
-        menu.unpost()
-
-        def place(mw: int, mh: int) -> tuple[int, int]:
-            headings = self.heading_rects()
-            if self._rules_tree is not None and not headings:
-                root.update()
-                headings = self.heading_rects()
-            return place_more_menu(
-                button=(btn.winfo_rootx(), btn.winfo_rooty(), btn.winfo_width(), btn.winfo_height()),
-                menu_size=(mw, mh),
-                window=(root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()),
-                headings=headings,
-                avoid=self.action_rects(),
-            )
-
-        x, y = place(width, height)
-        menu.post(x, y)
-        menu.update_idletasks()
-        actual_w = max(menu.winfo_width(), width)
-        actual_h = max(menu.winfo_height(), height)
-        if (actual_w, actual_h) != (width, height):
-            x, y = place(actual_w, actual_h)
+        self._placing_menu = True
+        try:
+            # A menu reports width 1 until it has been posted once.
+            y0 = btn.winfo_rooty() + btn.winfo_height()
+            menu.post(btn.winfo_rootx(), y0)
+            menu.update_idletasks()
+            width = max(menu.winfo_width(), menu.winfo_reqwidth(), 1)
+            height = max(menu.winfo_height(), menu.winfo_reqheight(), 1)
             menu.unpost()
+            # Push the table down so the slot under the button is empty.
+            self._open_menu_gap(height + 4)
+            root.update_idletasks()
+            root.update()
+
+            def place(mw: int, mh: int) -> tuple[int, int]:
+                headings = self.heading_rects()
+                if self._rules_tree is not None and not headings:
+                    root.update()
+                    headings = self.heading_rects()
+                return place_more_menu(
+                    button=(btn.winfo_rootx(), btn.winfo_rooty(), btn.winfo_width(), btn.winfo_height()),
+                    menu_size=(mw, mh),
+                    window=(root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()),
+                    headings=headings,
+                    avoid=self.action_rects() + self.first_row_rects(),
+                )
+
+            x, y = place(width, height)
             menu.post(x, y)
+            menu.update_idletasks()
+            actual_w = max(menu.winfo_width(), width)
+            actual_h = max(menu.winfo_height(), height)
+            if (actual_w, actual_h) != (width, height):
+                self._open_menu_gap(actual_h + 4)
+                root.update_idletasks()
+                x, y = place(actual_w, actual_h)
+                menu.unpost()
+                menu.post(x, y)
+        finally:
+            self._placing_menu = False
 
 
 def _int(value: str, default: int) -> int:

@@ -81,6 +81,7 @@ from doc_redactor.ruleset import (
     word_dup_message,
 )
 from doc_redactor.scan import (
+    MSG_ALREADY_WRITTEN,
     FileScan,
     blocked_write_results,
     output_dir_unwritable,
@@ -133,6 +134,7 @@ class App:
         self.uncheck_memory = None
         self.note_cleared = False
         self.write_errors: dict[str, str] = {}
+        self.write_notes: dict[str, str] = {}
         self.batch_dir: Path | None = None
         self.kept_outputs: list[Path] = []
         self.pin_step_tip = None
@@ -356,6 +358,7 @@ class App:
         self.note_cleared = False
         self.written = False
         self.write_errors = {}
+        self.write_notes = {}
         self.file_status = ["pending"] * len(self.files)
         self.kept_outputs = protect_written(self.kept_outputs)
 
@@ -831,6 +834,7 @@ class App:
         self.cancelled = False
         self.written = False
         self.write_errors = {}
+        self.write_notes = {}
         self.note_cleared = False
         self.main_step = 1
         self.file_status = ["pending"] * len(self.files)
@@ -894,6 +898,7 @@ class App:
         self.pdf_page = 0
         self.written = False
         self.write_errors = {}
+        self.write_notes = {}
         self.batch_dir = None
         self.show("result")
 
@@ -1015,10 +1020,15 @@ class App:
             key = str(scan.path)
             if is_write_failure(scan, item):
                 self.write_errors[key] = item.error or "没写出"
+                self.write_notes.pop(key, None)
             else:
                 self.write_errors.pop(key, None)
                 if item.dest is not None:
                     new_paths.append(item.dest)
+                if item.note:
+                    self.write_notes[key] = item.note
+                else:
+                    self.write_notes.pop(key, None)
         self.kept_outputs = merge_kept(self.kept_outputs, new_paths)
         self.batch_dir = batch
         self.output_display = None
@@ -1108,6 +1118,7 @@ class App:
         self.uncheck_memory = None
         self.note_cleared = False
         self.write_errors = {}
+        self.write_notes = {}
         self.batch_dir = None
         self.kept_outputs = []
         self.pin_step_tip = None
@@ -1279,18 +1290,10 @@ class App:
                 self.write_errors[str(self.scans[2].path)] = "输出文件夹里这个文件正被别的程序占用"
             elif key == "res-many":
                 self.selected = 1
-            elif key == "res-conflict":
+            elif key == "res-skipped":
                 self.selected = 0
-                self.show("result")
-                self._overlay(
-                    "输出文件夹里已经有同名文件",
-                    "输出文件夹里已有 2 个同名文件：\n"
-                    "访视记录_受试者012.redacted.docx\n"
-                    "入组统计报告_V2.redacted.pdf\n"
-                    "写出会覆盖它们，覆盖后无法恢复。",
-                    [("取消，先不写出", False), ("都另存，名字后加序号", True), ("覆盖这 2 个", False)],
-                )
-                return
+                self.written = True
+                self.write_notes[str(self.scans[0].path)] = MSG_ALREADY_WRITTEN
             self.show("result")
             return
 
