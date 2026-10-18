@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 from doc_redactor.gui.result_view import PDF_PAGER, clamp_page, line_fully_inside, line_visible
@@ -52,6 +55,8 @@ def test_place_more_menu_stays_under_the_button_when_nothing_is_below():
 @pytest.fixture(scope="module")
 def gui():
     pytest.importorskip("tkinter")
+    if sys.platform == "win32" and not os.environ.get("DOC_REDACTOR_GUI_TESTS"):
+        pytest.skip("window geometry tests run under xvfb (set DOC_REDACTOR_GUI_TESTS=1 to force)")
     from doc_redactor.gui.app import App, create_root
 
     try:
