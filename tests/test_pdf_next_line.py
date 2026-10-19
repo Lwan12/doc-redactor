@@ -26,6 +26,18 @@ def _engine():
     return build_engine([], [WordlistRule(category="项目号", terms=[HIT], case_sensitive=True)])
 
 
+def _is_poppler() -> bool:
+    """Windows CI ships Git's xpdf 4.00 pdftotext. It joins two lines a few
+    points apart into one and interleaves their letters, untouched text
+    included (CI: "body gamma" mixed into "Header line"), so only Poppler
+    is used as the second parser (same as test_pdf_align / test_pdf_fit)."""
+    try:
+        probe = subprocess.run(["pdftotext", "-v"], capture_output=True)
+    except OSError:
+        return False
+    return b"Poppler" in (probe.stdout + probe.stderr)
+
+
 def _read_back(path: Path) -> tuple[list[str], list[str]]:
     """(PyMuPDF rawdict lines, whole text of each parser) of the output."""
     document = pymupdf.open(path)
@@ -39,6 +51,8 @@ def _read_back(path: Path) -> tuple[list[str], list[str]]:
         texts = ["\n".join(page.get_text("text") for page in document)]
     finally:
         document.close()
+    if not _is_poppler():
+        return lines, texts
     try:
         proc = subprocess.run(["pdftotext", "-enc", "UTF-8", str(path), "-"], capture_output=True, check=True)
     except (OSError, subprocess.CalledProcessError):
