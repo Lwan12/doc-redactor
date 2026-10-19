@@ -16,6 +16,7 @@ from docx import Document
 
 from doc_redactor.docx_redactor import apply_hits_to_paragraph, finish_document, iter_document_paragraphs
 from doc_redactor.engine import Hit, RedactionEngine, counts_from_categories, merge_counts, redaction_label
+from doc_redactor.leak_check import MSG_NO_HITS, LeakedText, gate_output
 from doc_redactor.image_redactor import (
     analyze_image_entities,
     is_raster_suffix,
@@ -301,7 +302,9 @@ def write_scans(
             continue
         enabled = scan.enabled_hits
         if not enabled:
-            written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True))
+            # No hit at all: say so, so the original is not taken for a redacted copy.
+            note = MSG_NO_HITS if not scan.hits else None
+            written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, note=note))
             continue
         dest = destination_for(scan.path, destination)
         if dest.exists() and not overwrite:
@@ -341,6 +344,20 @@ def write_scans(
                 WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=problem[1])
             )
             continue
+        if engine is not None and scan.kind in (KIND_WORD, KIND_PDF):
+            labels = set(mapping.values()) | {engine.label(hit.category) for hit in scan.hits}
+            labels |= {redaction_label(hit.category) for hit in scan.hits}
+            try:
+                gate_output(
+                    dest,
+                    engine,
+                    kept=[hit.text for hit in scan.hits if not hit.enabled],
+                    labels=sorted(labels),
+                    source=scan.path,
+                )
+            except LeakedText as exc:
+                written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
+                continue
         if dest.stem == f"{scan.path.stem}.redacted":
             report_path = destination / f"{scan.path.stem}.report.json"
         else:

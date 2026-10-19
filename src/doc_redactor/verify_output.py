@@ -51,7 +51,8 @@ def is_final_failure(reason: str | None) -> bool:
     """A failure that a plain retry would reproduce (leftover or check error)."""
     if not reason:
         return False
-    return "写出后仍可见" in reason or MSG_VERIFY_ERROR_HEAD in reason
+    # "写出后复核" is leak_check's other-reader check; a retry repeats it too.
+    return "写出后仍可见" in reason or MSG_VERIFY_ERROR_HEAD in reason or "写出后复核" in reason
 
 
 def _is_legend_page(text: str) -> bool:
