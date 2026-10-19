@@ -29,6 +29,7 @@ MSG_FINAL_ADVICE = "这类问题重试也会一样，请点「返回修改」给
 # [R1], [R2]... for custom rules. Treated as placeholders only when the writer
 # reports that it used at least one short code.
 _SHORT_CODE = re.compile(r"\[(?:PR|PN|SP|SD|NCT|EM|PH|R\d+)\]")
+_LEGEND_CODE = re.compile(r"^[ \t]*(\[(?:PR|PN|SP|SD|NCT|EM|PH|R\d+)\])[ \t]*=", re.MULTILINE)
 # One explanation line on the legend page: "[SP] = 申办方（[申办方]）".
 _LEGEND_LINE = re.compile(r"^\[(?:PR|PN|SP|SD|NCT|EM|PH|R\d+)\] = [^\n]*（[^\n]*）$", re.MULTILINE)
 
@@ -62,8 +63,13 @@ def _is_legend_page(text: str) -> bool:
     return LEGEND_FOOTER.replace(" ", "") in "".join(lines).replace(" ", "")
 
 
-def extract_units(path: Path) -> list:
-    """Text units in the same shape the scanner uses.
+def extract_units(path: Path) -> list[str]:
+    """Text of each unit (PDF page / Word text unit), as the scanner reads it."""
+    return [_unit_text(unit) for unit in _units(path)]
+
+
+def _units(path: Path) -> list:
+    """Units in the same shape the scanner uses.
 
     PDF: one string per page. Word: the ``TextUnit`` objects of the shared
     walk (``iter_document_paragraphs``), so hits are found per unit with
@@ -78,7 +84,8 @@ def extract_units(path: Path) -> list:
 
         document = pymupdf.open(path)
         try:
-            return [page.get_text("text") for page in document]
+            # Same flags as the scanner (scan.py), so both read the same text.
+            return [page.get_text("text", flags=pymupdf.TEXTFLAGS_TEXT) for page in document]
         finally:
             document.close()
     if suffix == ".docx":
@@ -98,10 +105,15 @@ def placeholder_spans(
     unit: str,
     *,
     labels: Iterable[str] = (),
-    short_codes: bool = False,
+    short_codes: bool | frozenset[str] = False,
     legend: bool = False,
 ) -> list[tuple[int, int]]:
-    """Character ranges the writer filled in, never original text."""
+    """Character ranges the writer filled in, never original text.
+
+    ``short_codes``: True treats any code shape as a placeholder; a set of
+    codes (read from the legend page) only those codes, so a bracketed code
+    that was already in the original ("[R123456]") still counts.
+    """
     spans: list[tuple[int, int]] = []
     for label in sorted({label for label in labels if label}, key=len, reverse=True):
         start = unit.find(label)
@@ -109,7 +121,9 @@ def placeholder_spans(
             spans.append((start, start + len(label)))
             start = unit.find(label, start + len(label))
     if short_codes:
-        spans.extend(m.span() for m in _SHORT_CODE.finditer(unit))
+        spans.extend(
+            m.span() for m in _SHORT_CODE.finditer(unit) if short_codes is True or m.group(0) in short_codes
+        )
         if legend:
             from doc_redactor.pdf_redactor import LEGEND_FOOTER, LEGEND_TITLE
 
@@ -158,7 +172,7 @@ def leftover_hits_in_unit(
     engine=None,
     targets: Iterable[str] = (),
     labels: Iterable[str] = (),
-    short_codes: bool = False,
+    short_codes: bool | frozenset[str] = False,
     legend: bool = False,
     known: Iterable[str] | None = None,
 ) -> list[str]:
@@ -167,9 +181,11 @@ def leftover_hits_in_unit(
     ``unit`` is a string (a PDF page) or a Word ``TextUnit``.
 
     ``known``: hit texts found in the original. When given, a hit whose text
-    the original never had is dropped: removing a word can join its
-    neighbours (PDF text extraction also moves an inserted placeholder to the
-    end of the page), but a real leftover is always original hit text.
+    the original never had is dropped only if it neither contains an original
+    hit text nor is part of one (see ``_invented``): removing a word can join
+    its neighbours into a new hit (PDF text extraction also moves an inserted
+    placeholder to the end of the page), but a leftover always overlaps
+    original hit text.
     """
     spans = placeholder_spans(_unit_text(unit), labels=labels, short_codes=short_codes, legend=legend)
     target_list = sorted({t for t in targets if t}, key=len, reverse=True)
@@ -178,7 +194,7 @@ def leftover_hits_in_unit(
     for start, end, text in _raw_hits(unit, engine, target_list):
         if any(s <= start and end <= e for s, e in spans):
             continue
-        if known_set is not None and _squash(text) not in known_set:
+        if known_set is not None and _invented(_squash(text), known_set):
             continue
         kept.append(text)
     return kept
@@ -188,9 +204,23 @@ def _squash(text: str) -> str:
     return "".join(text.split())
 
 
+def _invented(squashed: str, known: set[str]) -> bool:
+    """True only for a hit the writer's own changes made up.
+
+    A hit text the original never had is dropped only when it neither
+    contains an original hit text nor is part of one. A leftover joined with
+    nearby text ("Acme" + "Pharma", "ZZ-77" + "[R2]") or a shorter term left
+    after only part of a longer one was covered ("星辰海" of "星辰海医院")
+    always shares text with an original hit, so it still counts.
+    """
+    if squashed in known:
+        return False
+    return not any(k and (k in squashed or squashed in k) for k in known)
+
+
 def original_hit_texts(path: Path, engine) -> list[str]:
     """Hit texts in the original file, extracted the same way as the output."""
-    return [text for unit in extract_units(path) for _s, _e, text in _raw_hits(unit, engine, [])]
+    return [text for unit in _units(path) for _s, _e, text in _raw_hits(unit, engine, [])]
 
 
 def count_leftovers(
@@ -214,15 +244,20 @@ def count_leftovers(
     label_list = list(labels)
     target_list = list(targets)
     found: Counter[str] = Counter()
-    units = extract_units(path)
+    units = _units(path)
+    codes: frozenset[str] = frozenset()
+    if short_codes and units and path.suffix.lower() == ".pdf" and _is_legend_page(_unit_text(units[-1])):
+        # Only the codes the legend explains are the writer's. No legend page:
+        # no code is a placeholder (fail closed).
+        codes = frozenset(m.group(1) for m in _LEGEND_CODE.finditer(_unit_text(units[-1])))
     for index, unit in enumerate(units):
-        legend = short_codes and index == len(units) - 1 and path.suffix.lower() == ".pdf" and _is_legend_page(_unit_text(unit))
+        legend = bool(codes) and index == len(units) - 1
         for text in leftover_hits_in_unit(
             unit,
             engine=engine,
             targets=target_list,
             labels=label_list,
-            short_codes=short_codes,
+            short_codes=codes,
             legend=legend,
             known=known_list,
         ):

@@ -516,3 +516,115 @@ def test_cli_revision_docx_passes(tmp_path: Path):
     out = tmp_path / "out"
     assert main([str(src), "-r", str(RULES), "-o", str(out)]) == 0
     assert any(out.glob("*.docx"))
+
+
+# --- A leftover joined with nearby text into a hit the original never had ---
+# The "known" filter drops a hit only when it neither contains an original hit
+# text nor is part of one. Each case below is a real leftover that must count.
+
+
+def _known_engine(words: dict, regex: dict | None = None):
+    return build_engine(
+        [RegexRule(name=n, pattern=p, flags=0) for n, p in (regex or {}).items()],
+        [WordlistRule(category=c, terms=t, case_sensitive=True) for c, t in words.items()],
+    )
+
+
+def test_nested_cjk_term_left_after_only_tail_covered():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _known_engine({"SPONSOR": ["星辰海"], "SITE": ["星辰海医院"]})
+    out = "研究中心 星辰海[SITE] 入组"
+    assert leftover_hits_in_unit(out, engine=engine, labels=["[SITE]"], known=["星辰海医院"]) == ["星辰海"]
+
+
+def test_nested_ascii_term_left_after_only_tail_covered():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _known_engine({"SPONSOR": ["Acme", "Acme Pharma"]})
+    out = "Sponsor Acme [SPONSOR] visit"
+    assert leftover_hits_in_unit(out, engine=engine, labels=["[SPONSOR]"], known=["Acme Pharma"]) == ["Acme"]
+
+
+def test_pattern_hit_left_after_longer_term_half_covered():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _known_engine({"SITE": ["Subject 002 Site"]}, {"SUBJECT": r"Subject\s+\d{3}"})
+    out = "visit Subject 002 [SITE] today"
+    assert leftover_hits_in_unit(out, engine=engine, labels=["[SITE]"], known=["Subject 002 Site"]) == [
+        "Subject 002"
+    ]
+
+
+def test_leftover_joined_with_neighbour_after_placeholder_moved():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    # PDF text extraction put the placeholder for Zeta at the end of the page,
+    # so the leaked "Acme" now reads as "Acme  Pharma".
+    engine = _known_engine({"SPONSOR": ["Acme", "Acme Pharma"], "SITE": ["Zeta"]})
+    out = "Sponsor Acme  Pharma visit\n[SITE]\n"
+    hits = leftover_hits_in_unit(out, engine=engine, labels=["[SITE]"], known=["Acme", "Zeta"])
+    assert len(hits) == 1 and "Acme" in hits[0]
+
+
+def test_leftover_joined_with_moved_short_code():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _known_engine({"SITE": ["Zeta"]}, {"CODE": r"ZZ-\d+(?:\s+\S+)?"})
+    out = "intro  middle\nZZ-77\n[R2]\n"
+    hits = leftover_hits_in_unit(out, engine=engine, short_codes=True, known=["Zeta", "ZZ-77"])
+    assert len(hits) == 1 and hits[0].startswith("ZZ-77")
+
+
+def test_leftover_joined_with_neighbour_pdf_end_to_end(tmp_path: Path):
+    src = tmp_path / "f5.pdf"
+    d = pymupdf.open()
+    d.new_page().insert_text((72, 72), "Sponsor Acme Zeta Pharma visit")
+    d.save(str(src))
+    d.close()
+    engine = _known_engine({"SPONSOR": ["Acme", "Acme Pharma"], "SITE": ["Zeta"]})
+    scan = scan_path(src, engine)
+    for hit in scan.hits:
+        if hit.text == "Acme":
+            hit.rects = []  # the writer misses this one
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error and "写出后仍可见" in res.error
+    assert not any((tmp_path / "out").glob("*.pdf"))
+
+
+def test_original_bracket_code_is_not_taken_for_a_short_code(tmp_path: Path):
+    from doc_redactor.pdf_redactor import append_legend
+    from doc_redactor.verify_output import count_leftovers
+
+    # "[R123456]" was in the original; the writer only used [SP].
+    path = tmp_path / "c.pdf"
+    d = pymupdf.open()
+    d.new_page().insert_text((72, 72), "Ref [R123456] by [SP]")
+    append_legend(d, ["[SP] = 申办方（[申办方]）"])
+    d.save(str(path))
+    d.close()
+    engine = build_engine(
+        [RegexRule(name="RECORD", pattern=r"R\d{6}", flags=0)],
+        [WordlistRule(category="SPONSOR", terms=["SP"], case_sensitive=True)],
+    )
+    assert count_leftovers(path, engine=engine, labels=["[申办方]"], short_codes=True) == 1
+
+
+def test_replacement_text_left_in_actual_text_is_a_leftover(tmp_path: Path):
+    # Glyphs are removed but the tagged text ("ActualText") still holds the
+    # original. Text extraction reads it, so it is a real leftover.
+    src = tmp_path / "at.pdf"
+    d = pymupdf.open()
+    page = d.new_page()
+    page.insert_text((72, 72), "Sponsor Acme Pharma visit")
+    xref = page.get_contents()[0]
+    body = d.xref_stream(xref)
+    d.update_stream(xref, b"/Span <</ActualText (Sponsor Acme Pharma visit)>> BDC\n" + body + b"\nEMC\n")
+    d.save(str(src))
+    d.close()
+    engine = _engine()
+    scan = scan_path(src, engine)
+    assert [h.text for h in scan.hits] == ["Acme Pharma"]
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error and "写出后仍可见" in res.error
+    assert not any((tmp_path / "out").glob("*.pdf"))
