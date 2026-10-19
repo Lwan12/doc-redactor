@@ -1088,3 +1088,32 @@ def test_word_comment_notice_before_and_after_write(gui):
     copy = _visible_copy(app.root)
     assert "已删除 2 条批注" in copy
     assert "写出时会删除" not in copy
+
+
+def test_blocked_no_tesseract_says_why_and_what_to_do(gui):
+    """没装 Tesseract：空状态写清为什么不写出、怎么办，不叫用户把图换成普通图片（文案待前端定）。"""
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_WORD, FileScan
+
+    blocked = FileScan(
+        path=Path("needs-ocr.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(2, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        blocked_reason=MSG_NO_OCR.format(n=2),
+    )
+    app = gui
+    app.scans = [blocked]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert "图里的字" in copy
+    assert "装好 Tesseract" in copy and "TESSERACT_CMD" in copy
+    assert "换成普通图片" not in copy

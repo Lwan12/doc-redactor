@@ -8,6 +8,7 @@ Language is chi_sim+eng. Hits are painted black.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -218,7 +219,17 @@ class WriteBlocked(ValueError):
 
 
 # 文案待前端定。
-MSG_NO_OCR = "有 {n} 张图片没法检查（未找到 Tesseract），未写出"
+# 没装 Tesseract：说清为什么不写出（图里的字查不了），和怎么办（MSG_NO_OCR_FIX）。
+MSG_NO_OCR = "有 {n} 张图片没法检查：没找到 Tesseract（识别图片文字的程序），查不了图里的字有没有敏感词，所以未写出"
+MSG_NO_OCR_FIX = "装好 Tesseract（带中文 chi_sim 和英文 eng 语言数据）后重新扫描；已经装了的，把环境变量 TESSERACT_CMD 设成 tesseract 程序的路径"
+MSG_IMAGE_FIX = "可以先把这张图删掉或换成普通图片，再拖进来"
 MSG_BAD_IMAGE = "有 {n} 张图片打不开，没法检查，未写出"
 MSG_VECTOR = "有 {n} 张矢量图（EMF、WMF 等），没法检查其中文字，未写出"
 MSG_INLINE_FAILED = "有 {n} 张内嵌图没能涂黑，未写出"
+
+_NO_OCR_PATTERN = re.compile(re.escape(MSG_NO_OCR).replace(re.escape("{n}"), r"\d+"))
+
+
+def blocked_advice(reason: str) -> str:
+    """What the user can do about a file that was not written for ``reason``."""
+    return MSG_NO_OCR_FIX if _NO_OCR_PATTERN.fullmatch(reason or "") else MSG_IMAGE_FIX

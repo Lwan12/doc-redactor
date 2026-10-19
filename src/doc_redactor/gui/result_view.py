@@ -37,6 +37,7 @@ from doc_redactor.gui.theme import (
     status_style,
 )
 from doc_redactor.engine import redaction_label
+from doc_redactor.image_redactor import blocked_advice
 from doc_redactor.verify_output import is_final_failure
 from doc_redactor.pdf_redactor import (
     MSG_PDF_WIDTH,
@@ -605,7 +606,7 @@ class ResultView:
                 body,
                 "⚠",
                 MSG_BLOCKED_TITLE,
-                f"{blocked}。可以先把这张图删掉或换成普通图片，再拖进来。",
+                f"{blocked}。{blocked_advice(blocked)}。",
                 [],
                 fonts,
             )

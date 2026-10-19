@@ -554,3 +554,22 @@ def test_missing_tesseract_blocks_pdf_with_images(tmp_path: Path, monkeypatch):
 def test_missing_tesseract_blocks_pdf_with_inline_image(tmp_path: Path, monkeypatch):
     _no_tesseract(monkeypatch)
     _assert_blocked(_inline_pdf(tmp_path), tmp_path, ("Tesseract", "未写出"))
+
+
+# 没装 Tesseract 不写出时，要说清为什么不写出、怎么办（命令行和界面都看）。文案待前端定。
+NO_OCR_WHY = "图里的字"
+NO_OCR_FIX = ("装好 Tesseract", "TESSERACT_CMD")
+
+
+def test_missing_tesseract_cli_says_why_and_what_to_do(tmp_path: Path, monkeypatch, capsys):
+    from doc_redactor.cli import main
+
+    _no_tesseract(monkeypatch)
+    src = _picture_docx(tmp_path, _card(), "PNG", "ocr-missing.docx")
+    code = main(["-r", str(RULES), "-o", str(tmp_path / "out"), str(src)])
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "ocr-missing.docx" in err and "未写出" in err
+    assert NO_OCR_WHY in err, err
+    assert all(word in err for word in NO_OCR_FIX), err
+    assert not list((tmp_path / "out").glob("*.redacted.*"))
