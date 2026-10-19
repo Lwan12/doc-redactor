@@ -610,9 +610,10 @@ def test_original_bracket_code_is_not_taken_for_a_short_code(tmp_path: Path):
     assert count_leftovers(path, engine=engine, labels=["[申办方]"], short_codes=True) == 1
 
 
-def test_replacement_text_left_in_actual_text_is_a_leftover(tmp_path: Path):
-    # Glyphs are removed but the tagged text ("ActualText") still holds the
-    # original. Text extraction reads it, so it is a real leftover.
+def test_actual_text_is_dropped_so_the_check_passes(tmp_path: Path):
+    # The tagged text ("ActualText") held the original. The writer now drops
+    # tags and ActualText before redacting, so the file is written and the
+    # check reads nothing left (the PDF leak fix supersedes the old block).
     src = tmp_path / "at.pdf"
     d = pymupdf.open()
     page = d.new_page()
@@ -626,5 +627,8 @@ def test_replacement_text_left_in_actual_text_is_a_leftover(tmp_path: Path):
     scan = scan_path(src, engine)
     assert [h.text for h in scan.hits] == ["Acme Pharma"]
     [res] = write_scans([scan], tmp_path / "out", engine=engine)
-    assert res.error and "写出后仍可见" in res.error
-    assert not any((tmp_path / "out").glob("*.pdf"))
+    assert res.error is None and res.dest is not None
+    out = pymupdf.open(res.dest)
+    text = "".join(page.get_text() for page in out)
+    out.close()
+    assert "Acme Pharma" not in text

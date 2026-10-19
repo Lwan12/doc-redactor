@@ -1,10 +1,11 @@
 from pathlib import Path
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from doc_redactor.cli import redact_path
 from doc_redactor.config import load_rules
-from doc_redactor.docx_redactor import iter_table_cells, redact_docx
+from doc_redactor.docx_redactor import redact_docx
 from helpers import RULES, assert_report_has_no_secrets
 
 
@@ -60,11 +61,8 @@ def _parts(document):
 
 
 def _container_text(container) -> list[str]:
-    chunks = [paragraph.text for paragraph in container.paragraphs]
-    for table in container.tables:
-        for cell in iter_table_cells(table):
-            chunks.extend(_container_text(cell))
-    return chunks
+    """Every w:p under the container, read straight from XML (tables and nesting included)."""
+    return ["".join(t.text or "" for t in p.iter(qn("w:t"))) for p in container._element.iter(qn("w:p"))]
 
 
 def test_docx_body_table_header_and_cross_run(tmp_path: Path):
