@@ -45,13 +45,28 @@ def _is_poppler() -> bool:
         return False
     return b"Poppler" in (probe.stdout + probe.stderr)
 
+def test_fit_notice_glues_counts_with_nbsp():
+    """Result-page notices keep the count on one line: 有\\u00a02\\u00a0处, not a break before 处."""
+    short = MSG_FIT_SHORT.format(n=2)
+    blank = MSG_FIT_BLANK.format(m=1)
+    assert "有\u00a02\u00a0处" in short
+    assert "另有\u00a01\u00a0处" in blank
+    assert "有 2 处" not in short
+    assert "另有 1 处" not in blank
+    notice = fit_notice(2, 1, 4)
+    assert "有\u00a02\u00a0处" in notice
+    assert "另有\u00a01\u00a0处" in notice
+    assert "4\u00a0处无法定位" in notice
+    assert "正则" not in notice
+
+
 def test_messages_match_the_product_copy():
     assert MIN_PLACEHOLDER_SIZE == 6.0
     assert MSG_REPL_HINT == (
         "PDF 里位置窄时，会先把字缩小；还放不下就换成短码（如 [SP]），并在 PDF 最后加一页说明。Word 里总是写完整的替换文字。"
     )
-    assert MSG_FIT_SHORT == "ⓘ 这个 PDF 有 {n} 处位置太窄，已换成短码，最后一页有对照说明。"
-    assert MSG_FIT_BLANK == "⚠ 另有 {m} 处太窄，连短码也放不下，只留了空白，原文已删除。"
+    assert MSG_FIT_SHORT == "ⓘ 这个 PDF 有\u00a0{n}\u00a0处位置太窄，已换成短码，最后一页有对照说明。"
+    assert MSG_FIT_BLANK == "⚠ 另有\u00a0{m}\u00a0处太窄，连短码也放不下，只留了空白，原文已删除。"
     assert MSG_PDF_WIDTH == "PDF 只能在原来的位置写字，空位和原文一样宽，看的人能看出原文大概多长。"
     assert LEGEND_TITLE == "替换说明"
     assert LEGEND_FOOTER == "本页由 doc-redactor 生成，只说明替换文字的意思，不含任何原文。"
@@ -59,12 +74,12 @@ def test_messages_match_the_product_copy():
     assert fit_notice(2, 1) == MSG_FIT_SHORT.format(n=2) + " " + MSG_FIT_BLANK.format(m=1)
     assert fit_notice(0, 3) == MSG_FIT_BLANK.format(m=3)
     assert fit_notice(0, 0) == ""
-    assert fit_notice(0, 0, 4) == "4 处无法定位，未写出"
+    assert fit_notice(0, 0, 4) == "4\u00a0处无法定位，未写出"
     joined = fit_notice(2, 1, 4)
     assert "\n" not in joined
     assert MSG_FIT_SHORT.format(n=2) in joined
     assert MSG_FIT_BLANK.format(m=1) in joined
-    assert "4 处无法定位，未写出" in joined
+    assert "4\u00a0处无法定位，未写出" in joined
     assert "正则" not in MSG_REPL_HINT + MSG_FIT_SHORT + MSG_FIT_BLANK + MSG_PDF_WIDTH + joined
 
 
@@ -362,8 +377,8 @@ def test_demo_pdf_notice_counts():
     short_count, blank_count = pdf_fit_counts(pdf.enabled_hits, label, ["项目号", "申办方", "药名"])
     assert (short_count, blank_count) == (2, 1)
     assert fit_notice(short_count, blank_count) == (
-        "ⓘ 这个 PDF 有 2 处位置太窄，已换成短码，最后一页有对照说明。 "
-        "⚠ 另有 1 处太窄，连短码也放不下，只留了空白，原文已删除。"
+        "ⓘ 这个 PDF 有\u00a02\u00a0处位置太窄，已换成短码，最后一页有对照说明。 "
+        "⚠ 另有\u00a01\u00a0处太窄，连短码也放不下，只留了空白，原文已删除。"
     )
     assert "\n" not in fit_notice(short_count, blank_count)
 

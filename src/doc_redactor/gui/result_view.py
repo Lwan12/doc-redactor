@@ -398,8 +398,10 @@ class ResultView:
                 text = status_text
             count = "—" if scan.status == "fail" else scan.enabled_count()
             label = f"{icon} {scan.path.name}"
-            if kind in {"many", "nowrite", "skipped", "unlocated"}:
-                label = f"{icon} {scan.path.name}  {text}" if kind == "skipped" else f"{icon} {text}  {scan.path.name}"
+            if kind in {"skipped", "unlocated"}:
+                label = f"{icon} {scan.path.name}  {text}"
+            elif kind in {"many", "nowrite"}:
+                label = f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
         target = ids[0] if self.app.selected == "all" else ids[self.app.selected + 1]
@@ -978,10 +980,15 @@ class ResultView:
         inner.pack(fill="x", padx=12, pady=8)
         enabled, _ = session_totals(scans, enabled_only=True)
         app = self.app
-        if app.written:
-            for scan in scans:
-                if str(scan.path) in app.write_errors:
-                    enabled -= scan.enabled_count()
+        for scan in scans:
+            if scan.status == "fail":
+                continue
+            unlocated = int(getattr(scan, "unlocated_count", 0) or 0) > 0
+            failed_write = str(scan.path) in app.write_errors
+            # Blocked files, and files a write already refused, stay out of the
+            # button count. Each file is subtracted once.
+            if unlocated or (app.written and failed_write):
+                enabled -= scan.enabled_count()
         n_files = app.written_file_count()
         failures = app.write_failure_rows()
         path = app.output_label()
@@ -1129,7 +1136,7 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
     if app.written and scan.enabled_count() > 0:
         return "written", "已写出", "ok"
     unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
-    if unlocated > 0 and not scan.hits:
+    if unlocated > 0:
         return "unlocated", f"{unlocated} 处无法定位", "warn"
     if not scan.hits:
         return "nohit", "无命中", "no"

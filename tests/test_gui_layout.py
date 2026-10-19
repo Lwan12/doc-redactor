@@ -515,7 +515,7 @@ def test_blank_only_result_notice_and_column_wrap(gui):
             notices.append(node)
     assert notices
     assert MSG_FIT_BLANK.format(m=1) in _visible_copy(app.root)
-    assert "2 处无法定位，未写出" in _visible_copy(app.root)
+    assert "2\u00a0处无法定位，未写出" in _visible_copy(app.root)
     assert "换成短码" not in _visible_copy(app.root)
     for node in notices:
         text = node.cget("text")
@@ -524,6 +524,84 @@ def test_blank_only_result_notice_and_column_wrap(gui):
         wrap = int(node.cget("wraplength"))
         assert parent_w > 80
         assert abs(wrap - (parent_w - 8)) <= 4
+
+
+def test_mixed_unlocated_row_warns_and_write_button_skips_it(gui):
+    """A file with both placed and unplaced hits is warned before writing.
+
+    The write button counts only files that will actually be written.
+    """
+    from tkinter import ttk
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.gui.theme import status_style
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    def _hit(hit_id: int, text: str) -> LocatedHit:
+        return LocatedHit(
+            hit_id=hit_id,
+            category="申办方",
+            text=text,
+            location="第 1 页 · 第 1 行",
+            unit="page:0",
+            start=0,
+            end=len(text),
+            rects=[(72.0, 80.0, 140.0, 94.0)],
+            page=0,
+        )
+
+    kept = FileScan(
+        path=Path("kept.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(1, "Acme")],
+        pages=[["Acme"]],
+    )
+    mixed = FileScan(
+        path=Path("mixed.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(2, "星辰海")],
+        pages=[["星辰海"]],
+        unlocated_count=1,
+    )
+    app = gui
+    app.scans = [kept, mixed]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, text, tag = _scan_status(mixed, app)
+    assert kind == "unlocated"
+    assert tag == "warn"
+    assert text == "1 处无法定位"
+    icon, _label, _color = status_style(kind)
+    assert icon == "⚠"
+
+    labels = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            labels += [node.item(item, "values")[0] for item in node.get_children()]
+    mixed_row = next(row for row in labels if "mixed.pdf" in row)
+    kept_row = next(row for row in labels if "kept.pdf" in row)
+    assert mixed_row.startswith("⚠")
+    assert "mixed.pdf" in mixed_row
+    assert "1 处无法定位" in mixed_row
+    assert mixed_row.index("mixed.pdf") < mixed_row.index("无法定位")
+    assert kept_row.startswith("✓")
+    assert "无法定位" not in kept_row
+
+    buttons = [node.cget("text") for node in _walk(app.root) if isinstance(node, ttk.Button)]
+    assert any(label.startswith("写出 1 个脱敏文件") for label in buttons)
+    assert not any("写出 2 个" in label for label in buttons)
+    write_label = next(label for label in buttons if label.startswith("写出 "))
+    assert "替换 1 处" in write_label
+    assert "替换 2 处" not in write_label
 
 
 def test_pdf_fit_notices_use_the_product_copy(gui):
@@ -535,6 +613,8 @@ def test_pdf_fit_notices_use_the_product_copy(gui):
     copy = _visible_copy(app.root)
     assert MSG_FIT_SHORT.format(n=2) in copy
     assert MSG_FIT_BLANK.format(m=1) in copy
+    assert "有\u00a02\u00a0处" in copy
+    assert "另有\u00a01\u00a0处" in copy
     assert MSG_PDF_WIDTH in copy
     assert "正则" not in copy
 

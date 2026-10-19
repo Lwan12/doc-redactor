@@ -23,8 +23,10 @@ MIN_PLACEHOLDER_SIZE = 6.0
 MSG_REPL_HINT = (
     "PDF 里位置窄时，会先把字缩小；还放不下就换成短码（如 [SP]），并在 PDF 最后加一页说明。Word 里总是写完整的替换文字。"
 )
-MSG_FIT_SHORT = "ⓘ 这个 PDF 有 {n} 处位置太窄，已换成短码，最后一页有对照说明。"
-MSG_FIT_BLANK = "⚠ 另有 {m} 处太窄，连短码也放不下，只留了空白，原文已删除。"
+# Non-breaking spaces keep the count on the same line as 处. A normal space
+# lets the result column wrap as "2 / 处".
+MSG_FIT_SHORT = "ⓘ 这个 PDF 有\u00a0{n}\u00a0处位置太窄，已换成短码，最后一页有对照说明。"
+MSG_FIT_BLANK = "⚠ 另有\u00a0{m}\u00a0处太窄，连短码也放不下，只留了空白，原文已删除。"
 MSG_UNLOCATED = "{n} 处无法定位，未写出"
 MSG_PDF_WIDTH = "PDF 只能在原来的位置写字，空位和原文一样宽，看的人能看出原文大概多长。"
 LEGEND_TITLE = "替换说明"
@@ -140,7 +142,7 @@ def fit_notice(short_count: int, blank_count: int, unlocated: int = 0) -> str:
     if blank_count > 0:
         parts.append(MSG_FIT_BLANK.format(m=blank_count))
     if unlocated > 0:
-        parts.append(MSG_UNLOCATED.format(n=unlocated))
+        parts.append(f"{unlocated}\u00a0处无法定位，未写出")
     return " ".join(parts)
 
 
@@ -293,8 +295,9 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCount
             flags = pymupdf.TEXTFLAGS_TEXT
             textpage = page.get_textpage(flags=flags)
             text = page.get_text("text", textpage=textpage)
-            for hit in engine.find_hits(text):
-                usable = _hit_rects(page, hit, textpage)
+            found = list(engine.find_hits(text))
+            located = locate_text_hits(page, found, textpage)
+            for hit, usable in zip(found, located):
                 if not usable:
                     unlocated += 1
                     continue
@@ -508,10 +511,11 @@ def append_legend(document, lines: list[str]) -> None:
 def find_hit_rects(page, hit: Hit, textpage) -> list[tuple[float, float, float, float]]:
     """Rectangles for this hit only, one per text line it covers.
 
-    ``page.search_for`` returns every occurrence of the string on the page, so
-    each hit of a repeated word used to carry every box. Offsets into the same
-    textpage's plain text select this hit's glyphs. A cross-line hit returns
-    one rectangle per line, including a one-character fragment.
+    Offsets into the textpage's plain text select this hit. A line that matches
+    character for character uses those glyphs. A line that does not is placed
+    only from that line's own rawdict glyphs, and only when the plain text and
+    the glyph string contain the fragment the same number of times. A cross-line
+    hit returns one rectangle per line, including a one-character fragment.
 
     Those boxes are already in the space ``add_redact_annot`` and
     ``insert_textbox`` use. Extraction and redaction annotations temporarily
@@ -519,10 +523,8 @@ def find_hit_rects(page, hit: Hit, textpage) -> list[tuple[float, float, float, 
     Multiplying by ``page.derotation_matrix`` would move the placeholder off
     the deleted glyphs.
     """
-    return [
-        (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
-        for rect in _hit_rects(page, hit, textpage)
-    ]
+    located = locate_text_hits(page, [hit], textpage)
+    return located[0] if located else []
 
 
 @dataclass
@@ -534,14 +536,30 @@ class _Aligned:
     text: str
     entries: list | None
     bbox: tuple | None
+    pieces: list | None = None
 
 
-def _hit_rects(page, hit: Hit, textpage) -> list:
+def locate_text_hits(page, hits, textpage=None) -> list[list[tuple[float, float, float, float]]]:
+    """One rectangle list per hit. Empty means that hit is unlocated.
+
+    Hits on this page whose rectangles are the same, or overlap by more than
+    half the smaller box, are all returned empty so each one is counted.
+    """
     if textpage is None:
         textpage = page.get_textpage(flags=pymupdf.TEXTFLAGS_TEXT)
     text = page.get_text("text", textpage=textpage)
     raw = page.get_text("rawdict", textpage=textpage)
-    return _rects_for_hit(page, hit, _align_lines(text, raw))
+    aligned = _align_lines(text, raw)
+    groups: list[list[tuple[float, float, float, float]]] = []
+    for hit in hits:
+        rects = _rects_for_hit(hit, aligned)
+        groups.append(
+            [
+                (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+                for rect in rects
+            ]
+        )
+    return _without_shared_rects(groups)
 
 
 def _plain_lines(text: str) -> list[tuple[int, int, str]]:
@@ -697,7 +715,7 @@ def _align_lines(text: str, raw: dict) -> list[_Aligned]:
             for offset, (start, end, line_text) in enumerate(plain[i1:i2]):
                 pieces, bbox, _raw_text = raw_lines[j1 + offset]
                 entries = _entries_for_line(line_text, pieces, line_id, start)
-                aligned.append(_Aligned(start, end, line_text, entries, bbox))
+                aligned.append(_Aligned(start, end, line_text, entries, bbox, pieces))
                 line_id += 1
             continue
         if tag == "delete":
@@ -710,59 +728,119 @@ def _align_lines(text: str, raw: dict) -> list[_Aligned]:
         pairing = _best_pairs(plain_slice, raw_slice)
         for offset, (start, end, line_text) in enumerate(plain_slice):
             raw_index = pairing.get(offset)
-            bbox = None if raw_index is None else raw_slice[raw_index][1]
-            aligned.append(_Aligned(start, end, line_text, None, bbox))
+            if raw_index is None:
+                aligned.append(_Aligned(start, end, line_text, None, None))
+            else:
+                pieces, bbox, _raw_text = raw_slice[raw_index]
+                aligned.append(_Aligned(start, end, line_text, None, bbox, pieces))
             line_id += 1
     return aligned
 
 
-def _nth_in_line(line_text: str, fragment: str, local_start: int) -> int:
-    """How many times ``fragment`` starts strictly before ``local_start``."""
-    if not fragment:
-        return 0
-    count = 0
+def _find_spans(haystack: str, needle: str) -> list[int]:
+    """Start offsets of exact, case-sensitive occurrences. Overlaps count."""
+    if not needle:
+        return []
+    spans = []
     pos = 0
-    while pos < local_start:
-        found = line_text.find(fragment, pos)
-        if found < 0 or found >= local_start:
+    while True:
+        found = haystack.find(needle, pos)
+        if found < 0:
             break
-        count += 1
+        spans.append(found)
         pos = found + 1
-    return count
+    return spans
 
 
-def _search_in_line(page, fragment: str, bbox, k: int) -> list:
-    """The k-th occurrence of ``fragment`` inside this line's box. Never the page."""
-    if not fragment or k < 0:
+def _glyph_chars(pieces) -> list[tuple[str, tuple]]:
+    chars = []
+    for value, bbox in pieces or []:
+        for ch in value:
+            chars.append((ch, bbox))
+    return chars
+
+
+def _center_in_line(rect, bbox) -> bool:
+    y0 = min(float(bbox[1]), float(bbox[3]))
+    y1 = max(float(bbox[1]), float(bbox[3]))
+    cy = (float(rect.y0) + float(rect.y1)) / 2.0
+    return y0 <= cy <= y1
+
+
+def _rects_from_glyphs(line: _Aligned, fragment: str, local_s: int) -> list:
+    """Box of the k-th exact fragment in this line's glyphs, or nothing.
+
+    ``k`` and the total are counted with ``_find_spans`` on the plain line and
+    on the glyph string. The hit text is already the original casing, so the
+    comparison stays exact. A different count, a missing k-th occurrence, or a
+    box whose vertical center sits outside this line is not a location.
+    """
+    if line.bbox is None:
         return []
-    clip = pymupdf.Rect(bbox)
-    clip.x0 -= 1.5
-    clip.y0 -= 1.5
-    clip.x1 += 1.5
-    clip.y1 += 1.5
-    if clip.width < 1 or clip.height < 1:
+    chars = _glyph_chars(line.pieces)
+    if not chars:
         return []
-    try:
-        # A passed textpage makes PyMuPDF 1.28 ignore ``clip`` and return every
-        # match on the page. Search the page, then keep boxes that hit this line.
-        found = page.search_for(fragment, clip=clip)
-    except (ValueError, RuntimeError):
+    glyph_text = "".join(ch for ch, _bbox in chars)
+    plain_spans = _find_spans(line.text, fragment)
+    glyph_spans = _find_spans(glyph_text, fragment)
+    if len(plain_spans) != len(glyph_spans) or not plain_spans:
         return []
-    rects = []
-    for item in found or []:
-        rect = pymupdf.Rect(item)
-        if rect.width <= 0.5 or rect.height <= 0.5:
+    k = sum(1 for start in plain_spans if start < local_s)
+    if k >= len(plain_spans) or k >= len(glyph_spans) or plain_spans[k] != local_s:
+        return []
+    start = glyph_spans[k]
+    end = start + len(fragment)
+    if end > len(chars):
+        return []
+    rect = None
+    for _ch, bbox in chars[start:end]:
+        piece = pymupdf.Rect(bbox)
+        rect = piece if rect is None else rect | piece
+    if rect is None or rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        return []
+    if not _center_in_line(rect, line.bbox):
+        return []
+    return [rect]
+
+
+def _box_tuple(rect) -> tuple[float, float, float, float]:
+    if isinstance(rect, (tuple, list)):
+        return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+    return (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+
+
+def _box_area(box: tuple[float, float, float, float]) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _overlap_over_half(left, right) -> bool:
+    """True when the boxes are the same or the overlap exceeds half the smaller one."""
+    a = _box_tuple(left)
+    b = _box_tuple(right)
+    x0 = max(a[0], b[0])
+    y0 = max(a[1], b[1])
+    x1 = min(a[2], b[2])
+    y1 = min(a[3], b[3])
+    inter = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    smaller = min(_box_area(a), _box_area(b))
+    return smaller > 0 and inter > smaller * 0.5
+
+
+def _without_shared_rects(groups: list[list[tuple[float, float, float, float]]]):
+    bad: set[int] = set()
+    for i in range(len(groups)):
+        if not groups[i]:
             continue
-        if rect.x0 >= clip.x1 or rect.x1 <= clip.x0 or rect.y0 >= clip.y1 or rect.y1 <= clip.y0:
-            continue
-        rects.append(rect)
-    rects.sort(key=lambda rect: (round(float(rect.y0), 1), round(float(rect.x0), 1)))
-    if k >= len(rects):
-        return []
-    return [rects[k]]
+        for j in range(i + 1, len(groups)):
+            if not groups[j]:
+                continue
+            if any(_overlap_over_half(a, b) for a in groups[i] for b in groups[j]):
+                bad.add(i)
+                bad.add(j)
+    return [[] if index in bad else group for index, group in enumerate(groups)]
 
 
-def _rects_for_hit(page, hit: Hit, aligned: list[_Aligned]) -> list:
+def _rects_for_hit(hit: Hit, aligned: list[_Aligned]) -> list:
     """Rectangles for this hit. Any fragment that cannot be placed drops the hit."""
     start, end = hit.start, hit.end
     if end <= start:
@@ -783,9 +861,7 @@ def _rects_for_hit(page, hit: Hit, aligned: list[_Aligned]) -> list:
         fragment = line.text[local_s:local_e]
         if not fragment.strip():
             continue
-        if line.bbox is None:
-            return []
-        found = _search_in_line(page, fragment, line.bbox, _nth_in_line(line.text, fragment, local_s))
+        found = _rects_from_glyphs(line, fragment, local_s)
         if not found:
             return []
         collected.extend(found)

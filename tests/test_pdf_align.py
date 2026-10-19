@@ -18,7 +18,7 @@ from doc_redactor.cli import main
 from doc_redactor.engine import WordlistRule, build_engine
 from doc_redactor.pdf_redactor import redact_pdf
 from doc_redactor.backpath import hit_list_payload
-from doc_redactor.scan import scan_path, write_scans
+from doc_redactor.scan import scan_path, write_scan, write_scans
 
 
 def _is_poppler() -> bool:
@@ -134,8 +134,10 @@ def _build_plain_pdf(path: Path) -> None:
 
 
 def test_buried_glyphs_do_not_drop_the_other_lines(tmp_path: Path, monkeypatch) -> None:
-    """One line is missing glyphs. The other lines still redact, and that line
-    falls back to a search inside its own box, in occurrence order.
+    """Glyphs of the term itself are gone on one line. That line is unlocated.
+
+    The other lines still get their own rectangles. The file is not written,
+    because a partial PDF would keep the buried line.
     """
     source = tmp_path / "gap.pdf"
     _build_gap_pdf(source)
@@ -143,26 +145,23 @@ def test_buried_glyphs_do_not_drop_the_other_lines(tmp_path: Path, monkeypatch) 
     engine = _engine(["星辰海"])
 
     scan = scan_path(source, engine)
-    assert len(scan.hits) == 4
-    assert getattr(scan, "unlocated_count", 0) == 0
+    assert len(scan.hits) == 2
+    assert getattr(scan, "unlocated_count", 0) == 2
+    assert all(hit.text == "星辰海" for hit in scan.hits)
     tops = sorted(hit.rects[0][1] for hit in scan.hits)
     assert tops[1] - tops[0] > 20
-    assert abs(tops[2] - tops[1]) < 8
-    assert tops[3] - tops[2] > 20
+    assert not _hits_share_rect(scan.hits)
 
-    cli_out = tmp_path / "cli.pdf"
-    assert redact_pdf(source, cli_out, engine)["申办方"] == 4
+    from doc_redactor.pdf_redactor import UnlocatedText
+
+    with pytest.raises(UnlocatedText) as raised:
+        redact_pdf(source, tmp_path / "cli.pdf", engine)
+    assert "2 处无法定位，未写出" in str(raised.value)
+    assert not (tmp_path / "cli.pdf").exists()
     written = write_scans([scan], tmp_path / "batch", engine=engine)
-    assert written[0].error is None
-    assert written[0].dest is not None and written[0].dest.is_file()
-
-    for output in (cli_out, written[0].dest):
-        body = _page_text(output)
-        assert "星辰海" not in body
-        assert "星" not in body and "辰" not in body and "海" not in body
-        assert "前文保留" in body and "公司" in body
-        assert "甲" in body and "乙" in body and "丙" in body
-        assert "后文保留" in body and "结束" in body
+    assert written[0].dest is None
+    assert written[0].error is not None and "2 处无法定位，未写出" in written[0].error
+    assert not (tmp_path / "batch" / "gap.redacted.pdf").exists()
 
 
 def test_unlocatable_hit_blocks_the_file_and_keeps_the_other_line(tmp_path: Path, monkeypatch) -> None:
@@ -202,6 +201,236 @@ def test_unlocatable_hit_blocks_the_file_and_keeps_the_other_line(tmp_path: Path
         redact_pdf(source, tmp_path / "direct.pdf", engine)
     assert "1 处无法定位，未写出" in str(raised.value)
     assert not (tmp_path / "direct.pdf").exists()
+
+
+def _mupdf_text(path: Path) -> str:
+    document = pymupdf.open(path)
+    try:
+        return "\n".join(page.get_text("text") for page in document)
+    finally:
+        document.close()
+
+
+def _hits_share_rect(hits) -> bool:
+    """True when two hits carry the same box or boxes that overlap by more than half."""
+    boxes = []
+    for index, hit in enumerate(hits):
+        for rect in hit.rects:
+            box = pymupdf.Rect(rect)
+            boxes.append((index, box))
+    for left in range(len(boxes)):
+        i, a = boxes[left]
+        for right in range(left + 1, len(boxes)):
+            j, b = boxes[right]
+            if i == j:
+                continue
+            inter = a & b
+            if inter.is_empty:
+                continue
+            smaller = min(a.get_area(), b.get_area())
+            if smaller > 0 and inter.get_area() > smaller * 0.5:
+                return True
+    return False
+
+
+def _patch_drop_marker_char(monkeypatch, marker: str, drop: str) -> None:
+    """Drop one non-hit glyph from rawdict lines that contain ``marker``."""
+    original = pymupdf.Page.get_text
+
+    def wrapped(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        if _option(args, kwargs) != "rawdict" or not isinstance(result, dict):
+            return result
+        cloned = copy.deepcopy(result)
+        for block in cloned.get("blocks") or []:
+            for line in block.get("lines") or []:
+                if marker not in _line_text(line):
+                    continue
+                for span in line.get("spans") or []:
+                    span["chars"] = [
+                        ch for ch in span.get("chars") or [] if (ch.get("c") or "") != drop
+                    ]
+        return cloned
+
+    monkeypatch.setattr(pymupdf.Page, "get_text", wrapped)
+
+
+def _two_line_pdf(path: Path, font: str, first: str, second: str, lead: float, size: float = 12) -> None:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 100), first, fontname=font, fontsize=size)
+    page.insert_text((72, 100 + lead), second, fontname=font, fontsize=size)
+    document.save(path)
+    document.close()
+
+
+@pytest.mark.parametrize(
+    ("font", "term", "first", "second", "lead"),
+    [
+        ("china-s", "星辰海", "星辰海在上一行", "MARK#甲乙丙丁戊己星辰海", lead)
+        for lead in (11, 12, 13, 14, 14.4, 15, 15.5)
+    ]
+    + [
+        ("helv", "Acme", "Acme first line", "MARK# zz zz zz Acme", lead)
+        for lead in (11, 12, 13, 14)
+    ],
+)
+def test_tight_leading_does_not_reuse_the_previous_line(
+    tmp_path: Path, monkeypatch, font: str, term: str, first: str, second: str, lead: float
+) -> None:
+    """A missing glyph on a tight line must not steal the same word from the line above.
+
+    Either both copies are gone from the written PDF, or the line that cannot
+    be placed is counted and the file is not written. The upper line's box is
+    never shared by both hits.
+    """
+    source = tmp_path / "tight.pdf"
+    _two_line_pdf(source, font, first, second, lead)
+    _patch_drop_marker_char(monkeypatch, "MARK", "#")
+    engine = build_engine(
+        [],
+        [WordlistRule(category="申办方", terms=[term], case_sensitive=False)],
+    )
+
+    scan = scan_path(source, engine)
+    assert scan.unlocated_count + len(scan.hits) == 2
+    assert not _hits_share_rect(scan.hits)
+    if len(scan.hits) == 2:
+        tops = sorted(hit.rects[0][1] for hit in scan.hits)
+        assert tops[1] - tops[0] > 4
+
+    out = tmp_path / "out.pdf"
+    if scan.unlocated_count == 0:
+        counts = redact_pdf(source, out, engine)
+        assert _mupdf_text(out).count(term) == 0
+        assert counts["申办方"] == 2
+        gui = tmp_path / "gui.pdf"
+        assert write_scan(scan, gui, engine=engine)["申办方"] == 2
+        assert _mupdf_text(gui).count(term) == 0
+        return
+
+    from doc_redactor.pdf_redactor import UnlocatedText
+
+    with pytest.raises(UnlocatedText) as raised:
+        redact_pdf(source, out, engine)
+    assert f"{scan.unlocated_count} 处无法定位，未写出" in str(raised.value)
+    assert not out.exists()
+    results = write_scans([scan], tmp_path / "batch", engine=engine)
+    assert results[0].dest is None
+    assert results[0].error is not None
+    assert f"{scan.unlocated_count} 处无法定位，未写出" in results[0].error
+    assert not (tmp_path / "batch").exists() or not any((tmp_path / "batch").rglob("*.pdf"))
+
+
+@pytest.mark.parametrize(
+    ("line", "terms", "case_sensitive", "keep", "gone"),
+    [
+        ("MARK# acrf zz aCRF", ["aCRF"], True, ["acrf"], ["aCRF"]),
+        ("MARK# ACRF zz aCRF", ["acrf"], False, [], ["ACRF", "aCRF"]),
+        ("MARK# aCRF zz ACRF", ["ACRF"], False, [], ["aCRF", "ACRF"]),
+    ],
+)
+def test_case_variants_on_one_line_are_not_stacked(
+    tmp_path: Path, monkeypatch, line: str, terms: list[str], case_sensitive: bool, keep: list[str], gone: list[str]
+) -> None:
+    """Different cases on one mismatched line keep their own boxes.
+
+    A word that should stay (lowercase acrf under a case-sensitive rule) stays.
+    Words that should go are gone, or the file is blocked and counted. Two hits
+    never share one rectangle. A written count matches how many words disappeared.
+    """
+    source = tmp_path / "case.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 100), line, fontname="helv", fontsize=14)
+    document.save(source)
+    document.close()
+    _patch_drop_marker_char(monkeypatch, "MARK", "#")
+    engine = build_engine(
+        [],
+        [WordlistRule(category="申办方", terms=terms, case_sensitive=case_sensitive)],
+    )
+    before = _mupdf_text(source)
+    expected = len(engine.find_hits(before))
+
+    scan = scan_path(source, engine)
+    assert scan.unlocated_count + len(scan.hits) == expected
+    assert not _hits_share_rect(scan.hits)
+
+    out = tmp_path / "out.pdf"
+    if scan.unlocated_count == 0:
+        counts = redact_pdf(source, out, engine)
+        body = _mupdf_text(out)
+        for term in gone:
+            assert term not in body
+        for term in keep:
+            assert term in body
+        removed = sum(before.count(term) - body.count(term) for term in gone)
+        assert counts["申办方"] == removed
+        assert removed == len(scan.hits)
+        gui = tmp_path / "gui.pdf"
+        gui_counts = write_scan(scan, gui, engine=engine)
+        gui_body = _mupdf_text(gui)
+        assert gui_counts["申办方"] == removed
+        for term in gone:
+            assert term not in gui_body
+        for term in keep:
+            assert term in gui_body
+        return
+
+    from doc_redactor.pdf_redactor import UnlocatedText
+
+    for term in keep:
+        assert term in before
+    with pytest.raises(UnlocatedText) as raised:
+        redact_pdf(source, out, engine)
+    assert f"{scan.unlocated_count} 处无法定位，未写出" in str(raised.value)
+    assert not out.exists()
+    results = write_scans([scan], tmp_path / "batch", engine=engine)
+    assert results[0].dest is None
+    assert not any((tmp_path / "batch").glob("*.pdf"))
+
+
+@pytest.mark.parametrize("kind", ["same", "half", "apart"])
+def test_shared_page_rects_are_unlocated(tmp_path: Path, monkeypatch, kind: str) -> None:
+    """Identical boxes, and boxes that overlap by more than half, unlocate both hits."""
+    source = tmp_path / "two.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 80), "Acme one", fontname="helv", fontsize=12)
+    page.insert_text((72, 200), "Acme two", fontname="helv", fontsize=12)
+    document.save(source)
+    document.close()
+    same = pymupdf.Rect(72, 70, 110, 82)
+    pairs = {
+        "same": (same, pymupdf.Rect(same)),
+        "half": (pymupdf.Rect(72, 70, 140, 90), pymupdf.Rect(72, 70, 140, 82)),
+        "apart": (pymupdf.Rect(72, 68, 110, 82), pymupdf.Rect(72, 188, 110, 202)),
+    }
+    chosen = pairs[kind]
+    state = {"n": 0}
+
+    def fake(*_args, **_kwargs):
+        rect = chosen[state["n"] % 2]
+        state["n"] += 1
+        return [rect]
+
+    monkeypatch.setattr("doc_redactor.pdf_redactor._rects_for_hit", fake)
+    engine = _engine(["Acme"])
+    scan = scan_path(source, engine)
+    if kind == "apart":
+        assert scan.unlocated_count == 0
+        assert len(scan.hits) == 2
+        assert not _hits_share_rect(scan.hits)
+        return
+    assert scan.unlocated_count == 2
+    assert scan.hits == []
+    from doc_redactor.pdf_redactor import UnlocatedText
+
+    with pytest.raises(UnlocatedText) as raised:
+        redact_pdf(source, tmp_path / "out.pdf", engine)
+    assert "2 处无法定位，未写出" in str(raised.value)
+    assert not (tmp_path / "out.pdf").exists()
 
 
 def test_cli_prints_unlocated_and_skips_the_file(tmp_path: Path, monkeypatch, capsys) -> None:

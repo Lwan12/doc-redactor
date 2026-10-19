@@ -27,7 +27,7 @@ from doc_redactor.pdf_redactor import (
     UnlocatedText,
     append_legend,
     clear_pdf_hidden,
-    find_hit_rects,
+    locate_text_hits,
     legend_lines,
     redact_text_placeholders,
 )
@@ -468,13 +468,14 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
             text = page.get_text("text", textpage=textpage)
             lines = text.splitlines()
             pages.append(lines)
-            for hit in engine.find_hits(text):
-                line_no = text[: hit.start].count("\n") + 1
-                rects = find_hit_rects(page, hit, textpage)
+            found = list(engine.find_hits(text))
+            located = locate_text_hits(page, found, textpage)
+            for hit, rects in zip(found, located):
                 if not rects:
                     # Count only. The hit text is not kept on the scan.
                     scan.unlocated_count += 1
                     continue
+                line_no = text[: hit.start].count("\n") + 1
                 scan.hits.append(
                     LocatedHit(
                         hit_id=ids.next(),
