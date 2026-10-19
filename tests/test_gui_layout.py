@@ -1382,3 +1382,41 @@ def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
     _settle(app)
     hidden = _tree_values(app.root)
     assert "近似" in hidden and "Fictlzumab" not in hidden
+
+
+def test_zero_hit_file_written_for_header_footer_is_not_shown_as_unwritten(gui, tmp_path):
+    """M1（#34 r3）：0 命中但开了去页眉页脚、文件已写出时，不能说「无命中」「没有写出」（文案待前端定）。"""
+    from doc_redactor.engine import WordlistRule, build_engine
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.leak_check import MSG_NO_HITS_LINE
+    from doc_redactor.scan import scan_path, write_scans
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_header_footer import _tagged_pdf
+
+    src = tmp_path / "zero-hf.pdf"
+    src.write_bytes(_tagged_pdf())
+    engine = build_engine([], [WordlistRule("药名", ["Nothingmab"], True)])
+    scan = scan_path(src, engine, remove_hf=True)
+    assert not scan.hits and scan.hf_active
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.dest is not None and not res.note
+
+    app = gui
+    app.scans = [scan]
+    app.selected = 0
+    app.written = True
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, text, _tag = _scan_status(scan, app)
+    assert kind not in ("nohit", "nohit_unwritten"), (kind, text)
+    assert "写出" in text and "没有写出" not in text and "未写出" not in text
+    copy = _visible_copy(app.root)
+    assert MSG_NO_HITS_LINE not in copy
+    assert "没有写出" not in copy
+    assert "已写出" in copy

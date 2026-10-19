@@ -1221,7 +1221,10 @@ class App:
                 set_file_hf_confirmed(self.scans[1], False)
             if key == "res-hf-after":
                 self.preview_mode = "after"
-            if key == "res-hf-written":
+            if key in {"res-hf-zero", "res-hf-zero-written"}:
+                # 0 命中，只删页眉页脚（#34 r3 M1）。
+                self.scans[1].hits = []
+            if key in {"res-hf-written", "res-hf-zero-written"}:
                 self.written = True
             self.show("result")
             return

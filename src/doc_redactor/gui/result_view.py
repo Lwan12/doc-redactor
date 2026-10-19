@@ -174,6 +174,9 @@ class ResultView:
             s.status == "nohit" or not _has_findings(s) for s in scans
         ):
             nohit_all = True
+        if any(_hf_only_write(s, self.app) for s in scans):
+            # Header/footer removal still writes these files: not "nothing to write".
+            nohit_all = False
 
         head = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         head.pack(fill="x")
@@ -655,6 +658,18 @@ class ResultView:
                     f"{unlocated} 处无法定位，未写出",
                     "文字里找到了，但定不到页面上的位置。这个文件不写出，避免原文留下。",
                     [],
+                    fonts,
+                )
+                return
+            if _hf_only_write(scan, self.app):
+                _empty_state(
+                    body,
+                    "✓" if self.app.written else "—",
+                    _hf_only_line(self.app),
+                    # 文案待前端定。
+                    "所选规则在这个文件里都没有命中，只删除了页眉页脚。"
+                    + ("脱敏件已写出。" if self.app.written else "写出时会生成脱敏件。"),
+                    [("去看规则", self.app.leave_to_rules, False)],
                     fonts,
                 )
                 return
@@ -1652,6 +1667,19 @@ def _pdf_fit_notice(scan: FileScan, app) -> str:
     return fit_notice(short_count, blank_count, unlocated)
 
 
+def _hf_only_write(scan: FileScan, app) -> bool:
+    """No hit to replace, but 「去掉页眉页脚」 still writes this file (#34 r3 M1)."""
+    if scan.status == "fail" or scan.enabled_hits or not scan.hf_active:
+        return False
+    key = str(scan.path)
+    return key not in app.write_errors and key not in app.write_notes
+
+
+def _hf_only_line(app) -> str:
+    # 文案待前端定。
+    return "无命中词，已删除页眉页脚并写出" if app.written else "无命中词，将删除页眉页脚并写出"
+
+
 def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
     if scan.status == "fail":
         return "fail", "失败", "bad"
@@ -1661,6 +1689,8 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
         return "nohit_unwritten", MSG_NO_HITS, "warn"
     if str(scan.path) in app.write_notes:
         return "skipped", app.write_notes[str(scan.path)], "ok"
+    if _hf_only_write(scan, app):
+        return ("hf_written" if app.written else "hf_only"), _hf_only_line(app), "ok"
     if scan.too_many:
         return "many", "命中偏多", "warn"
     if app.written and scan.enabled_count() > 0:
