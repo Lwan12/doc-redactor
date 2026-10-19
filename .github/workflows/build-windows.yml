@@ -15,20 +15,37 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Tesseract
-        shell: pwsh
-        run: choco install tesseract -y --no-progress
+      # 社区源偶发 5xx 时 choco 会"装了 0 个包"却不报错。
+      # 先查缓存；没命中再带重试地装，并按 tesseract.exe 是否存在判断成败。
+      - name: Restore staged Tesseract
+        id: tess-cache
+        uses: actions/cache@v4
+        with:
+          path: build/tesseract
+          key: tesseract-win-5.5.3-fast-eng-chi_sim-v1
 
-      - name: Stage Tesseract and tessdata
+      - name: Install and stage Tesseract (with retry)
+        if: steps.tess-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $tess = "C:\Program Files\Tesseract-OCR\tesseract.exe"
-          if (-not (Test-Path -LiteralPath $tess)) {
-            $found = Get-ChildItem -Path "C:\Program Files","C:\Program Files (x86)" -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $found) { throw "tesseract.exe not found after choco install" }
-            $tess = $found.FullName
+          function Find-Tess {
+            foreach ($p in @("C:\Program Files\Tesseract-OCR\tesseract.exe", "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe")) {
+              if (Test-Path -LiteralPath $p) { return $p }
+            }
+            $f = Get-ChildItem -Path "C:\Program Files","C:\Program Files (x86)" -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($f) { return $f.FullName }
+            return $null
           }
+          $tess = Find-Tess
+          for ($i = 1; ($i -le 5) -and (-not $tess); $i++) {
+            Write-Host "choco install tesseract: attempt $i"
+            choco install tesseract -y --no-progress
+            $tess = Find-Tess
+            if (-not $tess) { Start-Sleep -Seconds (15 * $i) }
+          }
+          if (-not $tess) { throw "tesseract.exe not found after 5 choco attempts" }
+          Write-Host "tesseract.exe at $tess"
           $root = Split-Path $tess
           $dlls = @(Get-ChildItem -Path $root -Filter *.dll -File)
           if ($dlls.Count -lt 1) { throw "no DLLs next to $tess" }
@@ -36,8 +53,24 @@ jobs:
           Copy-Item -LiteralPath $tess -Destination build\tesseract\tesseract.exe
           Copy-Item -Path $dlls.FullName -Destination build\tesseract\
           $base = "https://github.com/tesseract-ocr/tessdata_fast/raw/main"
-          Invoke-WebRequest -Uri "$base/eng.traineddata" -OutFile "build\tesseract\tessdata\eng.traineddata"
-          Invoke-WebRequest -Uri "$base/chi_sim.traineddata" -OutFile "build\tesseract\tessdata\chi_sim.traineddata"
+          foreach ($lang in @("eng", "chi_sim")) {
+            $out = "build\tesseract\tessdata\$lang.traineddata"
+            for ($i = 1; $i -le 5; $i++) {
+              try { Invoke-WebRequest -Uri "$base/$lang.traineddata" -OutFile $out; break }
+              catch { if ($i -eq 5) { throw }; Start-Sleep -Seconds (10 * $i) }
+            }
+          }
+
+      - name: Check staged Tesseract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($p in @("build\tesseract\tesseract.exe", "build\tesseract\tessdata\eng.traineddata", "build\tesseract\tessdata\chi_sim.traineddata")) {
+            if (-not (Test-Path -LiteralPath $p)) { throw "missing $p" }
+          }
+          & build\tesseract\tesseract.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "staged tesseract does not run" }
+          Write-Host "cache hit: ${{ steps.tess-cache.outputs.cache-hit }}"
 
       - name: Install Python dependencies
         run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
