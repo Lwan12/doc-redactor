@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from doc_redactor.docx_redactor import redact_docx
@@ -115,6 +116,34 @@ def test_scan_then_write_many_cells(tmp_path: Path):
     dest = tmp_path / "out.docx"
     write_scan(scan, dest, replacements=LABELS)
     _check(src, dest)
+
+
+def _build_leftover_continuation(path: Path) -> None:
+    """vMerge continuation cell that still holds text (Word can leave it there)."""
+    doc = Document()
+    v = doc.add_table(rows=2, cols=2)
+    v.cell(0, 0).text = "top Acme Pharma"
+    v.cell(0, 1).text = "keep a"
+    v.cell(1, 0).text = "stale Fictizumab"
+    v.cell(1, 1).text = "keep b"
+    for row, value in ((0, "restart"), (1, "continue")):
+        tc_pr = v.cell(row, 0)._tc.get_or_add_tcPr()
+        merge = OxmlElement("w:vMerge")
+        merge.set(qn("w:val"), value)
+        tc_pr.append(merge)
+    doc.save(str(path))
+
+
+def test_continuation_cell_text_is_redacted(tmp_path: Path):
+    src = tmp_path / "cont.docx"
+    _build_leftover_continuation(src)
+    scan = scan_path(src, _engine())
+    dest = tmp_path / "out.docx"
+    write_scan(scan, dest, replacements=LABELS)
+    assert _cell_texts(dest) == ["top [SPONSOR]", "keep a", "stale [DRUG]", "keep b"]
+    dest2 = tmp_path / "out2.docx"
+    redact_docx(src, dest2, _engine())
+    assert "Fictizumab" not in "".join(_cell_texts(dest2))
 
 
 def test_cli_redact_tables(tmp_path: Path):
