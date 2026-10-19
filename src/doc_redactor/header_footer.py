@@ -47,6 +47,8 @@ ROUTE_NONE = "none"
 SOURCE_TAG = "tag"
 SOURCE_REPEAT = "repeat"
 SOURCE_WORD = "word"
+# Signing envelope line, found by its fixed text; deleted without confirmation.
+SOURCE_SIGN = "sign"
 
 ROLE_HEADER = "header"
 ROLE_FOOTER = "footer"
@@ -68,6 +70,17 @@ TOL_HORIZONTAL = 4.0
 # Repeats only take thin rules. Filled boxes (stamp backgrounds, cover
 # layers) may hide body content inside them; tags are trusted, repeats not.
 MAX_RULE_THICKNESS = 3.0
+# Repetition is only trusted at the very edge of the page (review M1):
+# at most this many text rows counted from the edge,
+MAX_EDGE_ROWS = 2
+# rows of one header/footer no further apart than this (points),
+MAX_BAND_GAP = 12.0
+# and some white space between the header/footer and what follows.
+MIN_BAND_GAP = 1.0
+# A rule with another drawing this close (points) belongs to a table.
+RULE_TOUCH = 1.5
+# 「按每页重复认出」的部分默认不删，要按文件确认（产品 10-19 定 b）。只在这里改。
+REPEAT_CONFIRMED_BY_DEFAULT = False
 
 # Wording from header-footer-flow.md section 6, verbatim.
 UI_TEXT = {
@@ -77,8 +90,11 @@ UI_TEXT = {
     "label_footer": "将删除：页脚",
     "label_signature": "签署信息",
     "summary_line": "页眉页脚　{n} 页 · 将删除",
-    "auto_found": "ⓘ 自动认出，请看预览确认",
-    "not_found": "ⓘ 这个 PDF 没认出页眉页脚，没有删除。页眉页脚里的词仍按规则替换。",
+    "pending": "⚠ 待确认，不删",
+    "not_found": "ⓘ 没认出页眉页脚，这份不删",
+    "not_found_next": "可从原 Word 重新导出 PDF 再放进来，或先这样写出",
+    # Write failure for a file with rotated pages (方向.md: never skip silently).
+    "rotated": "有 {n} 页是旋转页，页眉页脚删不了，这份没写出。可取消「去掉页眉页脚」再写出",
     "watermark": "这个文件的水印在页眉里，会一起删除。",
     "written": "已删除 {n} 个文件的页眉页脚。",
     "file_kept": "这个文件会保留页眉页脚，页眉页脚里的词按规则替换。",
@@ -86,6 +102,15 @@ UI_TEXT = {
 
 _SIGNING = re.compile(r"docu\s*sign\s+envelope\s+id", re.IGNORECASE)
 _DIGITS = re.compile(r"\d+")
+# Where digits may differ from page to page: page-number phrases only.
+_PAGE_PHRASE = re.compile(
+    r"(?:page|p\.)\s*\d+(?:\s*(?:of|/)\s*\d+)?"
+    r"|第\s*\d+\s*页(?:\s*[,，]?\s*共\s*\d+\s*页)?"
+    r"|\b\d+\s*(?:/|of)\s*\d+\b",
+    re.IGNORECASE,
+)
+# A line that is nothing but a number and punctuation, such as 「3」 or 「- 3 -」.
+_NUMBER_ONLY = re.compile(r"^[\W_]*\d+[\W_]*$")
 _SPACES = re.compile(r"\s+")
 
 
@@ -102,6 +127,15 @@ class PlanMismatch(ValueError):
 
     def __init__(self) -> None:
         super().__init__("页眉页脚的识别结果和这个文件对不上，请重新扫描")
+
+
+class RotatedPages(ValueError):
+    """Rotated pages are not handled: the file is not written rather than
+    keeping their headers silently (方向.md 验收口径 2). Nothing was changed."""
+
+    def __init__(self, count: int) -> None:
+        self.count = int(count)
+        super().__init__(UI_TEXT["rotated"].format(n=self.count))
 
 
 class HeaderFooterLeft(RuntimeError):
@@ -126,6 +160,8 @@ class Element:
     marks: tuple[Box, ...] = field(default=(), repr=False, compare=False)
     digest: str = field(default="", repr=False, compare=False)
     page: int = 0
+    # Text only: (char, centre x, centre y) of its own glyphs, for the check.
+    chars: tuple = field(default=(), repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -163,6 +199,8 @@ class Plan:
     skipped_rotated: int = 0
     # Header/footer rules left alone because body drawings sit inside their box.
     kept_crowded: int = 0
+    # Text left alone because its removal marks would touch a body glyph.
+    kept_tight: int = 0
 
 
 @dataclass(frozen=True)
@@ -200,16 +238,29 @@ def normalize_text(text: str) -> str:
     return _DIGITS.sub("#", _SPACES.sub(" ", text).strip())
 
 
+def repeat_text_key(text: str) -> str:
+    """Text used to compare a line across pages.
+
+    Digits are ignored only where they can be page numbers: a line that is
+    just a number, or a page-number phrase such as 「Page 3 of 12」 or
+    「第 3 页」. A table row, a subject number or a listing title that differs
+    only in its numbers stays different (review M1).
+    """
+    collapsed = _SPACES.sub(" ", text).strip()
+    if _NUMBER_ONLY.match(collapsed):
+        return _DIGITS.sub("#", collapsed)
+    return _PAGE_PHRASE.sub(lambda m: _DIGITS.sub("#", m.group(0)), collapsed)
+
+
 def role_for(element: Element, zone: str) -> str:
-    if element.kind == KIND_TEXT and _SIGNING.search(element.text or ""):
-        return ROLE_SIGNATURE
+    """Signing lines are taken by ``sign_candidates`` before repeats run."""
     return zone
 
 
 def _key(element: Element, zone: str):
     x0, y0, x1, y1 = element.bbox
     if element.kind == KIND_TEXT:
-        return (KIND_TEXT, zone, normalize_text(element.text))
+        return (KIND_TEXT, zone, repeat_text_key(element.text))
     if element.kind == KIND_IMAGE:
         return (KIND_IMAGE, zone, element.digest or (round(x1 - x0), round(y1 - y0)))
     # Lines: width differs between portrait and landscape; thickness does not.
@@ -229,25 +280,42 @@ def same_place(a, b, tol_v: float = TOL_VERTICAL, tol_h: float = TOL_HORIZONTAL)
     return any(abs(a[i] - b[i]) <= tol_h for i in (1, 2, 3))
 
 
-def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAGES) -> list[Candidate]:
-    """Things at the same place on more than half the pages (and >= 3 pages).
+def _parity_groups(pages) -> dict[int, set[int]]:
+    groups: dict[int, set[int]] = {0: set(), 1: set()}
+    for page in pages:
+        groups[page.index % 2].add(page.index)
+    return groups
 
-    ``exclude`` maps page index to boxes already covered (tags); elements
-    overlapping them are left out. Returns one candidate per role, needing
-    confirmation.
+
+def _need(count: int, min_pages: int) -> int:
+    return max(min_pages, count // 2 + 1)
+
+
+def _kept_pages(found: set[int], total: int, parity: dict[int, set[int]], min_pages: int) -> set[int]:
+    """Pages of a cluster that count as repeating.
+
+    More than half of all pages (and at least ``min_pages``); otherwise odd and
+    even pages are judged on their own, for different odd/even headers (S2).
     """
-    pages = list(pages)
-    total = len(pages)
-    if total < min_pages:
-        return []
-    exclude = exclude or {}
+    if len(found) >= _need(total, min_pages):
+        return set(found)
+    kept: set[int] = set()
+    for group in parity.values():
+        mine = found & group
+        if group and len(mine) >= _need(len(group), min_pages):
+            kept |= mine
+    return kept
+
+
+def _cluster(pages, exclude, min_pages):
+    """Group in-zone elements by key and place; returns accepted (element, zone) per page."""
     groups: dict = {}
     for page in pages:
         for element in page.items:
             zone = zone_of(element.bbox, page.height)
             if zone is None:
                 continue
-            if element.kind == KIND_LINE and min(element.bbox[2] - element.bbox[0], element.bbox[3] - element.bbox[1]) > MAX_RULE_THICKNESS:
+            if element.kind == KIND_LINE and _thick(element):
                 continue
             if any(_overlaps(element.bbox, box) for box in exclude.get(page.index, ())):
                 continue
@@ -267,16 +335,191 @@ def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAG
                         "items": [replace(element, page=page.index)],
                     }
                 )
-    need = max(min_pages, total // 2 + 1)
-    by_role: dict[str, list[Element]] = {}
-    for clusters in groups.values():
+    return [cluster for clusters in groups.values() for cluster in clusters]
+
+
+def _thick(element: Element) -> bool:
+    x0, y0, x1, y1 = element.bbox
+    return min(x1 - x0, y1 - y0) > MAX_RULE_THICKNESS
+
+
+def _extent(element: Element, zone: str, height: float) -> tuple[float, float]:
+    """(near, far) distance from the page edge. Text uses its glyph cores, so
+    ascenders of a tight neighbour line do not merge two rows."""
+    if element.kind == KIND_TEXT and element.marks:
+        y0 = min(m[1] for m in element.marks)
+        y1 = max(m[3] for m in element.marks)
+    else:
+        y0, y1 = element.bbox[1], element.bbox[3]
+    if zone == ROLE_HEADER:
+        return y0, y1
+    return height - y1, height - y0
+
+
+def _box_extent(element: Element, zone: str, height: float) -> tuple[float, float]:
+    y0, y1 = element.bbox[1], element.bbox[3]
+    return (y0, y1) if zone == ROLE_HEADER else (height - y1, height - y0)
+
+
+def _rows(elements, zone: str, height: float):
+    """Elements grouped into rows by vertical overlap, from the edge inwards.
+
+    ``near``/``far`` use glyph cores (for overlap and the gap to the body);
+    ``bnear``/``bfar`` use full boxes (for the spacing inside a header).
+    """
+    ordered = sorted(elements, key=lambda e: _extent(e, zone, height))
+    rows: list[dict] = []
+    for element in ordered:
+        near, far = _extent(element, zone, height)
+        bnear, bfar = _box_extent(element, zone, height)
+        if rows and near < rows[-1]["far"]:
+            row = rows[-1]
+            row["items"].append(element)
+            row["far"] = max(row["far"], far)
+            row["bnear"] = min(row["bnear"], bnear)
+            row["bfar"] = max(row["bfar"], bfar)
+        else:
+            rows.append({"near": near, "far": far, "bnear": bnear, "bfar": bfar, "items": [element]})
+    return rows
+
+
+def _h_overlap(a: Box, b: Box) -> bool:
+    return min(a[2], b[2]) > max(a[0], b[0])
+
+
+def _table_rule(rule: Element, page: PageLayout, band: set) -> bool:
+    """A rule stacked on another drawing, or with a drawing outside the
+    header/footer right next to it, is part of a table (M1)."""
+    x0, y0, x1, y1 = rule.bbox
+    for other in page.items:
+        if other.kind != KIND_LINE or other is rule:
+            continue
+        ox0, oy0, ox1, oy1 = other.bbox
+        if not _h_overlap(rule.bbox, other.bbox):
+            continue
+        stacked = min(y1, oy1) > max(y0, oy0)
+        near = (oy0 - y1 <= RULE_TOUCH and oy1 >= y0 - RULE_TOUCH)
+        if stacked or (near and id(other) not in band):
+            return True
+    return False
+
+
+def edge_band(page: PageLayout, zone: str, accepted: set, covered: set) -> set:
+    """ids of ``accepted`` elements that form this page's header or footer.
+
+    Walks rows from the page edge: every element of a row must repeat (or be
+    covered by tags), at most ``MAX_EDGE_ROWS`` text rows, rows close
+    together, and a gap before what follows. If the row after the band
+    would also qualify, the edge is unclear and nothing is taken.
+    """
+    limit = page.height * ZONE_FRACTION
+    items = []
+    for element in page.items:
+        near, far = _extent(element, zone, page.height)
+        if near >= limit:
+            continue
+        if element.kind == KIND_LINE and _thick(element):
+            # Filled boxes, page frames, table outlines: never removed and not
+            # content; a table is caught by its text or by _table_rule.
+            continue
+        items.append(element)
+    rows = _rows(items, zone, page.height)
+    band: list[dict] = []
+    text_rows = 0
+    last_content = None
+    stop = None
+    for row in rows:
+        if all(id(e) in covered and id(e) not in accepted for e in row["items"]):
+            # Taken by another rule (tags, the signing line): not part of
+            # this header, so it neither counts as a row nor sets the gap.
+            continue
+        ok = all(id(e) in accepted or id(e) in covered for e in row["items"])
+        content = any(e.kind != KIND_LINE for e in row["items"])
+        if not ok:
+            stop = row
+            break
+        if content:
+            if last_content is not None and row["bnear"] - last_content["bfar"] > MAX_BAND_GAP:
+                stop = row
+                break
+            if text_rows == MAX_EDGE_ROWS:
+                return set()  # a third repeated row: not clearly a header
+            text_rows += 1
+            last_content = row
+        band.append(row)
+    while band and not any(id(e) in accepted for r in band for e in r["items"]):
+        band.pop()
+    if not band:
+        return set()
+    if stop is not None and stop["near"] - band[-1]["far"] < MIN_BAND_GAP:
+        # Body touches the last row: drop rows from the inside until a gap opens.
+        while band and stop["near"] - band[-1]["far"] < MIN_BAND_GAP:
+            stop = band.pop()
+    ids = {id(e) for r in band for e in r["items"] if id(e) in accepted}
+    ids_band = {id(e) for r in band for e in r["items"]}
+    return {i for i in ids if not _is_table_rule(i, page, ids_band)}
+
+
+def _is_table_rule(eid: int, page: PageLayout, band: set) -> bool:
+    for element in page.items:
+        if id(element) == eid:
+            return element.kind == KIND_LINE and _table_rule(element, page, band)
+    return False
+
+
+def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAGES) -> list[Candidate]:
+    """Things at the same place on more than half the pages (and >= 3 pages),
+    in the outermost rows of the page only.
+
+    ``exclude`` maps page index to boxes already covered (tags); elements
+    overlapping them are left out. Returns one candidate per role, needing
+    confirmation.
+    """
+    pages = list(pages)
+    total = len(pages)
+    if total < min_pages:
+        return []
+    exclude = exclude or {}
+    parity = _parity_groups(pages)
+    by_index = {page.index: page for page in pages}
+
+    def passing(clusters):
+        out = []
         for cluster in clusters:
-            if len(cluster["pages"]) < need:
-                continue
-            for element in cluster["items"]:
+            kept = _kept_pages(cluster["pages"], total, parity, min_pages)
+            if kept:
+                out.append((cluster, kept))
+        return out
+
+    first = passing(_cluster(pages, exclude, min_pages))
+    # Map each passing element back to the original page element.
+    accepted: dict[int, dict[int, tuple]] = {}
+    for cluster, kept in first:
+        for item in cluster["items"]:
+            if item.page in kept:
+                accepted.setdefault(item.page, {})[(item.kind, item.bbox, item.text)] = cluster
+    keep_ids: dict[int, set] = {}
+    for index, marks in accepted.items():
+        page = by_index[index]
+        ids = {id(e) for e in page.items if (e.kind, e.bbox, e.text) in marks}
+        covered = {
+            id(e) for e in page.items if any(_overlaps(e.bbox, box) for box in exclude.get(index, ()))
+        }
+        chosen: set = set()
+        for zone in (ROLE_HEADER, ROLE_FOOTER):
+            chosen |= edge_band(page, zone, ids, covered)
+        keep_ids[index] = {
+            (e.kind, e.bbox, e.text) for e in page.items if id(e) in chosen
+        }
+    by_role: dict[str, list[Element]] = {}
+    for cluster, kept in first:
+        items = [i for i in cluster["items"] if (i.kind, i.bbox, i.text) in keep_ids.get(i.page, set())]
+        still = _kept_pages({i.page for i in items}, total, parity, min_pages)
+        for element in items:
+            if element.page in still:
                 by_role.setdefault(role_for(element, cluster["zone"]), []).append(element)
     return [
-        _candidate(f"{SOURCE_REPEAT}-{role}", SOURCE_REPEAT, role, items, confirmed=False)
+        _candidate(f"{SOURCE_REPEAT}-{role}", SOURCE_REPEAT, role, items, confirmed=REPEAT_CONFIRMED_BY_DEFAULT)
         for role, items in sorted(by_role.items())
     ]
 
@@ -357,10 +600,33 @@ def drop_crowded_lines(candidates, layouts) -> tuple[list[Candidate], int]:
     return out, dropped
 
 
+def sign_candidates(layouts, exclude: dict) -> list[Candidate]:
+    """Lines holding the fixed text 「DocuSign Envelope ID」 in the top or bottom
+    zone of any page, not already covered by tags. Only that line goes; no
+    repetition needed, no confirmation (产品 10-19)."""
+    items = []
+    for page in layouts:
+        for element in page.items:
+            if element.kind != KIND_TEXT or not _SIGNING.search(element.text or ""):
+                continue
+            if zone_of(element.bbox, page.height) is None:
+                continue
+            if any(_overlaps(element.bbox, box) for box in exclude.get(page.index, ())):
+                continue
+            items.append(replace(element, page=page.index))
+    if not items:
+        return []
+    return [_candidate(f"{SOURCE_SIGN}-{ROLE_SIGNATURE}", SOURCE_SIGN, ROLE_SIGNATURE, items, confirmed=True)]
+
+
 def build_pdf_plan(tagged, layouts, page_count: int, page_sizes=(), skipped_rotated: int = 0) -> Plan:
     tags = tag_candidates(tagged)
     exclude: dict[int, list[Box]] = {}
     for candidate in tags:
+        for element in candidate.elements:
+            exclude.setdefault(element.page, []).append(element.bbox)
+    signs = sign_candidates(layouts, exclude)
+    for candidate in signs:
         for element in candidate.elements:
             exclude.setdefault(element.page, []).append(element.bbox)
     repeats = find_repeats(layouts, exclude=exclude)
@@ -371,16 +637,40 @@ def build_pdf_plan(tagged, layouts, page_count: int, page_sizes=(), skipped_rota
     elif repeats:
         route = ROUTE_REPEAT
     else:
+        # The signing line alone does not make a header/footer: still 「没认出」.
         route = ROUTE_NONE
     return Plan(
         kind=KIND_PDF,
         route=route,
         page_count=page_count,
-        candidates=tuple(tags + repeats),
+        candidates=tuple(tags + signs + repeats),
         page_sizes=tuple(page_sizes),
         skipped_rotated=skipped_rotated,
         kept_crowded=crowded_tags + crowded_repeats,
     )
+
+
+def pages_of(plan: Plan | None, sources) -> set[int]:
+    """Pages touched by candidates of the given sources."""
+    if plan is None:
+        return set()
+    return {p for c in plan.candidates if c.source in sources for p in c.pages}
+
+
+def has_source(plan: Plan | None, source: str) -> bool:
+    return plan is not None and any(c.source == source for c in plan.candidates)
+
+
+def plan_for_write(plan: Plan, repeat_confirmed: bool) -> Plan:
+    """What actually goes on write: tags, the signing line and Word parts
+    always; repeats only once the user confirmed this file. Returns a new,
+    fully confirmed plan."""
+    keep = tuple(
+        replace(c, confirmed=True)
+        for c in plan.candidates
+        if c.source != SOURCE_REPEAT or repeat_confirmed
+    )
+    return replace(plan, candidates=keep)
 
 
 def confirm(plan: Plan) -> Plan:
@@ -424,7 +714,7 @@ def summary(plan: Plan) -> dict:
     else:
         info["parts"] = len(plan.candidates)
         info["watermark_note"] = UI_TEXT["watermark"] if plan.has_watermark else None
-    info["note"] = UI_TEXT["auto_found"] if any(c.needs_confirmation for c in plan.candidates) else None
+    info["note"] = UI_TEXT["pending"] if any(c.needs_confirmation and not c.confirmed for c in plan.candidates) else None
     info["message"] = UI_TEXT["not_found"] if plan.kind == KIND_PDF and plan.route == ROUTE_NONE else None
     return info
 
@@ -467,6 +757,18 @@ def inside_removed(plan: Plan, page: int, bbox: Box) -> bool:
     return any(_contains(box, cx, cy) for box in removed_boxes(plan, page))
 
 
+def block_at(plan: Plan | None, page: int, bbox) -> tuple[str, str]:
+    """(role, source) of the candidate whose block holds this box's centre."""
+    if plan is None or bbox is None:
+        return "", ""
+    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    for candidate in plan.candidates:
+        for element in candidate.elements:
+            if element.page == page and _contains(element.bbox, cx, cy):
+                return candidate.role, candidate.source
+    return "", ""
+
+
 def role_at(plan: Plan | None, page: int, bbox) -> str:
     """Role of the candidate (confirmed or not) whose block holds this box's centre."""
     if plan is None or bbox is None:
@@ -479,8 +781,8 @@ def role_at(plan: Plan | None, page: int, bbox) -> str:
     return ""
 
 
-def pdf_line_roles(page, plan: Plan | None, lines: list[str]) -> dict[int, str]:
-    """Plain-text line index -> role, for drawing the preview blocks.
+def pdf_line_blocks(page, plan: Plan | None, lines: list[str]) -> dict[int, tuple[str, str]]:
+    """Plain-text line index -> (role, source), for drawing the preview blocks.
 
     Lines of ``page.get_text("text")`` come in the same order as rawdict
     lines; they are paired by their text. A line counts as header/footer
@@ -493,15 +795,15 @@ def pdf_line_roles(page, plan: Plan | None, lines: list[str]) -> dict[int, str]:
         for line in block.get("lines", ()):
             chars = [ch for span in line["spans"] for ch in span["chars"]]
             text = "".join(ch["c"] for ch in chars)
-            roles = Counter()
+            blocks = Counter()
             for ch in chars:
                 if not ch["c"].strip():
                     continue
-                roles[role_at(plan, page.number, ch["bbox"])] += 1
-            role, count = roles.most_common(1)[0] if roles else ("", 0)
-            total = sum(roles.values())
-            raw.append((_SPACES.sub("", text), role if role and count * 2 > total else ""))
-    out: dict[int, str] = {}
+                blocks[block_at(plan, page.number, ch["bbox"])] += 1
+            best, count = blocks.most_common(1)[0] if blocks else (("", ""), 0)
+            total = sum(blocks.values())
+            raw.append((_SPACES.sub("", text), best if best[0] and count * 2 > total else None))
+    out: dict[int, tuple[str, str]] = {}
     j = 0
     for index, line in enumerate(lines):
         key = _SPACES.sub("", line)
@@ -516,18 +818,8 @@ def pdf_line_roles(page, plan: Plan | None, lines: list[str]) -> dict[int, str]:
     return out
 
 
-def docx_pages(path) -> int | None:
-    """Page count Word stored in docProps/app.xml, if any. Word itself has no
-    fixed pages, so this is what the last save recorded."""
-    import zipfile
-
-    try:
-        with zipfile.ZipFile(path) as zf:
-            raw = zf.read("docProps/app.xml").decode("utf-8", "replace")
-    except (KeyError, OSError, zipfile.BadZipFile):
-        return None
-    found = re.search(r"<(?:\w+:)?Pages>(\d+)</", raw)
-    return int(found.group(1)) if found else None
+def pdf_line_roles(page, plan: Plan | None, lines: list[str]) -> dict[int, str]:
+    return {i: role for i, (role, _source) in pdf_line_blocks(page, plan, lines).items()}
 
 
 def union(boxes) -> Box | None:
@@ -604,16 +896,91 @@ def _match_points(before, after, tol: float = MATCH_TOL) -> int:
     return missing
 
 
-def check_text(before, after, removed: list[Box]) -> tuple[int, int]:
-    """(left, lost). ``before``/``after`` are (char, cx, cy) for one page.
+def _subtract(points, remove, tol: float = MATCH_TOL):
+    """``points`` minus one partner (same char, within ``tol``) per item of ``remove``."""
+    used = [False] * len(points)
+    for ch, x, y in remove:
+        for i, (c2, x2, y2) in enumerate(points):
+            if not used[i] and c2 == ch and abs(x2 - x) <= tol and abs(y2 - y) <= tol:
+                used[i] = True
+                break
+    return [p for p, u in zip(points, used) if not u]
 
-    left: characters still visible inside a removed box.
-    lost: characters outside every removed box that disappeared.
+
+def check_text(before, after, removed) -> tuple[int, int]:
+    """(left, lost) for one page, glyph by glyph.
+
+    ``before``/``after`` are (char, cx, cy) of the page; ``removed`` lists the
+    candidates' own glyphs. left: removed glyphs still there. lost: any other
+    glyph that disappeared, wherever it sits, also inside a removed block (S1).
     """
-    left = sum(1 for ch, x, y in after if ch.strip() and any(_contains(b, x, y) for b in removed))
-    keep = [(ch, x, y) for ch, x, y in before if ch.strip() and not any(_contains(b, x, y) for b in removed)]
-    lost = _match_points(keep, [(ch, x, y) for ch, x, y in after if ch.strip()])
+    before = [p for p in before if p[0].strip()]
+    after = [p for p in after if p[0].strip()]
+    removed = [p for p in removed if p[0].strip()]
+    left = len(removed) - _match_points(removed, after)
+    keep = _subtract(before, removed)
+    rest = _subtract(after, [r for r in removed if _match_points([r], after) == 0])
+    lost = _match_points(keep, rest)
     return left, lost
+
+
+def _centre(ch: str, bbox) -> tuple:
+    x0, y0, x1, y1 = bbox
+    return (ch, (x0 + x1) / 2, (y0 + y1) / 2)
+
+
+def _page_glyphs(page):
+    """(char, bbox) of every glyph on the page."""
+    out = []
+    for block in page.get_text("rawdict")["blocks"]:
+        for line in block.get("lines", ()):
+            for span in line["spans"]:
+                for ch in span["chars"]:
+                    if ch["c"].strip():
+                        out.append((ch["c"], tuple(ch["bbox"])))
+    return out
+
+
+def _snap_chars(own, glyphs, tol: float = 2.0) -> tuple:
+    """Candidate glyphs in the page's own coordinates (tags are read from a
+    scratch copy, whose boxes can differ a little)."""
+    pool = [_centre(ch, box) for ch, box in glyphs]
+    out = []
+    for ch, x, y in own:
+        best = None
+        for c2, x2, y2 in pool:
+            if c2 == ch and abs(x2 - x) <= tol and abs(y2 - y) <= tol:
+                d = abs(x2 - x) + abs(y2 - y)
+                if best is None or d < best[0]:
+                    best = (d, (c2, x2, y2))
+        out.append(best[1] if best else (ch, x, y))
+    return tuple(out)
+
+
+def tight_elements(plan: Plan, document) -> set:
+    """(page, bbox) of text candidates whose removal marks touch a glyph that
+    is not part of any candidate. Redaction removes every glyph its box
+    touches, so such an element is left on that page."""
+    by_page: dict[int, list[Element]] = {}
+    for candidate in plan.candidates:
+        for element in candidate.elements:
+            if element.kind == KIND_TEXT:
+                by_page.setdefault(element.page, []).append(element)
+    tight = set()
+    for index, elements in by_page.items():
+        glyphs = _page_glyphs(document[index])
+        own = [p for e in elements for p in e.chars]
+        foreign = []
+        centres = [_centre(ch, box) for ch, box in glyphs]
+        free = _subtract(centres, own, tol=MATCH_TOL)
+        free_set = {(c, round(x, 3), round(y, 3)) for c, x, y in free}
+        for (ch, box), (c, x, y) in zip(glyphs, centres):
+            if (c, round(x, 3), round(y, 3)) in free_set:
+                foreign.append(box)
+        for element in elements:
+            if any(_overlaps(mark, box) for mark in element.marks for box in foreign):
+                tight.add((index, element.bbox))
+    return tight
 
 
 def _same_box(a: Box, b: Box, tol: float = MATCH_TOL) -> bool:
@@ -714,6 +1081,9 @@ def _pagination_flag(operands: bytes, properties) -> bool:
     return False
 
 
+_INVISIBLE = (b"3", b"7")
+
+
 def pagination_only(data: bytes, properties=None) -> tuple[bytes, int]:
     """Content that paints only Pagination artifacts.
 
@@ -748,7 +1118,12 @@ def pagination_only(data: bytes, properties=None) -> tuple[bytes, int]:
             if parts:
                 tr = parts[-1]
         if inside:
-            out.append(chunk)
+            if op in _SHOW and tr in _INVISIBLE:
+                # Invisible text inside a header is still read by any text
+                # extraction: show it here so it is found and removed.
+                out.append(b" 0 Tr " + chunk + b" " + tr + b" Tr")
+            else:
+                out.append(chunk)
         elif op in _SHOW:
             out.append(b" 3 Tr " + chunk + b" " + tr + b" Tr")
         elif op in _DROP:
@@ -783,7 +1158,8 @@ def _text_from_trace(page) -> list[Element]:
             continue
         bbox = union(c[3] for c in chars)
         marks = char_marks([(chr(c[0]), c[2][1], c[3]) for c in chars], span["size"])
-        items.append(Element(kind=KIND_TEXT, bbox=bbox, text=text, marks=marks))
+        own = tuple(_centre(chr(c[0]), c[3]) for c in chars if chr(c[0]).strip())
+        items.append(Element(kind=KIND_TEXT, bbox=bbox, text=text, marks=marks, chars=own))
     return items
 
 
@@ -799,7 +1175,10 @@ def _text_from_dict(page) -> list[Element]:
             text = "".join(c[0] for c in chars)
             if not text.strip():
                 continue
-            items.append(Element(kind=KIND_TEXT, bbox=tuple(line["bbox"]), text=text, marks=tuple(marks)))
+            own = tuple(_centre(c, bbox) for c, _o, bbox in chars if c.strip())
+            items.append(
+                Element(kind=KIND_TEXT, bbox=tuple(line["bbox"]), text=text, marks=tuple(marks), chars=own)
+            )
     return items
 
 
@@ -861,14 +1240,51 @@ def identify_pdf(document) -> Plan:
     for page in document:
         sizes.append((round(page.rect.width, 2), round(page.rect.height, 2)))
         if page.rotation:
-            # Coordinates of rotated pages are not handled yet; leave them alone.
+            # Coordinates of rotated pages are not handled; apply_pdf refuses
+            # the whole file (RotatedPages) instead of skipping them.
             rotated += 1
             continue
         tag = tagged_layout_of(document, page)
         if tag is not None:
             tagged.append(tag)
         layouts.append(layout_of(page))
-    return build_pdf_plan(tagged, layouts, document.page_count, sizes, rotated)
+    plan = build_pdf_plan(tagged, layouts, document.page_count, sizes, rotated)
+    return _settle_text(plan, document)
+
+
+def _settle_text(plan: Plan, document) -> Plan:
+    """Give text candidates the page's own glyph positions and leave out any
+    whose removal would also cut a body glyph (S1)."""
+    if not plan.candidates:
+        return plan
+    glyphs: dict[int, list] = {}
+    candidates = []
+    for candidate in plan.candidates:
+        items = []
+        for element in candidate.elements:
+            if element.kind == KIND_TEXT:
+                if element.page not in glyphs:
+                    glyphs[element.page] = _page_glyphs(document[element.page])
+                element = replace(element, chars=_snap_chars(element.chars, glyphs[element.page]))
+            items.append(element)
+        candidates.append(replace(candidate, elements=tuple(items)))
+    snapped = replace(plan, candidates=tuple(candidates))
+    tight = tight_elements(snapped, document)
+    if not tight:
+        return snapped
+    out = []
+    for candidate in snapped.candidates:
+        keep = tuple(
+            e for e in candidate.elements if not (e.kind == KIND_TEXT and (e.page, e.bbox) in tight)
+        )
+        if keep:
+            out.append(replace(candidate, elements=keep, pages=tuple(sorted({e.page for e in keep}))))
+    route = plan.route
+    if not out:
+        route = ROUTE_NONE
+    elif route == ROUTE_TAG and not any(c.source == SOURCE_TAG for c in out):
+        route = ROUTE_REPEAT
+    return replace(snapped, candidates=tuple(out), route=route, kept_tight=len(tight))
 
 
 # ---------------------------------------------------------------- PDF writing
@@ -902,6 +1318,9 @@ def _check_plan_matches(document, plan: Plan) -> None:
             found = "".join(ch for ch, x, y in chars if _contains(element.bbox, x, y))
             if _SPACES.sub("", element.text) not in _SPACES.sub("", found):
                 raise PlanMismatch()
+    if tight_elements(plan, document):
+        # The page changed since the plan was made: a removal would cut body text.
+        raise PlanMismatch()
 
 
 def apply_pdf(document, plan: Plan) -> ApplyResult:
@@ -913,6 +1332,8 @@ def apply_pdf(document, plan: Plan) -> ApplyResult:
     objects are not kept in the file.
     """
     require_confirmed(plan)
+    if plan.skipped_rotated:
+        raise RotatedPages(plan.skipped_rotated)
     if not plan.candidates:
         return ApplyResult(removed={KIND_TEXT: 0, KIND_IMAGE: 0, KIND_LINE: 0})
     _check_plan_matches(document, plan)
@@ -978,7 +1399,8 @@ def _verify(document, plan: Plan, by_page, before) -> tuple[int, int]:
             for kind in (KIND_TEXT, KIND_IMAGE, KIND_LINE):
                 boxes = [e.bbox for e in elements if e.kind == kind]
                 if kind == KIND_TEXT:
-                    l, m = check_text(before[index][kind], after[kind], boxes)
+                    own = [p for e in elements if e.kind == KIND_TEXT for p in e.chars]
+                    l, m = check_text(before[index][kind], after[kind], own)
                 else:
                     l, m = check_boxes(before[index][kind], after[kind], boxes)
                 left += l

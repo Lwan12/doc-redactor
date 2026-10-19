@@ -168,10 +168,15 @@ def test_find_repeats_ignores_middle_of_page():
     assert hf.find_repeats(pages) == []
 
 
-def test_signing_line_gets_its_own_role():
-    pages = [_layout(i, W, H, [_t(SIGN, (72, 8, 260, 16))]) for i in range(4)]
-    (only,) = hf.find_repeats(pages)
-    assert only.role == hf.ROLE_SIGNATURE
+def test_signing_line_is_found_by_its_fixed_text_on_any_page():
+    # One page is enough: no repetition needed, no confirmation (产品 10-19).
+    pages = [_layout(i, W, H, [_t(SIGN, (72, 8, 260, 16))] if i == 2 else []) for i in range(4)]
+    (only,) = hf.sign_candidates(pages, {})
+    assert only.role == hf.ROLE_SIGNATURE and only.source == hf.SOURCE_SIGN
+    assert only.confirmed and not only.needs_confirmation and only.pages == (2,)
+    # Not in the middle of a page.
+    middle = [_layout(0, W, H, [_t(SIGN, (72, 400, 260, 408))])]
+    assert hf.sign_candidates(middle, {}) == []
 
 
 def test_confirm_marks_every_candidate_and_is_pure():
@@ -192,7 +197,8 @@ def test_text_is_kept_out_of_repr_summary_and_preview():
 def test_ui_strings_follow_flow_doc_and_avoid_the_banned_word():
     for text in hf.UI_TEXT.values():
         assert "正则" not in text
-    assert hf.UI_TEXT["not_found"] == "ⓘ 这个 PDF 没认出页眉页脚，没有删除。页眉页脚里的词仍按规则替换。"
+    assert hf.UI_TEXT["not_found"] == "ⓘ 没认出页眉页脚，这份不删"
+    assert hf.UI_TEXT["not_found_next"] == "可从原 Word 重新导出 PDF 再放进来，或先这样写出"
     assert hf.label_for(hf.ROLE_HEADER) == "将删除：页眉"
     assert hf.label_for(hf.ROLE_FOOTER) == "将删除：页脚"
     assert hf.label_for(hf.ROLE_SIGNATURE) == "签署信息"
@@ -213,19 +219,20 @@ def test_tagged_pdf_uses_tags_and_flags_untagged_signing_line():
     assert covered == {(p, r) for p in range(4) for r in (hf.ROLE_HEADER, hf.ROLE_FOOTER)}
     header_kinds = {e.kind for c in tags if c.role == hf.ROLE_HEADER for e in c.elements}
     assert header_kinds == {hf.KIND_TEXT, hf.KIND_IMAGE, hf.KIND_LINE}
-    assert [c.role for c in extra] == [hf.ROLE_SIGNATURE]
-    assert extra[0].needs_confirmation and not extra[0].confirmed
+    signs = [c for c in plan.candidates if c.source == hf.SOURCE_SIGN]
+    assert extra == [] and [c.role for c in signs] == [hf.ROLE_SIGNATURE]
+    assert signs[0].confirmed and not signs[0].needs_confirmation
     texts = " ".join(e.text for c in plan.candidates for e in c.elements)
     assert "Layout note" not in texts and BODY_TOP not in texts
 
 
 def test_apply_refuses_unconfirmed_candidates():
-    doc = _open(_tagged_pdf())
+    doc = _open(_repeat_pdf())
     plan = hf.identify_pdf(doc)
     with pytest.raises(hf.UnconfirmedCandidates):
         hf.apply_pdf(doc, plan)
     # Nothing was touched.
-    assert SIGN in _all_text(doc) and HEADER in _all_text(doc)
+    assert SPONSOR_FOOTER in _all_text(doc) and HEADER in _all_text(doc)
 
 
 def test_tagged_apply_really_removes_and_keeps_body():
@@ -279,12 +286,14 @@ def test_confirmed_repeats_are_removed_and_body_stays():
     result = hf.apply_pdf(doc, plan)
     out = _open(doc.tobytes(garbage=3, deflate=True))
     text = _all_text(out)
-    assert HEADER not in text and SPONSOR_FOOTER not in text and "Page " not in text
+    assert SPONSOR_FOOTER not in text and "Page " not in text
     assert text.count("Repeated body sentence in the middle") == 12
     assert text.count(BODY_TOP) == 12 and "One-off top note" in text
-    assert b"ABC-2026-001" not in _raw_streams(out)
-    assert all(not page.get_images() for page in out)
-    assert all(not page.get_drawings() for page in out)
+    # Page 4 has a one-off note above the header: its outermost row does not
+    # repeat, so that page's header is left alone (review M1, edge rows only).
+    assert text.count(HEADER) == 1
+    assert [bool(page.get_images()) for page in out] == [i == 3 for i in range(12)]
+    assert [bool(page.get_drawings()) for page in out] == [i == 3 for i in range(12)]
     assert result.pages == 12 and result.body_lost == 0 and result.left == 0
 
 
@@ -309,7 +318,7 @@ def test_summary_counts_pages_and_flags_auto_found():
     assert info["pages"] == 12
     assert info["needs_confirmation"] is True
     assert info["line"] == "页眉页脚　12 页 · 将删除"
-    assert info["note"] == "ⓘ 自动认出，请看预览确认"
+    assert info["note"] == "⚠ 待确认，不删"
     rows = hf.preview_rows(plan)
     assert rows and set(rows[0]) == {"id", "page", "role", "label", "source", "bbox", "needs_confirmation", "confirmed", "items"}
 
@@ -401,9 +410,10 @@ def test_word_without_headers_has_nothing_to_do(tmp_path):
 def test_check_text_tolerates_tiny_glyph_moves_after_rewrite():
     before = [("药", 255.1, 216.0), ("名", 267.1, 216.0), ("A", 72.0, 50.0)]
     after = [("药", 255.05, 216.03), ("名", 267.05, 216.03)]
-    left, lost = hf.check_text(before, after, [(60, 40, 200, 60)])
+    removed = [("A", 72.0, 50.0)]  # the candidate's own glyphs
+    left, lost = hf.check_text(before, after, removed)
     assert (left, lost) == (0, 0)
-    assert hf.check_text(before, [], [(60, 40, 200, 60)]) == (0, 2)
+    assert hf.check_text(before, [], removed) == (0, 2)
 
 
 def test_check_boxes_does_not_take_a_neighbouring_table_rule_for_the_header_rule():
@@ -432,8 +442,11 @@ def test_header_rule_with_a_body_border_inside_it_is_kept_on_that_page():
     doc = _open(doc.tobytes())
     plan = hf.identify_pdf(doc)
     lines = [e for c in plan.candidates for e in c.elements if e.kind == hf.KIND_LINE]
-    assert {e.page for e in lines} == set(range(12)) - {2}
-    assert plan.kept_crowded == 1
+    # Page 4 (index 3) keeps its header: a one-off note sits above it.
+    assert {e.page for e in lines} == set(range(12)) - {2, 3}
+    # Caught while picking the edge rows (stacked on another drawing), so
+    # the later crowded-rule pass has nothing left to drop.
+    assert plan.kept_crowded == 0
     before = len(doc[2].get_drawings())
     result = hf.apply_pdf(doc, hf.confirm(plan))
     assert result.body_lost == 0
