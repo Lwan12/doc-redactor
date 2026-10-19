@@ -2,7 +2,8 @@
 # replacement 可省略，缺省按类别走默认占位符。
 regex:
   - name: PROJECT_ID
-    pattern: '\bABC-\d{4}-\d{3}\b'
+    # 不用 \b：编号紧挨中文时（如「受试者ABC-2026-001」）Python 的 \b 不算边界。
+    pattern: '(?<![A-Za-z0-9])ABC-\d{4}-\d{3}(?![A-Za-z0-9])'
     flags: ""
     replacement: "[PROTOCOL]"
 wordlists:

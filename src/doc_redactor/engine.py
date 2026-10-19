@@ -200,18 +200,60 @@ def _wordlist_regex(terms: list[str]) -> str | None:
     return "|".join(f"(?:{_term_regex(term)})" for term in ordered)
 
 
+# ``\b`` in a user pattern, ASCII edition: a boundary unless both sides are
+# ASCII word characters. Unicode ``\b`` counts Han as a word character, so
+# ``\bABC-2026-001`` never matched right after Chinese (``受试者ABC-2026-001``).
+_ASCII_BOUNDARY = rf"(?:(?<![{_ASCII_EDGE}])|(?![{_ASCII_EDGE}]))"
+
+
+def ascii_word_boundaries(pattern: str) -> str:
+    """Replace each ``\b`` outside a character class with ``_ASCII_BOUNDARY``.
+
+    ``\\b`` (a literal backslash and b) and ``[\b]`` (backspace) stay as they are.
+    """
+    out: list[str] = []
+    in_class = False
+    index = 0
+    while index < len(pattern):
+        ch = pattern[index]
+        if ch == "\\" and index + 1 < len(pattern):
+            pair = pattern[index : index + 2]
+            out.append(_ASCII_BOUNDARY if pair == "\\b" and not in_class else pair)
+            index += 2
+            continue
+        if in_class:
+            if ch == "]":
+                in_class = False
+        elif ch == "[":
+            in_class = True
+            out.append(ch)
+            index += 1
+            # A ] right after [ or [^ is a literal, not the end of the class.
+            if pattern[index : index + 1] == "^":
+                out.append("^")
+                index += 1
+            if pattern[index : index + 1] == "]":
+                out.append("]")
+                index += 1
+            continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
+
+
 def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) -> "RedactionEngine":
     recognizers: list[PatternRecognizer] = []
     for rule in regex_rules:
+        pattern = ascii_word_boundaries(rule.pattern)
         try:
-            re.compile(rule.pattern, flags=rule.flags)
+            re.compile(pattern, flags=rule.flags)
         except re.error as exc:
             raise ValueError(f"匹配写法 {rule.name} 无法编译: {exc}") from exc
         recognizers.append(
             PatternRecognizer(
                 supported_entity=rule.name,
                 name=rule.name,
-                patterns=[Pattern(name=rule.name, regex=rule.pattern, score=1.0)],
+                patterns=[Pattern(name=rule.name, regex=pattern, score=1.0)],
                 global_regex_flags=rule.flags,
             )
         )
