@@ -244,7 +244,7 @@ DEMO_WORD_HEAD = "PRJ-2026-017　访视记录　版本 2.1"
 DEMO_WORD_FOOT = "华曜医药 机密　第 1 页 / 共 3 页"
 
 
-def _page_hits(lines, mapping, page, hid, roles):
+def _page_hits(lines, mapping, page, hid, roles, sources=None):
     """Hits with page-text offsets, as the scanner stores them."""
     text = "\n".join(lines)
     hits = []
@@ -270,17 +270,46 @@ def _page_hits(lines, mapping, page, hid, roles):
                 page=page,
                 rects=[(40, 60 + 30 * line_no, 220, 76 + 30 * line_no)],
                 hf_role=roles.get(line_no, ""),
+                hf_source=(sources or {}).get(line_no, ""),
             )
         )
         hid += 1
     return hits, hid
 
 
+DEMO_PDF_EXTRA = "内部审阅稿　华曜医药　请勿外传"
+
+
+def _demo_plan(kind, route, blocks, pages):
+    """A plan with page lists only (no elements): enough for counts and states."""
+    from doc_redactor import header_footer as hf
+
+    cands = []
+    for source, role in blocks:
+        confirmed = source != hf.SOURCE_REPEAT or hf.REPEAT_CONFIRMED_BY_DEFAULT
+        cands.append(
+            hf.Candidate(
+                id=f"{source}-{role}",
+                source=source,
+                role=role,
+                pages=tuple(pages),
+                elements=(),
+                needs_confirmation=not confirmed,
+                confirmed=confirmed,
+                part=f"/word/{role}1.xml" if kind == hf.KIND_DOCX else "",
+            )
+        )
+    return hf.Plan(kind=kind, route=route, page_count=0 if kind == hf.KIND_DOCX else len(pages), candidates=tuple(cands))
+
+
 def demo_hf_scans(mode: str = "tag") -> list[FileScan]:
     """demo_scans with headers/footers in Word file 1 and PDF file 2.
 
-    mode: "tag" (PDF has tags), "auto" (found by repetition), "none"
-    (nothing found). Other files are unchanged.
+    mode: "tag" (PDF has tags; signing line by its fixed text), "auto"
+    (header/footer found by repetition, waiting for confirmation), "mixed"
+    (tags, plus one more repeated line under the header), "none" (nothing
+    found, signing line still goes), "none-plain" (nothing at all).
+    Other files are unchanged. The PDF has 2 pages.
     """
     from doc_redactor import header_footer as hf
 
@@ -291,14 +320,14 @@ def demo_hf_scans(mode: str = "tag") -> list[FileScan]:
     head_i, foot_i = len(body), len(body) + 1
     hid = max(h.hit_id for s in scans for h in s.hits) + 1
     extra = [
-        _hit(hid, "项目号", "PRJ-2026-017", f"第 {head_i + 1} 段", f"p:{head_i}", 0, 12, hf_role=hf.ROLE_HEADER),
-        _hit(hid + 1, "申办方", "华曜医药", f"第 {foot_i + 1} 段", f"p:{foot_i}", 0, 4, hf_role=hf.ROLE_FOOTER),
+        _hit(hid, "项目号", "PRJ-2026-017", f"第 {head_i + 1} 段", f"p:{head_i}", 0, 12, hf_role=hf.ROLE_HEADER, hf_source=hf.SOURCE_WORD),
+        _hit(hid + 1, "申办方", "华曜医药", f"第 {foot_i + 1} 段", f"p:{foot_i}", 0, 4, hf_role=hf.ROLE_FOOTER, hf_source=hf.SOURCE_WORD),
     ]
     hid += 2
     word.paragraphs = paras
     word.hits = list(word.hits) + extra
     word.hf_route = hf.ROUTE_WORD
-    word.hf_pages = 3
+    word.hf_plan = _demo_plan(hf.KIND_DOCX, hf.ROUTE_WORD, [(hf.SOURCE_WORD, hf.ROLE_HEADER), (hf.SOURCE_WORD, hf.ROLE_FOOTER)], ())
     word.hf_watermark = True
     word.hf_watermark_text = "机密"
     word.hf_units = {f"p:{head_i}": hf.ROLE_HEADER, f"p:{foot_i}": hf.ROLE_FOOTER}
@@ -323,24 +352,43 @@ def demo_hf_scans(mode: str = "tag") -> list[FileScan]:
         [("项目号", "PRJ-2026-017"), ("申办方", "华曜医药有限公司")],
         [("项目号", "PRJ-2026-017"), ("药名", "瑞沃替尼片"), ("项目号", "PRJ-2026-017-S02")],
     ]
-    pages, hits, lines_role = [], [], {}
+    hf_source = {"tag": hf.SOURCE_TAG, "mixed": hf.SOURCE_TAG, "auto": hf.SOURCE_REPEAT}.get(mode, "")
+    with_extra = mode == "mixed"
+    pages, hits, lines_role, lines_source = [], [], {}, {}
     for page, lines in enumerate(body_pages):
         footer = f"华曜医药 CONFIDENTIAL　Page {page + 1}/2"
-        full = [DEMO_SIGN, DEMO_PDF_HEAD] + lines + [footer]
-        roles = {0: hf.ROLE_SIGNATURE, 1: hf.ROLE_HEADER, len(full) - 1: hf.ROLE_FOOTER}
-        if mode == "none":
-            roles_for_hits = {}
-        else:
-            roles_for_hits = roles
-            for line_no, role in roles.items():
-                lines_role[(page, line_no)] = role
-        mapping = [("项目号", "PRJ-2026-017")] + body_map[page] + [("申办方", "华曜医药", len(full) - 1)]
-        found, hid = _page_hits(full, mapping, page, hid, roles_for_hits)
+        top = [DEMO_SIGN, DEMO_PDF_HEAD] + ([DEMO_PDF_EXTRA] if with_extra else [])
+        full = top + lines + [footer]
+        roles, sources = {}, {}
+        if mode != "none-plain":
+            roles[0], sources[0] = hf.ROLE_SIGNATURE, hf.SOURCE_SIGN
+        if hf_source:
+            roles[1], sources[1] = hf.ROLE_HEADER, hf_source
+            roles[len(full) - 1], sources[len(full) - 1] = hf.ROLE_FOOTER, hf_source
+        if with_extra:
+            roles[2], sources[2] = hf.ROLE_HEADER, hf.SOURCE_REPEAT
+        for line_no, role in roles.items():
+            lines_role[(page, line_no)] = role
+            lines_source[(page, line_no)] = sources[line_no]
+        mapping = [("项目号", "PRJ-2026-017")]
+        if with_extra:
+            mapping.append(("申办方", "华曜医药", 2))
+        mapping += body_map[page] + [("申办方", "华曜医药", len(full) - 1)]
+        found, hid = _page_hits(full, mapping, page, hid, roles, sources)
         hits.extend(found)
         pages.append(full)
     pdf.pages = pages
     pdf.hits = hits
     pdf.hf_lines = lines_role
-    pdf.hf_route = {"tag": hf.ROUTE_TAG, "auto": hf.ROUTE_REPEAT, "none": hf.ROUTE_NONE}[mode]
-    pdf.hf_pages = None if mode == "none" else 2
+    pdf.hf_line_sources = lines_source
+    route = {"tag": hf.ROUTE_TAG, "mixed": hf.ROUTE_TAG, "auto": hf.ROUTE_REPEAT}.get(mode, hf.ROUTE_NONE)
+    pdf.hf_route = route
+    blocks = []
+    if mode != "none-plain":
+        blocks.append((hf.SOURCE_SIGN, hf.ROLE_SIGNATURE))
+    if hf_source:
+        blocks += [(hf_source, hf.ROLE_HEADER), (hf_source, hf.ROLE_FOOTER)]
+    if with_extra:
+        blocks.append((hf.SOURCE_REPEAT, hf.ROLE_HEADER))
+    pdf.hf_plan = _demo_plan(hf.KIND_PDF, route, blocks, range(len(pages)))
     return scans

@@ -82,6 +82,7 @@ from doc_redactor.ruleset import (
 )
 from doc_redactor.scan import (
     MSG_ALREADY_WRITTEN,
+    set_file_hf_confirmed,
     FileScan,
     blocked_write_results,
     output_dir_unwritable,
@@ -427,11 +428,17 @@ class App:
         self.persist_now()
         self.refresh()
 
-    def toggle_file_hf(self, scan) -> None:
+    def toggle_file_hf(self, scan) -> None:  # noqa: D401
         """Per-file box on the result page. Not remembered, and not a rule change."""
         if self.written or not scan.hf_found:
             return
         scan.hf_keep = not scan.hf_keep
+        self.refresh()
+
+    def toggle_file_hf_confirm(self, scan) -> None:
+        """「确认删除 / 撤销确认」 for one file's blocks found by repetition.
+        Not remembered, not a rule change; nothing changes once written."""
+        set_file_hf_confirmed(scan, not scan.hf_confirmed, written=self.written)
         self.refresh()
 
     def persist_now(self) -> None:
@@ -1189,12 +1196,29 @@ class App:
         if key.startswith("res-hf-"):
             from doc_redactor.gui.demo import demo_hf_scans
 
-            mode = {"res-hf-auto": "auto", "res-hf-none": "none"}.get(key, "tag")
+            mode = {
+                "res-hf-auto": "auto",
+                "res-hf-auto-ok": "auto",
+                "res-hf-auto-undo": "auto",
+                "res-hf-all-pend": "auto",
+                "res-hf-mixed": "mixed",
+                "res-hf-mixed-ok": "mixed",
+                "res-hf-none": "none",
+                "res-hf-none-plain": "none-plain",
+            }.get(key, "tag")
             self.scans = demo_hf_scans(mode)
             self.output_display = r"D:\脱敏输出\20261017-2140"
             self.selected = 0 if key in {"res-hf-word", "res-hf-filecancel"} else 1
+            if key == "res-hf-all-pend":
+                self.selected = "all"
             if key == "res-hf-filecancel":
                 self.scans[0].hf_keep = True
+            if key in {"res-hf-auto-ok", "res-hf-mixed-ok"}:
+                set_file_hf_confirmed(self.scans[1], True)
+            if key == "res-hf-auto-undo":
+                # Confirm, then undo: back to 待确认.
+                set_file_hf_confirmed(self.scans[1], True)
+                set_file_hf_confirmed(self.scans[1], False)
             if key == "res-hf-after":
                 self.preview_mode = "after"
             if key == "res-hf-written":

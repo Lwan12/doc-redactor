@@ -36,6 +36,8 @@ from doc_redactor.gui.theme import (
     LINE2,
     MUTED,
     PLACE,
+    WARN,
+    WARN_BG,
     fit_label,
     marker_for,
     status_style,
@@ -359,14 +361,12 @@ class ResultView:
         tk.Label(inner, text=f"    ✓ 有命中 {n_hit}", bg=BG_SURFACE, fg="#008035", font=fonts["small"]).pack(side="left")
         tk.Label(inner, text=f"    — 无命中 {n_no}", bg=BG_SURFACE, fg=MUTED, font=fonts["small"]).pack(side="left")
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
-        hf_pages = _hf_page_total(scans, self.app)
-        if hf_pages:
-            verb_hf = "已删除" if self.app.written else "将删除"
+        for part, tone in hf_text.top_parts(scans, self.app.remove_hf, self.app.written):
             tk.Label(
                 inner,
-                text=f"    ▭ 页眉页脚{verb_hf} {hf_pages} 页",
+                text=f"    {part}",
                 bg=BG_SURFACE,
-                fg=INK,
+                fg=_tone_fg(tone),
                 font=fonts["small"],
             ).pack(side="left")
 
@@ -377,18 +377,19 @@ class ResultView:
         for scan in scans:
             text = _pdf_fit_notice(scan, self.app)
             if text:
-                notices.append((scan.path.name, text))
-            note = hf_text.file_note(scan, self.app.remove_hf)
+                notices.append((scan.path.name, text, "info"))
+            note, tone = hf_text.file_note_tone(scan, self.app.remove_hf)
             if note:
-                notices.append((scan.path.name, note))
+                notices.append((scan.path.name, note, tone))
         if notices:
             box = tk.Frame(parent, bg=BG_INSET)
             box.pack(side="bottom", fill="x")
-            for name, text in notices:
+            for name, text, *tone in notices:
                 tk.Label(box, text=name, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
                     anchor="w", padx=8, pady=(2, 0)
                 )
-                _wrap_label(box, text, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=6, pady=(0, 2))
+                fg = _tone_fg(tone[0]) if tone else INK
+                _wrap_label(box, text, bg=BG_INSET, fg=fg, font=fonts["small"]).pack(fill="x", padx=6, pady=(0, 2))
         head = tk.Frame(parent, bg=BG_INSET)
         head.pack(fill="x")
         tk.Label(head, text=f"文件 {len(scans)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
@@ -583,18 +584,15 @@ class ResultView:
         notice = _pdf_fit_notice(scan, self.app) if scan.kind == KIND_PDF else ""
         if notice:
             _wrap_label(head, notice, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=8, pady=(1, 0))
-        if self.app.remove_hf and has_prev and scan.kind == KIND_PDF:
-            if scan.hf_route == hf.ROUTE_NONE:
-                _wrap_label(head, hf_text.NOT_FOUND, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(
-                    fill="x", padx=8, pady=(1, 0)
+        if has_prev:
+            notes = hf_text.preview_notes(scan, self.app.remove_hf)
+            for i, line in enumerate(notes):
+                _wrap_label(head, line, bg=BG_INSET, fg=INK if i == 0 else INK2, font=fonts["small"]).pack(
+                    fill="x", padx=8, pady=(1 if i == 0 else 0, 1 if i == len(notes) - 1 else 0)
                 )
-                _wrap_label(head, hf_text.NOT_FOUND_WHY, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
-                    fill="x", padx=8, pady=(0, 1)
-                )
-            elif scan.hf_route == hf.ROUTE_REPEAT and scan.hf_active:
-                _wrap_label(head, hf_text.AUTO_FOUND_TOP, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(
-                    fill="x", padx=8, pady=(1, 0)
-                )
+            bar = hf_text.confirm_bar(scan, self.app.remove_hf, self.app.written)
+            if bar is not None:
+                self._confirm_bar(head, scan, bar, fonts)
         if has_prev:
             controls = tk.Frame(head, bg=BG_INSET)
             controls.pack(fill="x")
@@ -737,6 +735,10 @@ class ResultView:
         text.tag_configure("hf_gap", font=fonts["small"])
         text.tag_configure("hf_bar", foreground=LINE2)
         text.tag_configure("hf_keep", foreground=INK2, font=fonts["small"], relief="solid", borderwidth=1)
+        # 待确认: light orange, no strike-through (dashed frame cannot be drawn in Text).
+        text.tag_configure("hf_pend", background=WARN_BG)
+        text.tag_lower("hf_pend")
+        text.tag_configure("hf_pend_label", background="#ffffff", foreground=WARN, font=fonts["small"], relief="solid", borderwidth=1)
         self._hit_ranges = {}
         cats = {cat: i for i, cat in enumerate(self.app.category_order())}
         replacements = self.app.ruleset.replacements()
@@ -762,19 +764,26 @@ class ResultView:
                 text.insert("end", block[pos:], ("title",) if title else ())
             text.insert("end", "\n")
 
-        hf_on = scan.hf_active
         after = self.app.preview_mode == "after"
         hide = self.app.hide_text
-        state = {"role": None}
+        state = {"block": None}
 
-        def hf_line(role: str, line: str, line_hits: list, title: bool = False) -> None:
-            """One line of a header/footer. ``state`` keeps the open block."""
-            if hf_on:
-                if state["role"] != role:
+        def hf_line(role: str, line: str, line_hits: list, title: bool = False, source: str = "") -> None:
+            """One line of a header/footer. ``state`` keeps the open block.
+
+            Three looks (方案.md 2.11): 将删除 grey + strike-through, above any
+            hit highlight; 待确认 light orange, hits shown and counted; kept, a
+            grey bar and a label.
+            """
+            source = source or (hf.SOURCE_WORD if scan.kind == KIND_WORD else hf.SOURCE_TAG)
+            style = hf_text.block_style(scan, source) if self.app.remove_hf else hf_text.STYLE_KEEP
+            key = (role, source, style)
+            if style == hf_text.STYLE_DELETE:
+                if state["block"] != key:
                     close_block()
-                    state["role"] = role
+                    state["block"] = key
                     if not after:
-                        text.insert("end", hf_text.block_label(role, scan), ("hf_label",))
+                        text.insert("end", hf_text.block_label(role, scan, source), ("hf_label",))
                         text.insert("end", "\n", ("hf_del",))
                 if after:
                     text.insert("end", "\n", ("hf_gap",))
@@ -782,17 +791,33 @@ class ResultView:
                 shown = ("▇" * min(len(line.strip()), 12)) if hide else line
                 text.insert("end", shown + "\n", ("hf_del",))
                 return
+            if style == hf_text.STYLE_PENDING:
+                if state["block"] != key:
+                    close_block()
+                    state["block"] = key
+                    text.insert("end", hf_text.block_label(role, scan, source), ("hf_pend_label",))
+                    text.insert("end", "\n", ("hf_pend",))
+                start = text.index("end-1c")
+                insert_run(line, line_hits, title=title)
+                text.tag_add("hf_pend", start, "end-1c")
+                return
             close_block()
             text.insert("end", "▏", ("hf_bar",))
             if self.app.remove_hf:
-                text.insert("end", hf_text.block_label(role, scan), ("hf_keep",))
+                text.insert("end", hf_text.block_label(role, scan, source), ("hf_keep",))
                 text.insert("end", " ")
             insert_run(line, line_hits, title=title)
 
         def close_block() -> None:
-            role = state["role"]
-            state["role"] = None
-            if role is None or not hf_on or after:
+            block = state["block"]
+            state["block"] = None
+            if block is None:
+                return
+            role, _source, style = block
+            if style == hf_text.STYLE_PENDING:
+                text.insert("end", "\n", ("hf_gap",))
+                return
+            if after:
                 return
             if role == hf.ROLE_SIGNATURE:
                 text.insert("end", hf_text.SIGN_NOTE + "\n", ("hf_note",))
@@ -839,7 +864,8 @@ class ResultView:
                             )
                     role = scan.hf_lines.get((pi, li)) if scan.hf_lines else None
                     if role:
-                        hf_line(role, line, line_hits)
+                        source = (scan.hf_line_sources or {}).get((pi, li), "")
+                        hf_line(role, line, line_hits, source=source)
                     else:
                         close_block()
                         insert_run(line, line_hits)
@@ -991,6 +1017,28 @@ class ResultView:
                     self.refresh()
                     return
 
+    def _confirm_bar(self, head, scan, bar, fonts) -> None:
+        """「⚠ 待确认，不删」 / 「✓ 已确认删除」 strip with its own button, on the right."""
+        warn = bar["tone"] == hf_text.TONE_WARN
+        bg = WARN_BG if warn else "#e8f5ed"
+        fg = WARN if warn else "#008035"
+        strip = tk.Frame(head, bg=bg)
+        strip.pack(fill="x", padx=0, pady=(1, 0))
+        ttk.Button(
+            strip,
+            text=bar["button"],
+            command=lambda: self.app.toggle_file_hf_confirm(scan),
+            state="normal" if bar["enabled"] else "disabled",
+        ).pack(side="right", padx=8, pady=4)
+        tk.Label(strip, text=bar["status"], bg=bg, fg=fg, font=fonts["small"]).pack(
+            side="left", anchor="n", padx=(8, 6), pady=5
+        )
+        holder = tk.Frame(strip, bg=bg)
+        holder.pack(side="left", fill="x", expand=True, pady=3)
+        label = _wrap_label(holder, bar["text"], bg=bg, fg=INK, font=fonts["small"])
+        label.pack(fill="x")
+        label.hf_bar = bar
+
     def _right_pane(self, parent, scans, fonts) -> None:
         if self.app.selected == "all":
             current = None
@@ -1041,20 +1089,17 @@ class ResultView:
         tree.configure(yscrollcommand=cat_scroll.set)
         tree.pack(side="left", fill="x", expand=True)
         cat_box.pack(fill="x")
-        hf_value = hf_text.summary_value(current, self.app.remove_hf, self.app.written, scans)
-        if hf_value is not None:
+        for label_text, value, tone in hf_text.summary_rows(current, self.app.remove_hf, self.app.written, scans):
             row = tk.Frame(parent, bg=BG_SURFACE)
             row.pack(fill="x")
-            tk.Label(row, text="▭ 页眉页脚", bg=BG_SURFACE, fg=INK, font=fonts["small"]).pack(
+            fg = _tone_fg(tone)
+            tk.Label(row, text=label_text, bg=BG_SURFACE, fg=WARN if tone == hf_text.TONE_WARN else INK, font=fonts["small"]).pack(
                 side="left", anchor="n", padx=(10, 6), pady=3
             )
-            first, _, rest = hf_value.partition("\n")
             values = tk.Frame(row, bg=BG_SURFACE)
             values.pack(side="right", padx=(0, 4), pady=3)
-            muted = first.startswith("—")
-            tk.Label(values, text=first, bg=BG_SURFACE, fg=MUTED if muted else INK, font=fonts["small"]).pack(anchor="e")
-            if rest:
-                tk.Label(values, text=rest, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(anchor="e")
+            for i, line in enumerate(value.split("\n")):
+                tk.Label(values, text=line, bg=BG_SURFACE, fg=fg if i == 0 else INK2, font=fonts["small"]).pack(anchor="e")
 
         def on_cat(_e=None):
             if getattr(self, "_building", False):
@@ -1582,8 +1627,12 @@ def _hf_box_disabled(scan: FileScan, app) -> bool:
     return hf_text.box_disabled(scan, app.written)
 
 
-def _hf_page_total(scans, app) -> int:
-    return hf_text.page_total(scans, app.remove_hf)
+def _tone_fg(tone: str) -> str:
+    return {
+        hf_text.TONE_WARN: WARN,
+        hf_text.TONE_OK: "#008035",
+        hf_text.TONE_MUTED: MUTED,
+    }.get(tone, INK)
 
 
 def _output_hint(scans, app) -> str:
