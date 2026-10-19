@@ -21,6 +21,7 @@ def redact_docx(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int
     for section in document.sections:
         for header_footer in _owned_headers_footers(section):
             _redact_container(header_footer, engine, counts)
+    scrub_docx_properties(document)
     dest.parent.mkdir(parents=True, exist_ok=True)
     document.save(str(dest))
     merge_counts(counts, _redact_media(dest, engine))
@@ -42,6 +43,52 @@ def iter_table_cells(table: Table):
     for tr in table._tbl.tr_lst:
         for tc in tr.tc_lst:
             yield _Cell(tc, table)
+
+
+_CORE_TEXT_FIELDS = (
+    "author",
+    "title",
+    "subject",
+    "keywords",
+    "comments",
+    "last_modified_by",
+    "category",
+    "content_status",
+    "identifier",
+    "language",
+    "version",
+)
+# app.xml fields that can carry names; Application, page/word counts stay.
+_APP_TEXT_TAGS = ("Company", "Manager", "HyperlinkBase", "Template")
+_EMPTY_CUSTOM = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    b'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" '
+    b'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"/>'
+)
+
+
+def scrub_docx_properties(document) -> None:
+    """Blank core text properties, name fields in app.xml, and every custom property."""
+    core = document.core_properties
+    for field in _CORE_TEXT_FIELDS:
+        setattr(core, field, "")
+    from lxml import etree
+
+    package = document.part.package
+    # A saved thumbnail is a picture of page 1, original text included.
+    for rid, rel in list(package.rels.items()):
+        if rel.reltype.endswith("/thumbnail"):
+            del package.rels[rid]
+    for part in package.iter_parts():
+        name = str(part.partname)
+        if name == "/docProps/app.xml":
+            root = etree.fromstring(part.blob)
+            for element in list(root):
+                if etree.QName(element).localname in _APP_TEXT_TAGS:
+                    root.remove(element)
+            part._blob = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+        elif name == "/docProps/custom.xml":
+            part._blob = _EMPTY_CUSTOM
 
 
 def _owned_headers_footers(section):
