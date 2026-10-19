@@ -755,3 +755,17 @@ def test_pdf_stacked_inline_images_are_each_painted(tmp_path: Path):
         for image in _inline_images(dest):
             assert _ocr_secrets(image) == []
         assert _rendered_secrets(dest, pymupdf.Rect(60, 30, 540, 310)) == []
+
+
+def test_pdf_inline_image_ocr_near_match_is_marked_approx(tmp_path: Path, monkeypatch):
+    """merge-r5 S1：内联图里 OCR 近似命中也标「近似」（#34 M34-2）。编造数据。"""
+    import doc_redactor.scan as scan_mod
+
+    def fake_entities(image, engine):
+        return [{"category": "DRUG", "text": "Fictlzumab", "boxes": [(10, 10, 100, 20)], "approx": True}]
+
+    monkeypatch.setattr(scan_mod, "analyze_image_entities", fake_entities)
+    monkeypatch.setattr(scan_mod, "require_tesseract", lambda *a, **k: None)
+    scan = scan_path(_inline_pdf(tmp_path), _engine())
+    inline = [h for h in scan.hits if h.unit.startswith("pdfinline:")]
+    assert inline and all(h.approx for h in inline), [(h.unit, h.approx) for h in inline]

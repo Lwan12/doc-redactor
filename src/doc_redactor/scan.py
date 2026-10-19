@@ -818,6 +818,7 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                         hit_id=ids.next(),
                         category=entity["category"],
                         text=entity["text"],
+                        approx=bool(entity.get("approx")),
                         location=f"第 {page.number + 1} 页图 {image_index} · 图内 第 {_row_of(top)} 行",
                         unit=f"pdfinline:{page.number}:{inline_index}",
                         boxes=list(entity["boxes"]),

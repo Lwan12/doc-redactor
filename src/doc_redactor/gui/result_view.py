@@ -1714,7 +1714,10 @@ def _pdf_fit_notice(scan: FileScan, app) -> str:
 
 
 def _hf_only_write(scan: FileScan, app) -> bool:
-    """No hit to replace, but 「去掉页眉页脚」 still writes this file (#34 r3 M1)."""
+    """No hit to replace, but 「去掉页眉页脚」 still writes this file (#34 r3 M1).
+    A blocked file is never written (merge-r5 M1)."""
+    if _blocked_reason(scan):
+        return False
     if scan.status == "fail" or scan.enabled_hits or not scan.hf_active:
         return False
     key = str(scan.path)
