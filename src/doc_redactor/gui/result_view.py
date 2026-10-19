@@ -369,8 +369,8 @@ class ResultView:
             icon, text, _ = status_style(kind)
             count = "—" if scan.status == "fail" else scan.enabled_count()
             label = f"{icon} {scan.path.name}"
-            if kind in {"many", "nowrite"}:
-                label = f"{icon} {text}  {scan.path.name}"
+            if kind in {"many", "nowrite", "skipped"}:
+                label = f"{icon} {scan.path.name}  {text}" if kind == "skipped" else f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
         target = ids[0] if self.app.selected == "all" else ids[self.app.selected + 1]
@@ -998,6 +998,8 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
         return "fail", "失败", "bad"
     if str(scan.path) in app.write_errors:
         return "nowrite", "没写出", "bad"
+    if str(scan.path) in app.write_notes:
+        return "skipped", app.write_notes[str(scan.path)], "ok"
     if scan.too_many:
         return "many", "命中偏多", "warn"
     if app.written and scan.enabled_count() > 0:

@@ -175,6 +175,7 @@ def status_style(kind: str) -> tuple[str, str, str]:
         "cancelled": ("⊘", "已取消", WARN),
         "many": ("⚠", "命中偏多", WARN),
         "nowrite": ("✕", "没写出", BAD),
+        "skipped": ("✓", "这个文件之前已写出，已跳过", OK),
     }
     return mapping.get(kind, ("○", kind, INK2))
 

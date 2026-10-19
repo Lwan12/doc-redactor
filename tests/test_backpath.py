@@ -48,7 +48,17 @@ from doc_redactor.backpath import (
     write_allowed,
 )
 from doc_redactor.engine import RegexRule, build_engine
-from doc_redactor.scan import FileScan, KIND_PDF, KIND_WORD, LocatedHit, WriteResult, scan_path, write_scan, write_scans
+from doc_redactor.scan import (
+    MSG_ALREADY_WRITTEN,
+    FileScan,
+    KIND_PDF,
+    KIND_WORD,
+    LocatedHit,
+    WriteResult,
+    scan_path,
+    write_scan,
+    write_scans,
+)
 
 
 def _rule(name="项目号", *, enabled=True, pattern=r"ABC-\d{4}-\d{3}", replacement="", terms=None):
@@ -302,6 +312,32 @@ def test_refuses_to_overwrite_the_source_path(tmp_path: Path):
     assert "ABC-2026-001" in text
 
 
+def test_existing_dest_on_retry_is_skipped_not_an_error(tmp_path: Path):
+    source = tmp_path / "notes.docx"
+    _docx(source, "ABC-2026-001")
+    scan = scan_path(source, _engine())
+    batch = allocate_batch_dir(tmp_path / "out", datetime(2026, 10, 17, 21, 43))
+    first = write_scans([scan], batch, overwrite=False, sequence=False)
+    dest = first[0].dest
+    assert dest is not None and dest.is_file()
+    kept = dest.read_bytes()
+    report = first[0].report.read_bytes() if first[0].report else None
+
+    again = write_scans([scan], batch, overwrite=False, sequence=False)
+    assert len(again) == 1
+    item = again[0]
+    assert item.skipped is True
+    assert item.error is None
+    assert item.note == MSG_ALREADY_WRITTEN
+    assert item.dest == dest
+    assert dest.read_bytes() == kept
+    if report is not None:
+        assert first[0].report.read_bytes() == report
+    assert is_write_failure(scan, item) is False
+    assert decide_written(False, again) is True
+    assert decide_written(False, again * 2) is True
+
+
 def test_retry_does_not_delete_successful_files(tmp_path: Path):
     good = tmp_path / "good.docx"
     bad_path = tmp_path / "missing.docx"
@@ -497,3 +533,24 @@ def test_cancel_then_rescan_drops_the_previous_generation():
     assert progress == [(0, "scanned")]
     assert adopted == ["new-scan"]
     assert is_current(second, generation) is True
+
+
+def test_failed_write_leaves_no_half_file_for_retry_to_skip(tmp_path: Path, monkeypatch):
+    import doc_redactor.scan as scan_mod
+
+    source = tmp_path / "notes.docx"
+    _docx(source, "ABC-2026-001")
+    scan = scan_path(source, _engine())
+    batch = allocate_batch_dir(tmp_path / "out", datetime(2026, 10, 17, 21, 44))
+
+    def boom(scan_obj, dest, **kwargs):
+        dest.write_bytes(b"half")
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(scan_mod, "write_scan", boom)
+    failed = write_scans([scan], batch, overwrite=False, sequence=False)
+    assert failed[0].error
+    assert not any(batch.glob("*.redacted.*"))
+    monkeypatch.undo()
+    retry = write_scans([scan], batch, overwrite=False, sequence=False)
+    assert retry[0].note is None and retry[0].dest is not None and retry[0].dest.stat().st_size > 4

@@ -36,6 +36,7 @@ MSG_ENCRYPTED_PDF = (
 MSG_UNSUPPORTED = "不支持这个文件类型。请用 Word（.docx）、PDF 或图片（.png .jpg）。"
 MSG_MISSING = "找不到这个文件。"
 MSG_OPEN_FAIL = "打不开这个文件。请确认文件没有损坏，再试一次。"
+MSG_ALREADY_WRITTEN = "这个文件之前已写出，已跳过"
 
 
 def output_dir_unwritable(exc: OSError) -> str:
@@ -134,6 +135,7 @@ class WriteResult:
     counts: dict[str, int]
     skipped: bool = False
     error: str | None = None
+    note: str | None = None
 
 
 class IdGen:
@@ -276,20 +278,27 @@ def write_scans(
             if sequence:
                 dest = sequenced_path(dest)
             else:
+                report_path = report_for(scan.path, destination)
                 written.append(
                     WriteResult(
                         path=scan.path,
-                        dest=None,
-                        report=None,
+                        dest=dest,
+                        report=report_path if report_path.is_file() else None,
                         counts={},
                         skipped=True,
-                        error="输出文件夹里已经有同名文件",
+                        note=MSG_ALREADY_WRITTEN,
                     )
                 )
                 continue
         try:
             counts = write_scan(scan, dest, replacements=mapping, engine=engine)
         except Exception as exc:
+            # A failed write must not leave a half file that a retry would
+            # mistake for "already written".
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
             continue
         if dest.stem == f"{scan.path.stem}.redacted":

@@ -23,7 +23,7 @@ def test_clamp_page_matches_prev_and_next():
     assert clamp_page(3, 1, 0) == 0
 
 
-def test_place_more_menu_drops_below_every_heading():
+def test_place_more_menu_misses_headings_and_first_row():
     headings = [
         (20, 134, 100, 163),
         (100, 134, 230, 163),
@@ -32,20 +32,44 @@ def test_place_more_menu_drops_below_every_heading():
         (710, 134, 840, 163),
         (840, 134, 950, 163),
     ]
-    # First data row's 操作 cell: 修改 / 删除. The column continues downward.
+    first_row = [
+        (20, 163, 100, 191),
+        (100, 163, 230, 191),
+        (230, 163, 280, 191),
+        (280, 163, 710, 191),
+        (710, 163, 840, 191),
+        (840, 163, 950, 191),
+    ]
     action = (840, 163, 950, 400)
     x, y = place_more_menu(
         button=(860, 90, 80, 32),
         menu_size=(128, 30),
         window=(0, 0, 960, 640),
         headings=headings,
-        avoid=[action],
+        avoid=[action, *first_row],
     )
     box = (x, y, x + 128, y + 30)
     for heading in headings:
         assert not rects_overlap(box, heading)
+    for cell in first_row:
+        assert not rects_overlap(box, cell)
     assert not rects_overlap(box, action)
-    assert y >= 163
+
+
+def test_place_more_menu_stays_under_the_button_when_table_is_lower():
+    headings = [(20, 170, 950, 199)]
+    first = (20, 199, 950, 227)
+    x, y = place_more_menu(
+        button=(860, 90, 80, 32),
+        menu_size=(128, 30),
+        window=(0, 0, 960, 640),
+        headings=headings,
+        avoid=[first, (840, 199, 950, 400)],
+    )
+    assert (x, y) == (812, 122)
+    box = (x, y, x + 128, y + 30)
+    assert not rects_overlap(box, headings[0])
+    assert not rects_overlap(box, first)
 
 
 def test_place_more_menu_stays_under_the_button_when_nothing_is_below():
@@ -208,7 +232,8 @@ def test_more_menu_does_not_cover_rule_headings(gui):
     _settle(app)
     menu = app.rules_view._more_menu
     tree = app.rules_view._rules_tree
-    assert menu is not None and tree is not None
+    btn = app.rules_view._more_btn
+    assert menu is not None and tree is not None and btn is not None
     width = menu.winfo_width()
     height = menu.winfo_height()
     assert width > 20 and height > 8
@@ -219,16 +244,19 @@ def test_more_menu_does_not_cover_rule_headings(gui):
     assert len(rects) == len(names)
     for name, rect in zip(names, rects):
         assert not rects_overlap(box, rect), f"{name} {rect} overlaps menu {box}"
-    header_bottom = max(rect[3] for rect in rects)
-    assert box[1] >= header_bottom
     kids = tree.get_children()
-    cell = tree.bbox(kids[0], "act")
-    assert cell and cell[2] > 0 and cell[3] > 0
-    rx, ry = tree.winfo_rootx(), tree.winfo_rooty()
-    action = (rx + cell[0], ry + cell[1], rx + cell[0] + cell[2], ry + cell[1] + cell[3])
-    assert not rects_overlap(box, action), f"操作 {action} overlaps menu {box}"
-    assert "修改" in tree.item(kids[0], "values")[-1]
-    assert "删除" in tree.item(kids[0], "values")[-1]
+    assert kids
+    first_rects = app.rules_view.first_row_rects()
+    assert len(first_rects) == len(names)
+    for name, rect in zip(names, first_rects):
+        assert not rects_overlap(box, rect), f"first-row {name} {rect} overlaps menu {box}"
+    values = tree.item(kids[0], "values")
+    assert "修改" in values[-1]
+    assert "删除" in values[-1]
+    assert values[names.index("替换成")]
+    for rect in app.rules_view.action_rects():
+        assert not rects_overlap(box, rect), f"操作 {rect} overlaps menu {box}"
+    assert box[1] >= btn.winfo_rooty() + btn.winfo_height()
 
 
 def test_write_files_keeps_existing_output_and_source(gui, tmp_path: Path):
@@ -306,3 +334,162 @@ def test_write_files_keeps_existing_output_and_source(gui, tmp_path: Path):
     assert first.read_bytes() == first_bytes
     assert prior.read_bytes() == b"prior-output-do-not-touch"
     assert source.read_bytes() == original
+
+
+def test_res_skipped_shoot_is_written_not_conflict(gui):
+    from doc_redactor.gui.result_view import _scan_status
+
+    app = gui
+    app.apply_shoot_state("res-skipped")
+    _settle(app)
+    assert app.written is True
+    assert app.write_failure_rows() == []
+    assert getattr(app, "_overlay_frame", None) is None
+    notes = list(app.write_notes.values())
+    assert notes
+    assert all(note == "这个文件之前已写出，已跳过" for note in notes)
+    kind, text, tag = _scan_status(app.scans[0], app)
+    assert kind == "skipped"
+    assert tag == "ok"
+    assert "✕" not in text
+
+
+def test_retry_existing_file_is_skipped_as_written(gui, tmp_path: Path):
+    """Retry that meets an already-written dest skips it. Not an error, not red."""
+    from docx import Document
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.gui.theme import OK, status_style
+    from doc_redactor.scan import KIND_WORD, FileScan, LocatedHit, MSG_ALREADY_WRITTEN
+
+    source = tmp_path / "notes.docx"
+    document = Document()
+    document.add_paragraph("ABC-2026-001")
+    document.save(source)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    app = gui
+    app.show("main")
+    _settle(app)
+    app.output_var.set(str(out))
+    app.scans = [
+        FileScan(
+            path=source,
+            kind=KIND_WORD,
+            status="ok",
+            hits=[
+                LocatedHit(
+                    hit_id=1,
+                    category="项目号",
+                    text="ABC-2026-001",
+                    location="第 1 段",
+                    unit="p:0",
+                    start=0,
+                    end=12,
+                )
+            ],
+            paragraphs=["ABC-2026-001"],
+        )
+    ]
+    app.running = False
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.batch_dir = None
+    app.kept_outputs = []
+
+    app.write_files()
+    _settle(app)
+    dest = app.batch_dir / "notes.redacted.docx"
+    assert dest.is_file()
+    kept = dest.read_bytes()
+    assert app.written is True
+    assert str(source) not in app.write_errors
+
+    app.write_errors[str(source)] = "输出文件夹里这个文件正被别的程序占用"
+    app.written = False
+    app.write_files(retry=True)
+    _settle(app)
+    assert dest.read_bytes() == kept
+    assert str(source) not in app.write_errors
+    assert app.write_notes[str(source)] == MSG_ALREADY_WRITTEN
+    assert app.written is True
+    kind, text, tag = _scan_status(app.scans[0], app)
+    assert kind == "skipped"
+    assert text == MSG_ALREADY_WRITTEN
+    assert tag == "ok"
+    icon, label, color = status_style(kind)
+    assert icon == "✓"
+    assert label == MSG_ALREADY_WRITTEN
+    assert color == OK
+    assert tag != "bad"
+    assert app.write_failure_rows() == []
+
+
+def _walk(widget):
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk(child)
+
+
+def test_skipped_row_puts_the_file_name_before_the_note(gui):
+    from tkinter import ttk
+
+    from doc_redactor.scan import MSG_ALREADY_WRITTEN
+
+    app = gui
+    app.apply_shoot_state("res-skipped")
+    _settle(app)
+    labels = []
+    for w in _walk(app.root):
+        if isinstance(w, ttk.Treeview) and tuple(w.cget("columns")) == ("name", "n"):
+            labels += [w.item(i, "values")[0] for i in w.get_children()]
+    row = next(x for x in labels if MSG_ALREADY_WRITTEN in x)
+    assert row.index(app.scans[0].path.name) < row.index(MSG_ALREADY_WRITTEN)
+
+
+def _table_top(app) -> int:
+    app.root.update_idletasks()
+    app.root.update()
+    return app.rules_view._rules_tree.winfo_rooty()
+
+
+def _open_menu(app):
+    rv = app.rules_view
+    rv.post_more_menu()
+    app.root.update()
+    return rv
+
+
+@pytest.mark.parametrize("how", ["unpost", "escape", "item", "close_gap"])
+def test_more_menu_open_then_close_restores_table_top(gui, how):
+    app = gui
+    app.show_rules_page("list")
+    _settle(app)
+    base = _table_top(app)
+    rv = _open_menu(app)
+    assert _table_top(app) > base
+    menu = rv._more_menu
+    if how == "unpost":
+        menu.unpost()
+        menu.event_generate("<Unmap>")
+    elif how == "escape":
+        menu.event_generate("<Escape>")
+        menu.unpost()
+        menu.event_generate("<Unmap>")
+    elif how == "item":
+        called = []
+        app.ask_restore_defaults = lambda: called.append(1)
+        menu.unpost()
+        menu.event_generate("<Unmap>")
+    else:
+        rv._close_menu_gap()
+    app.root.update()
+    assert _table_top(app) == base
+    assert not rv._menu_gap.winfo_manager()
+    # and it can open again after closing
+    _open_menu(app)
+    assert _table_top(app) > base
+    rv._close_menu_gap()
+    assert _table_top(app) == base
