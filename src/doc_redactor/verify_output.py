@@ -24,6 +24,11 @@ MSG_DELETE_FAILED_TAIL = "删除失败，这个文件可能含原文，请手动
 MSG_LEFTOVER = MSG_LEFTOVER_HEAD + "，" + MSG_DELETED_TAIL
 MSG_VERIFY_ERROR = MSG_VERIFY_ERROR_HEAD + "，" + MSG_DELETED_TAIL
 MSG_FINAL_ADVICE = "这类问题重试也会一样，请点「返回修改」给漏掉的地方加规则，或回上一步检查。"
+# A tagged PDF keeps the original words in its hidden tagged text (ActualText).
+# Adding rules or retrying does not help, so the advice says so plainly.
+# Wording to be settled by the front-end designer.
+MSG_TAGGED_HEAD = "{n}\u00a0处原词还留在这个PDF的隐藏标签里（页面上看不到，但复制文字或读屏时会读出来），暂时清不掉"
+MSG_TAGGED_ADVICE = "这类文件改规则、重试都解决不了，暂时不能用本工具处理。"
 
 # Short codes the PDF writer may put in a narrow box: the built-in ones plus
 # [R1], [R2]... for custom rules. Treated as placeholders only when the writer
@@ -51,7 +56,12 @@ def is_final_failure(reason: str | None) -> bool:
     """A failure that a plain retry would reproduce (leftover or check error)."""
     if not reason:
         return False
-    return "写出后仍可见" in reason or MSG_VERIFY_ERROR_HEAD in reason
+    return "写出后仍可见" in reason or MSG_VERIFY_ERROR_HEAD in reason or is_tagged_failure(reason)
+
+
+def is_tagged_failure(reason: str | None) -> bool:
+    """The only leftovers were in a PDF's hidden tagged text."""
+    return bool(reason) and "隐藏标签里" in reason
 
 
 def _is_legend_page(text: str) -> bool:
@@ -68,7 +78,7 @@ def extract_units(path: Path) -> list[str]:
     return [_unit_text(unit) for unit in _units(path)]
 
 
-def _units(path: Path) -> list:
+def _units(path: Path, ignore_tagged: bool = False) -> list:
     """Units in the same shape the scanner uses.
 
     PDF: one string per page. Word: the ``TextUnit`` objects of the shared
@@ -85,7 +95,11 @@ def _units(path: Path) -> list:
         document = pymupdf.open(path)
         try:
             # Same flags as the scanner (scan.py), so both read the same text.
-            return [page.get_text("text", flags=pymupdf.TEXTFLAGS_TEXT) for page in document]
+            # ignore_tagged reads the drawn glyphs only, not the tagged text.
+            flags = pymupdf.TEXTFLAGS_TEXT
+            if ignore_tagged:
+                flags |= pymupdf.TEXT_IGNORE_ACTUALTEXT
+            return [page.get_text("text", flags=flags) for page in document]
         finally:
             document.close()
     if suffix == ".docx":
@@ -181,8 +195,8 @@ def leftover_hits_in_unit(
     ``unit`` is a string (a PDF page) or a Word ``TextUnit``.
 
     ``known``: hit texts found in the original. When given, a hit whose text
-    the original never had is dropped only if it neither contains an original
-    hit text nor is part of one (see ``_invented``): removing a word can join
+    the original never had is dropped only if it shares no two characters in
+    a row with any original hit text (see ``_invented``): removing a word can join
     its neighbours into a new hit (PDF text extraction also moves an inserted
     placeholder to the end of the page), but a leftover always overlaps
     original hit text.
@@ -207,15 +221,29 @@ def _squash(text: str) -> str:
 def _invented(squashed: str, known: set[str]) -> bool:
     """True only for a hit the writer's own changes made up.
 
-    A hit text the original never had is dropped only when it neither
-    contains an original hit text nor is part of one. A leftover joined with
+    A hit text the original never had is dropped only when it shares no
+    run of two characters with any original hit text (``_shares_text``). A leftover joined with
     nearby text ("Acme" + "Pharma", "ZZ-77" + "[R2]") or a shorter term left
     after only part of a longer one was covered ("星辰海" of "星辰海医院")
     always shares text with an original hit, so it still counts.
     """
     if squashed in known:
         return False
-    return not any(k and (k in squashed or squashed in k) for k in known)
+    return not any(k and _shares_text(squashed, k) for k in known)
+
+
+def _shares_text(a: str, b: str, size: int = 2) -> bool:
+    """True when ``a`` and ``b`` (whitespace removed) share ``size`` characters in a row.
+
+    Case is ignored. A text shorter than ``size`` must be contained in the other.
+    Partial overlap counts: "Pharma Zeta" left after only "Acme" of
+    "Acme Pharma" was covered shares "Pharma".
+    """
+    a, b = a.casefold(), b.casefold()
+    n = min(size, len(a), len(b))
+    if n < size:
+        return a in b or b in a
+    return any(a[i : i + n] in b for i in range(len(a) - n + 1))
 
 
 def original_hit_texts(path: Path, engine) -> list[str]:
@@ -232,6 +260,7 @@ def count_leftovers(
     labels: Iterable[str] = (),
     short_codes: bool = False,
     known: Iterable[str] | None = None,
+    ignore_tagged: bool = False,
 ) -> int:
     """Hits still visible in ``path``.
 
@@ -239,12 +268,13 @@ def count_leftovers(
     ``kept``: texts of hits the user unchecked; that many occurrences are allowed.
     ``short_codes``: the writer used short codes (and so appended a legend page).
     ``known``: hit texts of the original; see ``leftover_hits_in_unit``.
+    ``ignore_tagged``: PDF only, read the drawn text without hidden tagged text.
     """
     known_list = None if known is None else list(known)
     label_list = list(labels)
     target_list = list(targets)
     found: Counter[str] = Counter()
-    units = _units(path)
+    units = _units(path, ignore_tagged=ignore_tagged)
     codes: frozenset[str] = frozenset()
     if short_codes and units and path.suffix.lower() == ".pdf" and _is_legend_page(_unit_text(units[-1])):
         # Only the codes the legend explains are the writer's. No legend page:
@@ -266,6 +296,17 @@ def count_leftovers(
     return sum(max(0, n - allowed.get(text, 0)) for text, n in found.items())
 
 
+def tagged_text_only(path: Path, **kwargs) -> bool:
+    """True when every leftover in a PDF sits in its hidden tagged text.
+
+    Called only after ``count_leftovers`` found some. Reading the drawn
+    glyphs alone then finds none. Never True for other file types.
+    """
+    if path.suffix.lower() != ".pdf":
+        return False
+    return count_leftovers(path, ignore_tagged=True, **kwargs) == 0
+
+
 def discard_output(path: Path) -> bool:
     """Delete ``path``. True only when it is confirmed gone afterwards."""
     try:
@@ -278,11 +319,18 @@ def discard_output(path: Path) -> bool:
         return False
 
 
-def check_written(path: Path, count: Callable[[], int]) -> tuple[int, str] | None:
+def check_written(
+    path: Path,
+    count: Callable[[], int],
+    tagged: Callable[[], bool] | None = None,
+) -> tuple[int, str] | None:
     """Run ``count`` on a written file. None when it is clean.
 
     Otherwise the file is deleted and ``(leftovers, message)`` is returned.
     An exception from ``count`` counts as a leftover (fail closed).
+    ``tagged``: when it says every leftover is in hidden tagged text, the
+    message says that instead. It only changes the wording, never whether
+    the file is blocked.
     """
     try:
         leftover = int(count())
@@ -290,6 +338,12 @@ def check_written(path: Path, count: Callable[[], int]) -> tuple[int, str] | Non
     except Exception:  # noqa: BLE001 - any failure of the check blocks the file
         leftover = 0
         head = MSG_VERIFY_ERROR_HEAD
+    if leftover and tagged is not None:
+        try:
+            if tagged():
+                head = MSG_TAGGED_HEAD.format(n=leftover)
+        except Exception:  # noqa: BLE001 - keep the plain message
+            pass
     if head is None:
         return None
     if discard_output(path):

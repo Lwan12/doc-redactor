@@ -12,6 +12,7 @@ from doc_redactor.backpath import (
     MSG_CLEARED_TOP,
     MSG_OUTPUT_HINT,
     MSG_PARTIAL_BOTTOM,
+    failed_file_count,
     MSG_PARTIAL_KEEP,
     MSG_RESTORE,
     MSG_WRITTEN_TOP,
@@ -195,15 +196,13 @@ class ResultView:
         if failures:
             err = tk.Frame(self.frame, bg="#fcecec")
             err.pack(fill="x")
-            tk.Label(
+            # Laid out by wrap_lines, so a comma never starts a line.
+            _wrap_label(
                 err,
-                text=partial_banner(failures) if app.written else unwritten_failure_banner(failures),
+                partial_banner(failures) if app.written else unwritten_failure_banner(failures),
                 bg="#fcecec",
                 fg="#cb2f39",
                 font=fonts["small"],
-                wraplength=920,
-                justify="left",
-                anchor="w",
             ).pack(fill="x", padx=12, pady=6)
         if app.written:
             ok = tk.Frame(self.frame, bg="#e8f5ed")
@@ -336,7 +335,8 @@ class ResultView:
         cancelled_n = sum(len(s.hits) - s.enabled_count() for s in scans if s.status != "fail")
         n_hit = sum(1 for s in scans if s.status != "fail" and _has_findings(s))
         n_no = sum(1 for s in scans if s.status != "fail" and not _has_findings(s))
-        n_fail = sum(1 for s in scans if s.status == "fail")
+        # Same count as the bottom bar: scan failures plus files not written.
+        n_fail = failed_file_count(scans, self.app.write_errors)
         tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
         verb = "已替换" if self.app.written else "将替换"
         tk.Label(inner, text=f"    {verb} ", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
@@ -1028,6 +1028,7 @@ class ResultView:
         enabled = writable_hit_total(scans, written=app.written, write_errors=app.write_errors)
         n_files = app.written_file_count()
         failures = app.write_failure_rows()
+        n_failed = failed_file_count(scans, app.write_errors)
         path = app.output_label()
         if any(scan.kind == KIND_PDF for scan in scans):
             tk.Label(
@@ -1043,10 +1044,10 @@ class ResultView:
         buttons.pack(side="right")
         left = tk.Frame(inner, bg=BG_SURFACE)
         left.pack(side="left", fill="x", expand=True)
-        if app.written and failures:
+        if app.written and n_failed:
             tk.Label(
                 left,
-                text=f"✕ {MSG_PARTIAL_BOTTOM.format(n=n_files, m=len(failures))}  {MSG_PARTIAL_KEEP}",
+                text=f"✕ {MSG_PARTIAL_BOTTOM.format(n=n_files, m=n_failed)}  {MSG_PARTIAL_KEEP}",
                 bg=BG_SURFACE,
                 fg="#cb2f39",
                 font=fonts["small"],

@@ -332,7 +332,12 @@ def write_scans(
         # of those hits counted twice. Any error inside the check blocks only
         # this file; the output is deleted, or the message names it for the
         # user to delete by hand.
-        problem = check_written(dest, lambda: _leftovers_after_write(scan, dest, mapping, engine, counts))
+        problem = check_written(
+            dest,
+            lambda: _leftovers_after_write(scan, dest, mapping, engine, counts),
+            tagged=lambda: dest.suffix.lower() == ".pdf"
+            and _leftovers_after_write(scan, dest, mapping, engine, counts, ignore_tagged=True) == 0,
+        )
         if problem is not None:
             written.append(
                 WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=problem[1])
@@ -356,7 +361,9 @@ def write_scans(
     return written
 
 
-def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], engine, counts=None) -> int:
+def _leftovers_after_write(
+    scan: FileScan, dest: Path, mapping: dict[str, str], engine, counts=None, ignore_tagged: bool = False
+) -> int:
     if scan.kind not in (KIND_WORD, KIND_PDF):
         return 0
     labels = set(mapping.values()) | {redaction_label(hit.category) for hit in scan.hits}
@@ -370,6 +377,7 @@ def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], 
         labels=labels,
         short_codes=int(getattr(counts, "short_count", 0) or 0) > 0,
         known=[hit.text for hit in scan.hits],
+        ignore_tagged=ignore_tagged,
     )
 
 
