@@ -20,6 +20,7 @@ from doc_redactor.docx_redactor import (
     iter_document_paragraphs,
     scrub_docx_properties,
 )
+from doc_redactor import header_footer as hf
 from doc_redactor.engine import Hit, RedactionEngine, counts_from_categories, merge_counts, redaction_label
 from doc_redactor.image_redactor import (
     analyze_image_entities,
@@ -118,6 +119,10 @@ class LocatedHit:
     boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
     rects: list[tuple[float, float, float, float]] = field(default_factory=list)
     page: int = 0
+    # Set when the hit lies in a header/footer block that 「去掉页眉页脚」 finds.
+    hf_role: str = ""
+    # Which way that block was found (tag / sign / repeat / word).
+    hf_source: str = ""
 
 
 @dataclass
@@ -135,10 +140,96 @@ class FileScan:
     # Hits found in text whose rectangles could not be placed. The text itself
     # is not stored. A positive count blocks the write of this file.
     unlocated_count: int = 0
+    # 「去掉页眉页脚」. Empty route: the option was off at scan time (or image).
+    hf_route: str = ""
+    hf_plan: object = field(default=None, repr=False)
+    hf_keep: bool = False
+    # Per file, not remembered: the user confirmed the blocks found by
+    # repetition. The default lives in header_footer.REPEAT_CONFIRMED_BY_DEFAULT.
+    hf_confirmed: bool = hf.REPEAT_CONFIRMED_BY_DEFAULT
+    hf_watermark: bool = False
+    hf_watermark_text: str = field(default="", repr=False)
+    # Word: paragraph unit -> role. PDF: (page, line) -> role, and
+    # (page, line) -> source. Preview only.
+    hf_units: dict = field(default_factory=dict, repr=False)
+    hf_lines: dict = field(default_factory=dict, repr=False)
+    hf_line_sources: dict = field(default_factory=dict, repr=False)
+
+    def hf_has(self, source: str) -> bool:
+        return hf.has_source(self.hf_plan, source)
+
+    @property
+    def hf_has_sign(self) -> bool:
+        return self.hf_has(hf.SOURCE_SIGN)
+
+    @property
+    def hf_has_repeat(self) -> bool:
+        return self.hf_has(hf.SOURCE_REPEAT)
+
+    @property
+    def hf_found(self) -> bool:
+        """Something to remove was found (a signing line alone counts)."""
+        return self.hf_route in (hf.ROUTE_TAG, hf.ROUTE_REPEAT, hf.ROUTE_WORD) or self.hf_has_sign
+
+    def hf_source_active(self, source: str) -> bool:
+        """Blocks of this source are deleted on write."""
+        if not self.hf_found or self.hf_keep or self.status == "fail":
+            return False
+        if source == hf.SOURCE_REPEAT:
+            return bool(self.hf_confirmed)
+        return True
+
+    @property
+    def hf_active(self) -> bool:
+        """Something of this file's headers/footers is deleted on write."""
+        if self.hf_plan is None:
+            return False
+        return any(self.hf_source_active(c.source) for c in self.hf_plan.candidates)
+
+    @property
+    def hf_pending(self) -> bool:
+        """Blocks found by repetition, not confirmed: kept in the output."""
+        return self.hf_has_repeat and not self.hf_keep and self.status != "fail" and not self.hf_confirmed
+
+    def hf_write_plan(self):
+        return hf.plan_for_write(self.hf_plan, self.hf_source_active(hf.SOURCE_REPEAT))
+
+    @property
+    def hf_delete_pages(self) -> int:
+        """PDF pages where something is deleted. Word has no fixed pages: 0."""
+        if self.kind != KIND_PDF or self.hf_plan is None:
+            return 0
+        sources = [s for s in (hf.SOURCE_TAG, hf.SOURCE_SIGN, hf.SOURCE_REPEAT) if self.hf_source_active(s)]
+        return len(hf.pages_of(self.hf_plan, sources))
+
+    @property
+    def hf_pending_pages(self) -> int:
+        """Pages with blocks waiting for confirmation. A page can be in both
+        this count and ``hf_delete_pages``; the two are never added up."""
+        if not self.hf_pending:
+            return 0
+        return len(hf.pages_of(self.hf_plan, (hf.SOURCE_REPEAT,)))
+
+    @property
+    def hf_sign_pages(self) -> int:
+        if self.hf_plan is None or not self.hf_source_active(hf.SOURCE_SIGN):
+            return 0
+        return len(hf.pages_of(self.hf_plan, (hf.SOURCE_SIGN,)))
+
+    def hf_hidden(self, hit: LocatedHit) -> bool:
+        return bool(hit.hf_role) and self.hf_source_active(hit.hf_source or hf.SOURCE_TAG)
+
+    @property
+    def visible_hits(self) -> list[LocatedHit]:
+        """Hits shown and counted. Those inside a block to be deleted are not."""
+        return [hit for hit in self.hits if not self.hf_hidden(hit)]
 
     @property
     def enabled_hits(self) -> list[LocatedHit]:
-        return [hit for hit in self.hits if hit.enabled]
+        return [hit for hit in self.visible_hits if hit.enabled]
+
+    def will_write(self) -> bool:
+        return bool(self.enabled_hits) or self.hf_active
 
     def enabled_count(self) -> int:
         return len(self.enabled_hits)
@@ -159,6 +250,23 @@ class WriteResult:
     note: str | None = None
     short_count: int = 0
     blank_count: int = 0
+    hf_removed: bool = False
+
+
+def set_file_hf_confirmed(scan: FileScan, value: bool, *, written: bool = False) -> bool:
+    """Confirm (or undo) one file's header/footer blocks found by repetition.
+
+    Per file only; there is no "confirm all". Returns True when the flag
+    changed. Ignored after writing, for failed files, files kept by the user,
+    and files with nothing found by repetition.
+    """
+    if written or scan.status == "fail" or scan.hf_keep or not scan.hf_has_repeat:
+        return False
+    value = bool(value)
+    if scan.hf_confirmed == value:
+        return False
+    scan.hf_confirmed = value
+    return True
 
 
 class IdGen:
@@ -195,7 +303,9 @@ def size_label(path: Path) -> str:
     return f"{mb:.1f} MB"
 
 
-def scan_path(path: Path, engine: RedactionEngine, ids: IdGen | None = None) -> FileScan:
+def scan_path(
+    path: Path, engine: RedactionEngine, ids: IdGen | None = None, *, remove_hf: bool = False
+) -> FileScan:
     ids = ids or IdGen()
     target = Path(path)
     kind = file_kind(target)
@@ -210,9 +320,9 @@ def scan_path(path: Path, engine: RedactionEngine, ids: IdGen | None = None) -> 
         return base
     try:
         if kind == KIND_WORD:
-            return _scan_docx(target, engine, ids, base)
+            return _scan_docx(target, engine, ids, base, remove_hf)
         if kind == KIND_PDF:
-            return _scan_pdf(target, engine, ids, base)
+            return _scan_pdf(target, engine, ids, base, remove_hf)
         return _scan_image_file(target, engine, ids, base)
     except ValueError as exc:
         message = str(exc)
@@ -234,6 +344,7 @@ def scan_paths(
     *,
     cancel: Event | None = None,
     progress=None,
+    remove_hf: bool = False,
 ) -> list[FileScan]:
     ids = IdGen()
     results: list[FileScan] = []
@@ -249,7 +360,7 @@ def scan_paths(
             continue
         if progress is not None:
             progress(index, Path(path), "running")
-        results.append(scan_path(Path(path), engine, ids))
+        results.append(scan_path(Path(path), engine, ids, remove_hf=remove_hf))
         if progress is not None:
             progress(index, Path(path), results[-1].status)
     return results
@@ -304,8 +415,7 @@ def write_scans(
                 )
             )
             continue
-        enabled = scan.enabled_hits
-        if not enabled:
+        if not scan.will_write():
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True))
             continue
         dest = destination_for(scan.path, destination)
@@ -364,6 +474,7 @@ def write_scans(
                 counts=counts,
                 short_count=int(getattr(counts, "short_count", 0) or 0),
                 blank_count=int(getattr(counts, "blank_count", 0) or 0),
+                hf_removed=scan.hf_active,
             )
         )
     return written
@@ -437,14 +548,24 @@ def session_totals(scans: list[FileScan], *, enabled_only: bool = True) -> tuple
 def _finish(scan: FileScan) -> FileScan:
     if scan.status == "fail":
         return scan
-    if not scan.hits and scan.unlocated_count <= 0:
+    if not scan.hits and scan.unlocated_count <= 0 and not scan.hf_found:
         scan.status = "nohit"
     scan.too_many = too_many_file_hits(len(scan.hits))
     return scan
 
 
-def _scan_docx(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> FileScan:
+def _scan_docx(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan, remove_hf: bool = False) -> FileScan:
     document = Document(str(path))
+    roles: dict[str, str] = {}
+    if remove_hf:
+        plan = hf.identify_docx(document)
+        scan.hf_plan = plan
+        scan.hf_route = plan.route
+        scan.hf_watermark = plan.has_watermark
+        scan.hf_watermark_text = plan.watermark_text
+        if plan.candidates:
+            roles = _docx_unit_roles(document, {c.part for c in plan.candidates})
+        scan.hf_units = dict(roles)
     paragraphs: list[str] = []
     # Body and header/footer paragraphs are numbered together; every other
     # corner (footnotes, alt text, link targets...) counts on its own.
@@ -475,11 +596,35 @@ def _scan_docx(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) 
                     unit=f"p:{index}",
                     start=hit.start,
                     end=hit.end,
+                    hf_role=roles.get(f"p:{index}", ""),
+                    hf_source=hf.SOURCE_WORD if f"p:{index}" in roles else "",
                 )
             )
     scan.paragraphs = paragraphs
     _scan_docx_media(path, engine, ids, scan)
     return _finish(scan)
+
+
+def _docx_unit_roles(document, parts: set[str]) -> dict[str, str]:
+    """Text units of header/footer parts that will be removed.
+
+    Same walk as ``iter_document_paragraphs``: body units first, then each
+    section's own headers and footers (text boxes, content controls and
+    tracked changes inside them included).
+    """
+    from doc_redactor.docx_redactor import _owned_headers_footers, iter_text_units
+
+    index = sum(1 for _ in iter_text_units(document._element))
+    roles: dict[str, str] = {}
+    for section in document.sections:
+        for part in _owned_headers_footers(section):
+            role = hf.ROLE_HEADER if type(part).__name__ == "_Header" else hf.ROLE_FOOTER
+            name = str(part.part.partname)
+            for _unit in iter_text_units(part._element):
+                if name in parts:
+                    roles[f"p:{index}"] = role
+                index += 1
+    return roles
 
 
 def _scan_docx_media(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> None:
@@ -516,11 +661,17 @@ def _scan_docx_media(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
             )
 
 
-def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> FileScan:
+def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan, remove_hf: bool = False) -> FileScan:
     document = pymupdf.open(path)
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
+        plan = None
+        if remove_hf:
+            # Before prepare_pdf: it drops the /Pagination artifact tags.
+            plan = hf.identify_pdf(document)
+            scan.hf_plan = plan
+            scan.hf_route = plan.route
         prepare_pdf(document)
         pages: list[list[str]] = []
         for page_index, page in enumerate(document):
@@ -528,9 +679,14 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
             text = page.get_text("text", textpage=textpage)
             lines = text.splitlines()
             pages.append(lines)
+            if plan is not None and plan.candidates:
+                for line_index, (role, source) in hf.pdf_line_blocks(page, plan, lines).items():
+                    scan.hf_lines[(page_index, line_index)] = role
+                    scan.hf_line_sources[(page_index, line_index)] = source
             found = find_page_hits(engine, text)
             located = locate_text_hits(page, found, textpage)
             for hit, rects in zip(found, located):
+                block = hf.block_at(plan, page_index, _union(rects))
                 if not rects:
                     # Count only. The hit text is not kept on the scan.
                     scan.unlocated_count += 1
@@ -547,6 +703,8 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
                         end=hit.end,
                         rects=rects,
                         page=page_index,
+                        hf_role=block[0],
+                        hf_source=block[1],
                     )
                 )
         scan.pages = pages
@@ -554,6 +712,17 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
     finally:
         document.close()
     return _finish(scan)
+
+
+def _union(rects):
+    if not rects:
+        return None
+    return (
+        min(r[0] for r in rects),
+        min(r[1] for r in rects),
+        max(r[2] for r in rects),
+        max(r[3] for r in rects),
+    )
 
 
 def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> None:
@@ -616,11 +785,18 @@ def _scan_image_file(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
 
 def _write_docx(scan: FileScan, dest: Path, label, engine: RedactionEngine | None) -> dict[str, int]:
     document = Document(str(scan.path))
+    # Unit numbers are those of the scan, so take the units before any
+    # header/footer part is emptied (emptying would renumber what follows).
+    units = list(iter_document_paragraphs(document))
+    if scan.hf_active:
+        # Headers/footers first, then the rules (header-footer-flow.md 5).
+        # Hits inside removed parts are hidden, so none of them is applied.
+        hf.apply_docx(document, scan.hf_write_plan())
     by_unit: dict[str, list[LocatedHit]] = {}
     for hit in scan.enabled_hits:
         by_unit.setdefault(hit.unit, []).append(hit)
     categories: list[str] = []
-    for index, paragraph in enumerate(iter_document_paragraphs(document)):
+    for index, paragraph in enumerate(units):
         unit_hits = by_unit.get(f"p:{index}", [])
         if not unit_hits:
             continue
@@ -632,6 +808,8 @@ def _write_docx(scan: FileScan, dest: Path, label, engine: RedactionEngine | Non
     scrub_docx_properties(document)
     mkdir_output(dest.parent)
     document.save(str(dest))
+    if scan.hf_active and hf.verify_docx_output(dest):
+        raise hf.HeaderFooterLeft(hf.verify_docx_output(dest), 0)
     media_counts = _write_docx_media(dest, by_unit)
     counts = counts_from_categories(categories)
     merge_counts(counts, media_counts)
@@ -692,6 +870,11 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
+        if scan.hf_active:
+            # Tags and the signing line always; blocks found by repetition
+            # only after the user confirmed this file (产品 10-19, 选 b).
+            # Before prepare_pdf, which drops the /Pagination artifact tags.
+            hf.apply_pdf(document, scan.hf_write_plan())
         prepare_pdf(document)
         order = list(getattr(engine, "category_order", []) or [])
         items = []
