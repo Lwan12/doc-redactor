@@ -435,3 +435,84 @@ def test_cli_placeholder_does_not_invent_a_hit(tmp_path: Path):
     assert count_leftovers(out, engine=engine, labels=["[SPONSOR]"], known=known) == 0
     # The same check still sees the original when nothing was removed.
     assert count_leftovers(src, engine=engine, labels=["[SPONSOR]"], known=known) == 1
+
+
+# --- Word tracked changes: the check counts hits the way the scanner does ---
+# A paragraph with a tracked deletion is read twice (as it reads now, and as
+# it read before the changes). A hit only in kept text belongs to the first
+# reading; a hit that touches deleted text belongs to the second. Each hit is
+# counted once.
+
+_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _del_run(text: str):
+    from docx.oxml import parse_xml
+
+    return parse_xml(
+        f'<w:del xmlns:w="{_W}" w:id="9" w:author="Tester" w:date="2026-01-01T00:00:00Z">'
+        f'<w:r><w:delText xml:space="preserve">{text}</w:delText></w:r></w:del>'
+    )
+
+
+def _revision_docx(path: Path) -> None:
+    doc = Document()
+    # Kept hit next to a deletion.
+    p = doc.add_paragraph("Sponsor Acme Pharma ")._p
+    p.append(_del_run("old words"))
+    # Hit split between kept text and deleted text.
+    p = doc.add_paragraph("Partner Acme ")._p
+    p.append(_del_run("Pharma"))
+    doc.add_paragraph("Project ABC-2026-001")
+    doc.save(str(path))
+
+
+def _live_text(path: Path) -> str:
+    return "\n".join(p.text for p in Document(str(path)).paragraphs)
+
+
+def test_unchecked_kept_hit_beside_deletion_is_not_blocked(tmp_path: Path):
+    src = tmp_path / "rev.docx"
+    _revision_docx(src)
+    engine = _engine()
+    scan = scan_path(src, engine)
+    kept = [h for h in scan.hits if h.text == "Acme Pharma" and "修订删除" not in h.location]
+    assert len(kept) == 1
+    kept[0].enabled = False
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error is None and res.dest is not None and res.dest.is_file()
+    assert "Sponsor Acme Pharma" in _live_text(res.dest)
+    assert "ABC-2026-001" not in _live_text(res.dest)
+
+
+def test_unchecked_hit_across_kept_and_deleted_is_not_blocked(tmp_path: Path):
+    src = tmp_path / "rev.docx"
+    _revision_docx(src)
+    engine = _engine()
+    scan = scan_path(src, engine)
+    cross = [h for h in scan.hits if "修订删除" in h.location]
+    assert len(cross) == 1
+    cross[0].enabled = False
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error is None and res.dest is not None and res.dest.is_file()
+
+
+def test_revision_hits_counted_once(tmp_path: Path):
+    from doc_redactor.verify_output import count_leftovers, original_hit_texts
+
+    src = tmp_path / "rev.docx"
+    _revision_docx(src)
+    engine = _engine()
+    # Kept hit: 1 (not 2), split hit: 1, project id: 1. Same as the scanner.
+    assert count_leftovers(src, engine=engine) == 3 == len(scan_path(src, engine).hits)
+    assert sorted(original_hit_texts(src, engine)) == ["ABC-2026-001", "Acme Pharma", "Acme Pharma"]
+    # Without an engine (targets only) the same split applies.
+    assert count_leftovers(src, targets=["Acme Pharma"]) == 2
+
+
+def test_cli_revision_docx_passes(tmp_path: Path):
+    src = tmp_path / "rev.docx"
+    _revision_docx(src)
+    out = tmp_path / "out"
+    assert main([str(src), "-r", str(RULES), "-o", str(out)]) == 0
+    assert any(out.glob("*.docx"))

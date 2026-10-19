@@ -62,8 +62,16 @@ def _is_legend_page(text: str) -> bool:
     return LEGEND_FOOTER.replace(" ", "") in "".join(lines).replace(" ", "")
 
 
-def extract_units(path: Path) -> list[str]:
-    """Text units in the same shape the scanner uses (PDF page / Word paragraph)."""
+def extract_units(path: Path) -> list:
+    """Text units in the same shape the scanner uses.
+
+    PDF: one string per page. Word: the ``TextUnit`` objects of the shared
+    walk (``iter_document_paragraphs``), so hits are found per unit with
+    ``TextUnit.find_hits`` exactly as the scanner does. A paragraph with a
+    tracked deletion is two units; a hit only in its kept text belongs to the
+    text unit, one that touches deleted text to the deleted unit. Each hit is
+    therefore counted once.
+    """
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         import pymupdf
@@ -78,8 +86,12 @@ def extract_units(path: Path) -> list[str]:
 
         from doc_redactor.docx_redactor import iter_document_paragraphs
 
-        return [paragraph.text or "" for paragraph in iter_document_paragraphs(Document(str(path)))]
+        return list(iter_document_paragraphs(Document(str(path))))
     return []
+
+
+def _unit_text(unit) -> str:
+    return unit if isinstance(unit, str) else (unit.text or "")
 
 
 def placeholder_spans(
@@ -109,20 +121,39 @@ def placeholder_spans(
     return spans
 
 
-def _raw_hits(unit: str, engine, targets: list[str]) -> list[tuple[int, int, str]]:
+def _raw_hits(unit, engine, targets: list[str]) -> list[tuple[int, int, str]]:
+    text = _unit_text(unit)
     if engine is not None:
-        return [(hit.start, hit.end, hit.text) for hit in engine.find_hits(unit)]
+        hits = engine.find_hits(text) if isinstance(unit, str) else unit.find_hits(engine)
+        return [(hit.start, hit.end, hit.text) for hit in hits]
     found = []
     for target in targets:
-        start = unit.find(target)
+        start = text.find(target)
         while start >= 0:
             found.append((start, start + len(target), target))
-            start = unit.find(target, start + len(target))
+            start = text.find(target, start + len(target))
+    if not isinstance(unit, str) and getattr(unit, "is_deletion", False):
+        # Same split as TextUnit.find_hits: a deleted unit owns only the
+        # hits that touch deleted text.
+        from doc_redactor.engine import Hit
+
+        owned = {(h.start, h.end) for h in unit.find_hits(_FixedHits(found, Hit))}
+        found = [item for item in found if (item[0], item[1]) in owned]
     return found
 
 
+class _FixedHits:
+    """Engine stand-in that returns a fixed hit list (targets-only check)."""
+
+    def __init__(self, found, hit_type) -> None:
+        self._hits = [hit_type(start=s, end=e, category="", text=t) for s, e, t in found]
+
+    def find_hits(self, _text):
+        return list(self._hits)
+
+
 def leftover_hits_in_unit(
-    unit: str,
+    unit,
     *,
     engine=None,
     targets: Iterable[str] = (),
@@ -133,12 +164,14 @@ def leftover_hits_in_unit(
 ) -> list[str]:
     """Texts of hits in ``unit`` that are not wholly inside a placeholder.
 
+    ``unit`` is a string (a PDF page) or a Word ``TextUnit``.
+
     ``known``: hit texts found in the original. When given, a hit whose text
     the original never had is dropped: removing a word can join its
     neighbours (PDF text extraction also moves an inserted placeholder to the
     end of the page), but a real leftover is always original hit text.
     """
-    spans = placeholder_spans(unit, labels=labels, short_codes=short_codes, legend=legend)
+    spans = placeholder_spans(_unit_text(unit), labels=labels, short_codes=short_codes, legend=legend)
     target_list = sorted({t for t in targets if t}, key=len, reverse=True)
     known_set = None if known is None else {_squash(text) for text in known}
     kept = []
@@ -157,7 +190,7 @@ def _squash(text: str) -> str:
 
 def original_hit_texts(path: Path, engine) -> list[str]:
     """Hit texts in the original file, extracted the same way as the output."""
-    return [hit.text for unit in extract_units(path) for hit in engine.find_hits(unit)]
+    return [text for unit in extract_units(path) for _s, _e, text in _raw_hits(unit, engine, [])]
 
 
 def count_leftovers(
@@ -183,7 +216,7 @@ def count_leftovers(
     found: Counter[str] = Counter()
     units = extract_units(path)
     for index, unit in enumerate(units):
-        legend = short_codes and index == len(units) - 1 and path.suffix.lower() == ".pdf" and _is_legend_page(unit)
+        legend = short_codes and index == len(units) - 1 and path.suffix.lower() == ".pdf" and _is_legend_page(_unit_text(unit))
         for text in leftover_hits_in_unit(
             unit,
             engine=engine,
