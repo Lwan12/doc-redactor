@@ -22,11 +22,11 @@ from doc_redactor.cli import redact_path
 from doc_redactor.config import load_rules
 from doc_redactor.scan import scan_path, write_scans
 from doc_redactor.tesseract_cmd import TESSERACT_HINT, configure_tesseract, find_tesseract
-from helpers import RULES, load_make_samples
+from helpers import RULES, load_make_samples, needs_tesseract
 
 NAME = "星辰海"
 SECRETS = ("ABC-2026-001", "Acme Pharma", "Fictizumab", NAME)
-needs_ocr = pytest.mark.skipif(find_tesseract() is None, reason=TESSERACT_HINT)
+needs_ocr = needs_tesseract(reason=TESSERACT_HINT)
 
 
 # ---------------------------------------------------------------- helpers

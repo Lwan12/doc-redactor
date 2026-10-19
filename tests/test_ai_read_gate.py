@@ -17,10 +17,11 @@ import pytest
 from doc_redactor.cli import redact_paths
 from doc_redactor.config import load_rules
 from doc_redactor.scan import scan_path, write_scans
-from doc_redactor.tesseract_cmd import find_tesseract
+from helpers import needs_tesseract
 
 # Pictures need Tesseract now: without it the write is refused, not done with the images skipped.
-needs_ocr = pytest.mark.skipif(find_tesseract() is None, reason="需要 Tesseract（含图片的文件没有它不写出）")
+# 本机没装跳过；CI 设了 REQUIRE_TESSERACT=1 时找不到就失败（tests/helpers.py）。
+needs_ocr = needs_tesseract
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "tools" / "ai_gate"

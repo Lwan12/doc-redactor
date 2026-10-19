@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import io
-import shutil
-import sys
 from pathlib import Path
 
 import pymupdf
@@ -14,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from doc_redactor.config import RegexRule, WordlistRule
 from doc_redactor.engine import build_engine
+from helpers import needs_tesseract
 
 DRUG = "菲替珠单抗"
 
@@ -67,7 +66,7 @@ def _scan_page(font_path: str) -> bytes:
     return buffer.getvalue()
 
 
-@pytest.mark.skipif(shutil.which("tesseract") is None and sys.platform != "win32", reason="需要 tesseract")
+@needs_tesseract(reason="需要 tesseract")
 def test_misread_drug_in_scanned_pdf_is_painted(tmp_path: Path):
     pytest.importorskip("pytesseract")
     from doc_redactor.pdf_redactor import redact_pdf
