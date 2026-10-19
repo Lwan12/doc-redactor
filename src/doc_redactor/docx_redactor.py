@@ -634,7 +634,9 @@ def _drop_embedded_objects(document) -> None:
         if not doomed:
             continue
         for node in list(element.iter()):
-            if node.get(_R_ID) in doomed and isinstance(node.tag, str) and node.tag.endswith("}OLEObject"):
+            # o:OLEObject points at an embedded object; c:externalData is a
+            # chart's embedded workbook (the chart keeps its cached values).
+            if node.get(_R_ID) in doomed and isinstance(node.tag, str) and node.tag.endswith(("}OLEObject", "}externalData")):
                 parent = node.getparent()
                 if parent is not None:
                     parent.remove(node)
