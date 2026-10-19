@@ -114,7 +114,7 @@ def test_signature_tracks_files_and_checked_rule_content():
     assert session_signature([], rules) != base
 
     changed = [_rule(replacement="[PROTOCOL]")]
-    assert rules_signature(changed) != rules_signature(rules)
+    assert rules_signature(changed) == rules_signature(rules)
     changed[0].replacement = ""
     changed[0].pattern = r"ZZZ-\d+"
     assert rules_signature(changed) != rules_signature(rules)
@@ -148,7 +148,9 @@ def test_unchecks_kept_only_when_signature_matches():
     assert apply_unchecks([again], memory, moved) == "cleared"
     assert all(hit.enabled for hit in again.hits)
 
-    edited = session_signature([path], [_rule(replacement="[其他]")])
+    relabelled = session_signature([path], [_rule(replacement="[其他]")])
+    assert relabelled == signature
+    edited = session_signature([path], [_rule(pattern=r"ZZZ-\d+")])
     third = _scan(path, [_hit(True), _hit(True, start=20, end=32, location="第 2 段")])
     assert apply_unchecks([third], memory, edited) == "cleared"
     assert all(hit.enabled for hit in third.hits)

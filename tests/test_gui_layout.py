@@ -704,3 +704,82 @@ def test_more_menu_open_then_close_restores_table_top(gui, how):
     assert _table_top(app) > base
     rv._close_menu_gap()
     assert _table_top(app) == base
+
+
+def _wait_scan(app, limit: float = 20.0) -> None:
+    import time
+
+    deadline = time.time() + limit
+    app.root.update()
+    while app.running and time.time() < deadline:
+        app.root.update()
+        time.sleep(0.02)
+    for _ in range(5):
+        app.root.update()
+    assert not app.running
+
+
+def test_relabel_only_keeps_unchecked_and_redraws_preview(gui, tmp_path, monkeypatch):
+    from docx import Document
+
+    import doc_redactor.gui.app as app_mod
+
+    class _Inline:
+        """Run the scan worker on the Tk thread; there is no mainloop in tests."""
+
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(app_mod, "Thread", _Inline)
+
+    from doc_redactor.ruleset import KIND_WORDLIST, Rule
+
+    app = gui
+    source = tmp_path / "memo.docx"
+    document = Document()
+    document.add_paragraph("申办方星辰海医药，合作方星辰海研究所。")
+    document.save(source)
+    app.ruleset.rules = [Rule(name="申办方", kind=KIND_WORDLIST, terms=["星辰海"], replacement="[甲方]")]
+    app.files = [source]
+    (tmp_path / "out").mkdir()
+    app.output_var.set(str(tmp_path / "out"))
+    app.output_error = None
+    app.start_scan()
+    _wait_scan(app)
+    hits = app.scans[0].hits
+    assert len(hits) == 2
+    hits[1].enabled = False
+    app._clear_preview()
+    app.ruleset.rules[0].replacement = "[SPONSOR-X]"
+    app.start_scan()
+    _wait_scan(app)
+    assert app.note_cleared is False
+    assert [h.enabled for h in app.scans[0].hits] == [True, False]
+    app.preview_mode = "after"
+    app.show("result")
+    _settle(app)
+    body = app.result_view._preview_text.get("1.0", "end")
+    assert "[SPONSOR-X]" in body
+    assert "[甲方]" not in body
+    shots = os.environ.get("DOC_REDACTOR_RELABEL_SHOT")
+    if shots:
+        from PIL import ImageGrab
+
+        root = app.root
+        menu = getattr(app.rules_view, "_more_menu", None)
+        if menu is not None:
+            menu.unpost()  # left open by an earlier test in this module
+        root.update()
+        x, y = root.winfo_rootx(), root.winfo_rooty()
+        ImageGrab.grab(bbox=(x, y, x + root.winfo_width(), y + root.winfo_height())).save(shots)
+
+    app.scans[0].hits[1].enabled = False
+    app._clear_preview()
+    app.ruleset.rules[0].terms = ["星辰海", "星海"]
+    app.start_scan()
+    _wait_scan(app)
+    assert app.note_cleared is True
+    assert all(h.enabled for h in app.scans[0].hits)
