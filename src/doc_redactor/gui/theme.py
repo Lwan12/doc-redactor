@@ -135,6 +135,9 @@ def setup_style(root: tk.Tk) -> dict:
         background=[("selected", BG_HOVER)],
         foreground=[("selected", INK)],
     )
+    # Result file list: rows are coloured by status; a selected row keeps that
+    # colour (only the background marks the selection), #34 次项.
+    style.map("Files.Treeview", background=[("selected", BG_HOVER)], foreground=[])
     style.configure("TEntry", fieldbackground=BG_SURFACE, foreground=INK)
     style.configure("TCombobox", fieldbackground=BG_SURFACE, foreground=INK)
     style.configure(

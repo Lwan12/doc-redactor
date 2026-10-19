@@ -153,3 +153,33 @@ def test_confirm_bar_without_fixed_rows_is_unchanged():
     bar = hf_text.confirm_bar(_scan(0, False), True, False)
     assert bar["status"] == hf_text.PENDING
     assert bar["text"] == hf_text.BAR_PENDING_AUTO
+
+
+def test_fixed_hint_keeps_the_continued_title_and_footnote_warning():
+    """#48 n1：有 N 时也保留「续表标题、脚注」这层提醒。"""
+    bar = hf_text.confirm_bar(_scan(2, False), True, False)
+    assert "含 2 行固定文字" in bar["text"]
+    assert "续表标题" in bar["text"] and "脚注" in bar["text"]
+    assert bar["text"].endswith("现在不删。")
+
+
+def test_scan_path_to_confirm_bar_counts_fixed_rows(tmp_path):
+    """#48 n3：识别 → 提示整条链走真实 scan_path，不手塞 fixed_rows。编造数据。"""
+    from doc_redactor.engine import WordlistRule, build_engine
+    from doc_redactor.scan import scan_path, set_file_hf_confirmed
+
+    def draw(page, i):
+        _two_rows(page)
+        page.insert_text((72, 54), "Version 2.0 Final", fontsize=9)
+        _body(page, i)
+
+    src = tmp_path / "fixed.pdf"
+    _pdf(draw).save(src)
+    scan = scan_path(src, build_engine([], [WordlistRule("药名", ["Nothingmab"], True)]), remove_hf=True)
+    bar = hf_text.confirm_bar(scan, True, False)
+    assert bar is not None and bar["status"] == hf_text.PENDING
+    assert "含 1 行固定文字" in bar["text"]
+    assert "Version" not in bar["text"]
+    set_file_hf_confirmed(scan, True)
+    done = hf_text.confirm_bar(scan, True, False)
+    assert done["status"] == hf_text.CONFIRMED and done["text"].endswith("虚线框含 1 行固定文字。")

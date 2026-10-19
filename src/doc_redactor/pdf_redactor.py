@@ -10,6 +10,7 @@ from __future__ import annotations
 import difflib
 import io
 import math
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -631,8 +632,6 @@ def clear_pdf_hidden(document) -> None:
     _rename_layers(document)
     # MuPDF keeps the first /ID string of the original on save; anything could
     # sit there. Write a fresh random one (both halves, the second is redone on save).
-    import secrets
-
     new_id = secrets.token_hex(16)
     document.xref_set_key(-1, "ID", f"[<{new_id}> <{new_id}>]")
 

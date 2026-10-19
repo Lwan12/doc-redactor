@@ -351,10 +351,16 @@ class ResultView:
             return
         enabled = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
         cancelled_n = sum(len(s.visible_hits) - s.enabled_count() for s in scans if s.status != "fail")
-        n_hit = sum(1 for s in scans if s.status != "fail" and _has_findings(s))
-        n_no = sum(1 for s in scans if s.status != "fail" and not _has_findings(s))
-        # Same count as the bottom bar: scan failures plus files not written.
-        n_fail = failed_file_count(scans, self.app.write_errors)
+        # Each file in exactly one bucket, same order as the file list's own
+        # status: 失败 (scan or write failed) > 没法检查 (blocked) > 有命中 > 无命中.
+        # The buckets add up to 共 N (#51 M1 and the top-bar partition).
+        buckets = [_top_bucket(s, self.app) for s in scans]
+        n_fail = buckets.count("fail")
+        n_unchecked = buckets.count("unchecked")
+        n_hit = buckets.count("hit")
+        n_no = buckets.count("no")
+        n_hf_only = sum(1 for s in scans if _hf_only_write(s, self.app))
+        # n_fail equals failed_file_count (bottom bar): scan failures plus files not written.
         tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
         verb = "已替换" if self.app.written else "将替换"
         tk.Label(inner, text=f"    {verb} ", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
@@ -370,6 +376,19 @@ class ResultView:
             ).pack(side="left")
         tk.Label(inner, text=f"    ✓ 有命中 {n_hit}", bg=BG_SURFACE, fg="#008035", font=fonts["small"]).pack(side="left")
         tk.Label(inner, text=f"    — 无命中 {n_no}", bg=BG_SURFACE, fg=MUTED, font=fonts["small"]).pack(side="left")
+        if n_hf_only:
+            # #34 次项: these 0-hit files are still written (header/footer only).
+            tk.Label(
+                inner,
+                text=f"（其中 {n_hf_only} 份只删页眉页脚{'已' if self.app.written else '将'}写出）",
+                bg=BG_SURFACE,
+                fg=MUTED,
+                font=fonts["small"],
+            ).pack(side="left")
+        if n_unchecked:
+            tk.Label(inner, text=f"    ⚠ 没法检查 {n_unchecked}", bg=BG_SURFACE, fg="#c04700", font=fonts["small"]).pack(
+                side="left"
+            )
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
         for part, tone in hf_text.top_parts(scans, self.app.remove_hf, self.app.written):
             tk.Label(
@@ -405,7 +424,8 @@ class ResultView:
         tk.Label(head, text=f"文件 {len(scans)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
             side="left", padx=10, pady=5
         )
-        tree = ttk.Treeview(parent, columns=("name", "n"), show="headings", selectmode="browse")
+        # Files.Treeview: a selected row keeps its status colour (#34 次项).
+        tree = ttk.Treeview(parent, columns=("name", "n"), show="headings", selectmode="browse", style="Files.Treeview")
         tree.heading("name", text="文件")
         tree.heading("n", text="替换数")
         # "⚠ 命中偏多  入组统计报告_V2.pdf" is about 227px in the UI font.
@@ -1689,6 +1709,19 @@ def _has_findings(scan: FileScan) -> bool:
     if scan.hits or _blocked_reason(scan):
         return True
     return int(getattr(scan, "unlocated_count", 0) or 0) > 0
+
+
+def _top_bucket(scan: FileScan, app) -> str:
+    if scan.status == "fail" or app.write_errors.get(str(scan.path)):
+        return "fail"
+    if _blocked_reason(scan):
+        return "unchecked"
+    return "hit" if _has_rule_hits(scan) else "no"
+
+
+def _has_rule_hits(scan: FileScan) -> bool:
+    """Rule hits only (located or not); a block alone is not a hit."""
+    return bool(scan.hits) or int(getattr(scan, "unlocated_count", 0) or 0) > 0
 
 
 def _pdf_fit_notice(scan: FileScan, app) -> str:

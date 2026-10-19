@@ -1242,6 +1242,12 @@ class App:
             if key in {"res-hf-zero", "res-hf-zero-written"}:
                 # 0 命中，只删页眉页脚（#34 r3 M1）。
                 self.scans[1].hits = []
+            if key == "res-hf-blocked":
+                # 拦下 + 0 命中 + 页眉页脚（merge-r5 M1 / r5b S3 / r5 S2）。
+                from doc_redactor.image_redactor import MSG_NO_OCR
+
+                self.scans[1].hits = []
+                self.scans[1].blocked_reason = MSG_NO_OCR.format(n=1)
             if key in {"res-hf-written", "res-hf-zero-written"}:
                 self.written = True
             self.show("result")
