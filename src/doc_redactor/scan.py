@@ -14,7 +14,7 @@ import pymupdf
 from PIL import Image
 from docx import Document
 
-from doc_redactor.docx_redactor import apply_hits_to_paragraph, iter_document_paragraphs
+from doc_redactor.docx_redactor import apply_hits_to_paragraph, iter_document_paragraphs, scrub_docx_properties
 from doc_redactor.engine import Hit, RedactionEngine, counts_from_categories, merge_counts, redaction_label
 from doc_redactor.image_redactor import (
     analyze_image_entities,
@@ -606,6 +606,7 @@ def _write_docx(scan: FileScan, dest: Path, label, engine: RedactionEngine | Non
             Hit(start=hit.start, end=hit.end, category=hit.category, text=hit.text) for hit in unit_hits
         ]
         categories.extend(apply_hits_to_paragraph(paragraph, engine_hits, label))
+    scrub_docx_properties(document)
     mkdir_output(dest.parent)
     document.save(str(dest))
     media_counts = _write_docx_media(dest, by_unit)
