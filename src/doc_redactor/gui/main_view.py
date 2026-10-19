@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 from doc_redactor.backpath import (
@@ -16,6 +17,7 @@ from doc_redactor.backpath import (
 )
 from doc_redactor.persist import MSG_FIRST, MSG_OUTPUT_REMEMBER
 from doc_redactor.gui.steps import StepBar
+from doc_redactor.gui import hf_text
 from doc_redactor.gui.theme import (
     BG_INSET,
     BG_PAGE,
@@ -314,6 +316,24 @@ class MainView:
                 state=state,
                 command=lambda i=index, v=var: self.app.toggle_rule(i, v.get()),
             ).pack(anchor="w")
+        # 「去掉页眉页脚」: its own line under the rule list, not a rule (方案.md 2.11).
+        tk.Frame(body, bg=LINE2, height=1).pack(fill="x", pady=(8, 6))
+        hf_var = tk.BooleanVar(value=self.app.remove_hf)
+        ttk.Checkbutton(
+            body,
+            text=hf_text.BOX,
+            variable=hf_var,
+            state=state,
+            command=lambda v=hf_var: self.app.set_remove_hf(v.get()),
+        ).pack(anchor="w")
+        from doc_redactor.gui.result_view import wrap_lines  # noqa: PLC0415 - avoids an import cycle
+
+        hint = tk.Label(body, bg=BG_SURFACE, fg=INK2, font=fonts["small"], justify="left", anchor="w")
+        # Tk wraps only at the space after "PDF"; lay the CJK lines out ourselves.
+        measure = tkfont.Font(font=hint.cget("font")).measure
+        hint.configure(text="\n".join(wrap_lines(hf_text.BOX_HINT, 260, measure)))
+        hint.pack(anchor="w", padx=(20, 0))
+        tk.Frame(body, bg=LINE2, height=1).pack(fill="x", pady=(8, 0))
         n = len(self.app.ruleset.enabled_rules())
         tk.Label(
             body,

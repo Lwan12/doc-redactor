@@ -26,7 +26,7 @@ from doc_redactor.verify_output import count_not_allowed, is_invented, not_allow
 MSG_LEAKED_HEAD = "写出后复核：换一种读法仍能读出\u00a0{n}\u00a0处"
 MSG_LEAKED = MSG_LEAKED_HEAD + "，已删除这个输出文件，没有写出"
 MSG_LEAKED_UNDELETED = MSG_LEAKED_HEAD + "，删除输出失败，请手动删除「{name}」"
-# 文案待前端定。命令行和界面用同一句（M34-1）。
+# 命令行和界面用同一句（M34-1）。
 MSG_NO_HITS_LINE = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
 MSG_NO_HITS = MSG_NO_HITS_LINE + "。如果里面有敏感内容，请先补规则。"
 
@@ -260,8 +260,10 @@ def _pdf_views(path: Path) -> list[tuple[str, list[str], bool]]:
                 source = document.xref_object(xref, compressed=False)
             except Exception:
                 continue
+            if re.search(r"/Type\s*/XRef\b", source):
+                source = _drop_file_id(source)
             out.extend(_pdf_strings(source))
-        out.extend(_pdf_strings(document.pdf_trailer()))
+        out.extend(_pdf_strings(_drop_file_id(document.pdf_trailer())))
     finally:
         document.close()
     return [
@@ -270,6 +272,25 @@ def _pdf_views(path: Path) -> list[tuple[str, list[str], bool]]:
         ("PDF 页面文字", plain, True),
         ("PDF 对象、元数据和链接", out, False),
     ]
+
+
+_FILE_ID = re.compile(r"/ID\s*\[[^\]]*\]")
+
+
+def _drop_file_id(source: str) -> str:
+    """Drop random bytes in the file identifier (``/ID [<...> <...>]``) of a trailer or XRef dict.
+
+    The library writes random or hashed bytes there; decoded, a one-letter
+    rule can match them by chance (#45). An /ID string that decodes to
+    printable text only is kept and checked, because the writer copies the
+    first /ID string of the original as it is.
+    """
+
+    def keep_text(match: re.Match) -> str:
+        kept = [text for text in _pdf_strings(match.group(0)[3:]) if text.isprintable()]
+        return " ".join("<feff" + text.encode("utf-16-be").hex() + ">" for text in kept)
+
+    return _FILE_ID.sub(keep_text, source)
 
 
 def _pdf_strings(source: str) -> list[str]:

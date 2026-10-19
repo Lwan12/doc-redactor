@@ -38,6 +38,14 @@ def _is_poppler() -> bool:
     return b"Poppler" in (probe.stdout + probe.stderr)
 
 
+def test_second_parser_is_poppler():
+    """Says in ``-rs`` when the pdftotext pass below is left out (#40 review):
+    the tests then check with PyMuPDF only."""
+    if not _is_poppler():
+        # English: the Windows CI log escapes non-ASCII skip reasons into \\uXXXX.
+        pytest.skip("pdftotext is not Poppler (e.g. Git's xpdf on Windows): this file re-reads with PyMuPDF only")
+
+
 def _read_back(path: Path) -> tuple[list[str], list[str]]:
     """(PyMuPDF rawdict lines, whole text of each parser) of the output."""
     document = pymupdf.open(path)
