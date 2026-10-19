@@ -1379,21 +1379,41 @@ def pdf_xref_image(document, xref: int, smask: int = 0) -> Image.Image:
             pixmap = pymupdf.Pixmap(pixmap, 0)
         if smask:
             mask = pymupdf.Pixmap(document, smask)
+            if mask.alpha:
+                mask = pymupdf.Pixmap(mask, 0)
+            if mask.n != 1:
+                mask = pymupdf.Pixmap(pymupdf.csGRAY, mask)
             if pixmap.n == 1:
                 pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
-            if (pixmap.width, pixmap.height) != (mask.width, mask.height):
-                # The PDF scales both onto the same box, so a mask need not
-                # match the colour data (a 2×2 indexed fill under a wide text
-                # mask is common). Stretch the colour data up to the mask, so
-                # glyphs drawn in the mask keep their full resolution for OCR.
-                pixmap = pymupdf.Pixmap(pixmap, mask.width, mask.height, None)
-            pixmap = pymupdf.Pixmap(pixmap, mask)
+            # The PDF scales both onto the same box, so a mask need not match
+            # the colour data (a 2×2 indexed fill under a wide text mask is
+            # common, and so is a small mask over a detailed picture). Work at
+            # the larger width and height: only ever stretch, never shrink, so
+            # neither the glyphs in the mask nor those in the colour data lose
+            # resolution before OCR.
+            width = max(pixmap.width, mask.width)
+            height = max(pixmap.height, mask.height)
+            if (pixmap.width, pixmap.height) != (width, height):
+                pixmap = pymupdf.Pixmap(pixmap, width, height, None)
+            if (mask.width, mask.height) != (width, height):
+                mask = pymupdf.Pixmap(mask, width, height, None)
+            if not any(mask.samples):
+                # Fully transparent: nothing shows on the page, but the colour
+                # data can still be pulled out of the file. Check (and paint)
+                # the colour data itself.
+                mask = None
+            else:
+                pixmap = pymupdf.Pixmap(pixmap, mask)
         data = pixmap.tobytes("png")
         image = Image.open(io.BytesIO(data))
         image.load()
     except Exception as exc:
         raise WriteBlocked(MSG_BAD_IMAGE.format(n=1)) from exc
     return image
+
+
+def _inline_key(info: dict) -> tuple:
+    return (tuple(pymupdf.Rect(info["bbox"])), info.get("_stack", 0))
 
 
 def inline_images(page) -> list[tuple[dict, Image.Image]]:
@@ -1407,10 +1427,19 @@ def inline_images(page) -> list[tuple[dict, Image.Image]]:
     if not infos:
         return []
     blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type") == 1]
+    # Several inline images can sit in the same box (one stacked on another).
+    # Pair them in drawing order and use each block once, so every one is read.
     found = []
+    used: set[int] = set()
     for info in infos:
         box = pymupdf.Rect(info["bbox"])
-        match = next((b for b in blocks if pymupdf.Rect(b["bbox"]) == box and b.get("image")), None)
+        index = next(
+            (i for i, b in enumerate(blocks) if i not in used and pymupdf.Rect(b["bbox"]) == box and b.get("image")),
+            None,
+        )
+        match = None if index is None else blocks[index]
+        if index is not None:
+            used.add(index)
         try:
             if match is None:
                 raise ValueError("no pixels")
@@ -1418,6 +1447,7 @@ def inline_images(page) -> list[tuple[dict, Image.Image]]:
             image.load()
         except Exception as exc:
             raise WriteBlocked(MSG_BAD_IMAGE.format(n=1)) from exc
+        info["_stack"] = sum(1 for prev, _img in found if pymupdf.Rect(prev["bbox"]) == box)
         found.append((info, image))
     return found
 
@@ -1465,13 +1495,13 @@ def paint_inline_images(page, jobs) -> None:
         rects = inline_boxes_to_rects(info, size, boxes)
         for rect in rects:
             page.add_redact_annot(pymupdf.Rect(rect), fill=(0, 0, 0), cross_out=False)
-        placed.append((pymupdf.Rect(info["bbox"]), size, boxes))
+        placed.append((_inline_key(info), size, boxes))
     page.apply_redactions(
         images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
         graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
         text=pymupdf.PDF_REDACT_TEXT_NONE,
     )
-    after = {tuple(pymupdf.Rect(info["bbox"])): image for info, image in inline_images(page)}
+    after = {_inline_key(info): image for info, image in inline_images(page)}
     failed = 0
     for area, size, boxes in placed:
         image = after.get(tuple(area))

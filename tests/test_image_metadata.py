@@ -639,3 +639,119 @@ def test_pdf_small_indexed_image_with_larger_mask_is_written_and_painted(tmp_pat
     assert sum(1 for h in scan.hits if h.unit.startswith("pdfimg:")) == 3
     for dest in (result.dest, _cli_write(src, tmp_path / "cli")):
         assert _rendered_secrets(dest, clip) == []
+
+
+# ---------------------------------------------------------------- PDF: soft mask smaller than the colour data (#39 M1, S1)
+
+
+def _colour_mask_pdf(tmp_path: Path, mask_size: tuple[int, int], alpha: int = 255) -> Path:
+    """A 900×300 colour card with a plain soft mask of ``mask_size``; body text hits too."""
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 760), "Sponsor Acme Pharma", fontsize=12)
+    card = io.BytesIO()
+    _card().save(card, "PNG")
+    image = page.insert_image(pymupdf.Rect(72, 100, 522, 250), stream=card.getvalue())
+    width, height = mask_size
+    smask = document.get_new_xref()
+    document.update_object(
+        smask,
+        f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /BitsPerComponent 8 /ColorSpace /DeviceGray >>",
+    )
+    document.update_stream(smask, bytes([alpha]) * (width * height))
+    document.xref_set_key(image, "SMask", f"{smask} 0 R")
+    src = tmp_path / f"mask-{width}x{height}-{alpha}.pdf"
+    document.save(src)
+    document.close()
+    return src
+
+
+def _stream_secrets(path: Path) -> list[str]:
+    """What OCR reads from each picture's colour data alone, mask ignored."""
+    found = []
+    document = pymupdf.open(path)
+    for xref, *_ in document[0].get_images(full=True):
+        pix = pymupdf.Pixmap(document, xref)
+        if pix.alpha:
+            pix = pymupdf.Pixmap(pix, 0)
+        found += _ocr_secrets(Image.open(io.BytesIO(pix.tobytes("png"))))
+    document.close()
+    return sorted(set(found))
+
+
+@pytest.mark.parametrize("mask_size", [(2, 2), (60, 20), (300, 100)])
+def test_pdf_smaller_mask_does_not_shrink_the_colour_data(tmp_path: Path, mask_size):
+    from doc_redactor.pdf_redactor import pdf_xref_image
+
+    document = pymupdf.open(_colour_mask_pdf(tmp_path, mask_size))
+    ((xref, smask, *_),) = document[0].get_images(full=True)
+    assert pdf_xref_image(document, xref, smask).size == (900, 300)
+    document.close()
+
+
+@needs_ocr
+@pytest.mark.parametrize("mask_size", [(2, 2), (60, 20), (300, 100)])
+def test_pdf_smaller_mask_picture_is_painted(tmp_path: Path, mask_size):
+    src = _colour_mask_pdf(tmp_path, mask_size)
+    clip = pymupdf.Rect(60, 90, 540, 260)
+    scan, result = _gui_write(src, tmp_path / "gui")
+    assert result.error is None, result.error
+    assert sum(1 for h in scan.hits if h.unit.startswith("pdfimg:")) == 3
+    for dest in (result.dest, _cli_write(src, tmp_path / "cli")):
+        assert _rendered_secrets(dest, clip) == []
+        assert _stream_secrets(dest) == []
+
+
+@needs_ocr
+def test_pdf_fully_transparent_mask_still_checks_colour_data(tmp_path: Path):
+    """S1: nothing shows on the page, but the colour data can be pulled out."""
+    src = _colour_mask_pdf(tmp_path, (900, 300), alpha=0)
+    assert _stream_secrets(src) == ["ABC-2026-001", "Acme Pharma", "Fictizumab"]
+    scan, result = _gui_write(src, tmp_path / "gui")
+    assert result.error is None, result.error
+    assert sum(1 for h in scan.hits if h.unit.startswith("pdfimg:")) == 3
+    for dest in (result.dest, _cli_write(src, tmp_path / "cli")):
+        assert _stream_secrets(dest) == []
+
+
+# ---------------------------------------------------------------- PDF: inline images stacked in one box (#39 M2)
+
+
+def _stacked_inline_pdf(tmp_path: Path) -> Path:
+    blank = Image.new("L", (450, 150), 255)
+    card = _card().convert("L").resize((450, 150))
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Sponsor Acme Pharma", fontsize=12)
+    xref = page.get_contents()[0]
+    stacked = b""
+    for picture in (blank, card):
+        stacked += b"q 450 0 0 150 72 542 cm BI /W 450 /H 150 /CS /G /BPC 8 ID " + picture.tobytes() + b" EI Q\n"
+    document.update_stream(xref, document.xref_stream(xref) + b"\n" + stacked)
+    src = tmp_path / "stacked-inline.pdf"
+    document.save(src)
+    document.close()
+    return src
+
+
+def test_pdf_stacked_inline_images_are_each_read(tmp_path: Path):
+    from doc_redactor.pdf_redactor import inline_images
+
+    document = pymupdf.open(_stacked_inline_pdf(tmp_path))
+    images = [image.convert("L") for _info, image in inline_images(document[0])]
+    document.close()
+    assert len(images) == 2
+    assert images[0].getextrema() == (255, 255)
+    assert images[1].getextrema()[0] < 128
+
+
+@needs_ocr
+def test_pdf_stacked_inline_images_are_each_painted(tmp_path: Path):
+    src = _stacked_inline_pdf(tmp_path)
+    scan, result = _gui_write(src, tmp_path / "gui")
+    assert result.error is None, result.error
+    assert sum(1 for h in scan.hits if h.unit.startswith("pdfinline:")) == 3
+    for dest in (result.dest, _cli_write(src, tmp_path / "cli")):
+        for image in _inline_images(dest):
+            assert _ocr_secrets(image) == []
+        assert _rendered_secrets(dest, pymupdf.Rect(60, 30, 540, 310)) == []
