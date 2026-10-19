@@ -457,3 +457,66 @@ def test_cli_prints_unlocated_and_skips_the_file(tmp_path: Path, monkeypatch, ca
     assert not (outdir / "lost.redacted.pdf").exists()
     assert (outdir / "other.redacted.pdf").is_file()
     assert "Acme" not in _page_text(outdir / "other.redacted.pdf")
+
+
+def _patch_drop_indices(monkeypatch, drops: dict[str, list[int]]) -> None:
+    """Drop glyphs by index on lines whose rawdict text is a key of ``drops``."""
+    original = pymupdf.Page.get_text
+
+    def wrapped(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        if _option(args, kwargs) != "rawdict" or not isinstance(result, dict):
+            return result
+        result = copy.deepcopy(result)
+        for block in result.get("blocks") or []:
+            for line in block.get("lines") or []:
+                indices = drops.get(_line_text(line))
+                if not indices:
+                    continue
+                index = 0
+                for span in line.get("spans") or []:
+                    kept = []
+                    for ch in span.get("chars") or []:
+                        if index not in indices:
+                            kept.append(ch)
+                        index += 1
+                    span["chars"] = kept
+        return result
+
+    monkeypatch.setattr(pymupdf.Page, "get_text", wrapped)
+
+
+def test_two_mismatched_neighbour_lines_keep_line_order(tmp_path: Path, monkeypatch) -> None:
+    """S1: two adjacent lines both miss a glyph (outside the term).
+
+    Greedy pairing used to give line 1's hit the box of line 2 and the other
+    way round. Unchecking line 2 then left line 1's term visible.
+    """
+    src = tmp_path / "swap.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 100), "zz x Acme y zz", fontname="helv", fontsize=12)
+    page.insert_text((72, 116), "x Acme y", fontname="helv", fontsize=12)
+    document.save(src)
+    document.close()
+    _patch_drop_indices(monkeypatch, {"zz x Acme y zz": [2], "x Acme y": [6]})
+    engine = _engine(["Acme"])
+    scan = scan_path(src, engine)
+    assert scan.unlocated_count == 0
+    by_line = {hit.location: hit for hit in scan.hits}
+    first = by_line["第 1 页 · 第 1 行"]
+    second = by_line["第 1 页 · 第 2 行"]
+    # Baselines are 100 and 116; each box must sit on its own line.
+    assert first.rects[0][1] < 100 < first.rects[0][3]
+    assert second.rects[0][1] < 116 < second.rects[0][3]
+    second.enabled = False
+    out = tmp_path / "swap_out.pdf"
+    write_scan(scan, out, engine=engine)
+    result = pymupdf.open(out)
+    try:
+        left = result[0].search_for("Acme")
+    finally:
+        result.close()
+    # Only the unchecked line-2 term is left, on line 2.
+    assert len(left) == 1
+    assert left[0].y0 < 116 < left[0].y1
