@@ -74,7 +74,7 @@ Expand-Archive .\doc-redactor-windows.zip -DestinationPath "$env:USERPROFILE\app
 ```yaml
 regex:
   - name: PROJECT_ID
-    pattern: '\bABC-\d{4}-\d{3}\b'
+    pattern: '(?<![A-Za-z0-9])ABC-\d{4}-\d{3}(?![A-Za-z0-9])'
     flags: ""
     replacement: "[PROTOCOL]"
 wordlists:
@@ -91,6 +91,8 @@ wordlists:
 - 下面的键名只出现在规则文件里。`regex` 可增可删。每条有 `name`、`pattern`、`flags`，以及可选的 `replacement`。`name` 就是报告里的类别。`flags` 可以省略，也可以写成 `IGNORECASE`，或用 `|` / 列表组合 `MULTILINE`、`DOTALL`。
 - `wordlists` 可增可删。每条有 `path`、`case_sensitive`、`category`，以及可选的 `replacement`。`case_sensitive: false` 时忽略大小写。
 - `replacement` 是写入文件的占位符。同一类所有命中都换成这一串，不编号。缺省（旧文件没有这个字段也可以）按类别走默认表：`PROJECT_ID` → `[PROTOCOL]`，`SPONSOR` → `[SPONSOR]`，`DRUG` → `[STUDY DRUG]`，`NCT` → `[NCT ID]`，方案号清单和「字母加数字」→ `[PROTOCOL NO]`，邮箱 → `[EMAIL]`，手机号 → `[PHONE]`。其它类别 → `[REDACTED:类别]`。
+- 编号两边的边界请照上面的写法用 `(?<![A-Za-z0-9])…(?![A-Za-z0-9])`。Python 的 `\b` 把汉字也算作单词字符，编号紧挨中文（如「受试者ABC-2026-001」）时不算边界，会整串漏掉。为防照网上的写法踩坑，工具会把规则里的 `\b` 自动换成「两边不同时是英文字母、数字或下划线」，`[\b]` 和 `\\b` 不动。
+- 图片和扫描件里的字由 tesseract 识别。识别偶尔会把一个字认成形近字，所以只在识别出的文字上，4 个汉字以上或 6 个字符以上的词表词允许错一个字；短词和编号仍按原样匹配。
 - 词表一行一个。空行忽略。`.csv` 取第一列，不要表头。
 - 相对路径相对于规则文件所在目录，不相对于当前工作目录。
 
@@ -107,6 +109,10 @@ python -m doc_redactor samples/sample.docx samples/sample.pdf samples/sample.png
 
 - `out/<文件名>.redacted.<原扩展名>`
 - `out/<文件名>.report.json`
+
+整份文件一处命中都没有时，不写出这个文件，也不写报告，并在错误输出里提示「整份文件没有找到要遮的内容，没有写出……」，退出码为 1，免得把原件当成脱敏件交出去。
+
+写出后还有一道复核：换几种读法（Word 的全部 XML 文字和属性、内层压缩包；PDF 的整页文字、链接、页标签、图层名和全部字符串对象）把输出再读一遍，任何一种读法还能读出命中，就删掉这个输出、提示「写出后复核：换一种读法仍能读出 N 处」，不放行。用户在界面上取消勾选的那几处不算。
 
 报告只写「类别 → 次数」，例如 `{"DRUG": 1, "PROJECT_ID": 2, "SPONSOR": 1}`。里面没有命中的原文。同一输出目录里，主文件名相同的输入会共用 `report.json` 这个名字，后写的会盖住先写的。
 
@@ -140,7 +146,7 @@ python tools/make_samples.py
 
 **Word。** 遍历正文段落、表格（递归嵌套表格），以及每个 section 自己定义的页眉页脚（默认、首页、奇偶页）。命中如果跨了多个 run，占位符写在第一个涉及的 run 上，并保留这个 run 的格式；后面那些 run 里属于命中的文字删掉。`word/media/` 下的 `png` / `jpg` / `jpeg` 会脱敏后再写回同名文件。
 
-**PDF 文本。** 对每一页用 Presidio 看 `page.get_text()` 的文本，再用 `page.search_for()` 找矩形，然后 `add_redact_annot` 和 `apply_redactions` 把文字从内容流里删掉，不是只盖一个黑框。删完后在原来的框里写入该类占位符；框太窄会先缩小字号（最小 6 磅），还放不下就换成该类短码，用过短码时在文末加一页替换说明，再放不下就留空白。不会写成半截，也不会留下原文。写出前会清空文档属性（标题、作者、主题、关键词、创建者、制作者）和 XMP，并删除全部批注（含表单控件）、书签和嵌入附件。保存时使用 `garbage` 和 `clean`。命令行和窗口走同一个清理函数。
+**PDF 文本。** 对每一页用 Presidio 看 `page.get_text()` 的文本，再用 `page.search_for()` 找矩形，然后 `add_redact_annot` 和 `apply_redactions` 把文字从内容流里删掉，不是只盖一个黑框。删完后在原来的框里写入该类占位符；框太窄会先缩小字号（最小 6 磅），还放不下就换成该类短码，用过短码时在文末加一页替换说明，再放不下就留空白。不会写成半截，也不会留下原文。扫描整页，落在页面外或被裁切框裁掉的文字也算；行尾用连字符断开的词（如「Fictizu-」接「mab」）会拼起来再找。扫描和写出前先去掉标签结构（结构树）和标记内容上的「实际文字」（ActualText）、替代文字（Alt）、缩写展开（E），这样找的是页面上真正画出的字，写出的文件里也不留这些副本。写出前会清空文档属性（标题、作者、主题、关键词、创建者、制作者，以及自定义属性）和 XMP，删除全部批注（含表单控件）、链接、书签、页标签和嵌入附件，图层名改成「Layer 1」这类中性名字。保存时使用 `garbage` 和 `clean`。命令行和窗口走同一个清理函数。
 
 **PDF 图片。** 对有 xref 的位图取出像素（带透明蒙版的先合成到白底），走和独立图片一样的 OCR 与涂黑，再用 `page.replace_image` 写回。写在内容流里的内联图片用 `get_image_info` 找出来，OCR 后用 MuPDF 的像素涂改把命中处涂黑，写完读回核对；涂不黑、或内联图是旋转/斜放的，这个文件不写出。图片解码失败时同样不写出。
 
@@ -198,13 +204,16 @@ pyinstaller --noconfirm --clean --distpath dist --workpath build/pyi doc-redacto
 TESSERACT_CMD=/path/to/tesseract PYTHONPATH=src pytest
 ```
 
-覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run、文本框、简单域、内容控件、超链接、修订插入与删除，断言直接读输出 XML）、PDF 文本删除（含文档属性、XMP、批注、书签、表单、附件里不再留下原词）并写入占位符（放不下会缩小或换成短码，不再截成半截）、报告不含原文也不含占位符、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分、无 replacement 字段走默认表）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。同一类多处命中写成同一个占位符，不编号。
+覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run、文本框、简单域、内容控件、超链接、修订插入与删除，断言直接读输出 XML）、PDF 文本删除（含文档属性、XMP、批注、书签、表单、附件里不再留下原词）并写入占位符（放不下会缩小或换成短码，不再截成半截）、报告不含原文也不含占位符、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分、无 replacement 字段走默认表）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。
+
+出厂门禁（`tests/test_ai_read_gate.py`，CI 的 `ai-read-gate` 作业里必过）：`tools/ai_gate/make_samples.py` 生成一批编造样本（PDF 的花样文字、隐藏处、增量保存、带标签、整页图片的扫描件；Word 的正文和隐藏处、替代文字、嵌入对象、不显眼处），经命令行和界面两条路写出，再用 AI 程序最常用的读法读输出：PDF 用 PyMuPDF、pymupdf4llm（遇到扫描图用 RapidOCR 看图）和 pdftotext，Word 用 python-docx（含 core 属性）和 pandoc。任何一种读法读出 `tools/ai_gate/words.txt` 里的原词，或解析器出错，测试失败。CI 作业装齐这五种并设 `AI_GATE_STRICT=1`，缺一种也算失败；本地和 Windows 的测试步骤里没装的读法跳过。门禁要的额外包在 `requirements-gate.txt`（软件本身不依赖，也不打进包），pdftotext 来自 poppler-utils。本地单独跑：`python tools/ai_gate/make_samples.py in && python -m doc_redactor in/* -r tools/ai_gate/rules.yaml -o out && python tools/ai_gate/read_outputs.py out --strict`。Word 文档属性的清理在另一个改动里，样本暂不含。
 
 ## 限制
 
 - Word 的正文、表格、页眉页脚里，文本框（新旧两种存法都改）、简单域的显示结果、内容控件（含包着表格行和单元格的）、超链接、修订插入的文字都会扫描和替换。修订删除的文字（`w:delText`）也还在文件里：按修订前的读法（保留的文字加删除的文字，不含插入的）扫描，碰到删除文字的命中会单独列出（位置写作「第 N 段 · 修订删除」），写出时把删除文字里的那一段换成占位符，删除标记保留。一个词一半在保留文字、一半在删除文字里，也能扫到；写出时只改删除的那一半。
-- Word 的脚注、尾注不覆盖。批注写出时整条删除（批注正文、回复、批注人清单一起删）。域代码本身（`w:instr`、`w:instrText`，例如 DOCPROPERTY 或链接地址）不扫描；Word 更新域时，可能按文档属性重新填出原词。修订的作者名统一改成「作者」，修订时间不清。
-- Word 写出时清掉文档属性：core 里的作者、标题、主题、关键词、备注、最后修改者、类别、状态、标识、语言、版本；app.xml 里的公司、经理、超链接基础、超链接清单（`HLinks`）、模板名，以及 Word 存盘时抄进去的标题（`TitlesOfParts`，连同配套的 `HeadingPairs`）；custom.xml 里的全部自定义属性；首页缩略图；`settings.xml` 里挂的模板路径（`attachedTemplate`，路径里常带用户名）、文档变量（`docVars`）和 rsid；`customXml/item*.xml` 数据项里的内容（SharePoint 负责人之类，只留空的根元素，部件本身保留）。不清：创建/修改时间、修订号、总编辑时长、应用程序名和页数字数统计，以及修订记录本身和修订时间。PDF 写出时会清空整个文档信息字典（Info）和 XMP，去掉批注（含表单）、书签、嵌入附件、页缩略图（`/Thumb`）和 `/PieceInfo`。
+- Word 的脚注、尾注正文，图片替代文字（`descr`、`title`、`name`，VML 的 `o:title`），域代码（`w:instr`、`w:instrText`，含 HYPERLINK 的地址），外部超链接地址，超链接提示文字，内容控件的别名和标签，修订的作者，样式名，都按同一套规则扫描和替换；位置写作「脚注 第 N 段」「图片替代文字 第 N 处」等。书签名和自建样式的内部 id 一律改成中性名字（`bm1`、`UserStyle1`），内部跳转和 REF 域跟着改；Word 自动生成的 `_Toc`、`_Ref` 这类书签不动。嵌入的对象（Excel 表、OLE `.bin`）写出时删除，只留预览图；altChunk（打开时才合进正文的 HTML 等）、文档变量（docVars）和模板路径也删除。只差下划线或连字符的变体（如 `Acme_Pharma`、`acme-pharma`）规则找不到，和正文一样。批注写出时整条删除（批注正文、回复、批注人清单一起删），结果页写明删了几条。修订的时间不清。文档属性（docProps）不在这里处理。
+- Word 写出时清掉文档属性：core 里的作者、标题、主题、关键词、备注、最后修改者、类别、状态、标识、语言、版本；app.xml 里的公司、经理、超链接基础、超链接清单（`HLinks`）、模板名，以及 Word 存盘时抄进去的标题（`TitlesOfParts`，连同配套的 `HeadingPairs`）；custom.xml 里的全部自定义属性；首页缩略图；`settings.xml` 里挂的模板路径（`attachedTemplate`，路径里常带用户名）和 rsid；`customXml/item*.xml` 数据项里的内容（SharePoint 负责人之类，只留空的根元素，部件本身保留）。不清：创建/修改时间、修订号、总编辑时长、应用程序名和页数字数统计，以及修订记录本身和修订时间（修订作者名只在命中规则时替换）。
+- PDF 写出时会去掉文档属性（含自定义属性）、XMP、批注（含表单）、链接、书签、页标签、嵌入附件、页缩略图（`/Thumb`）、`/PieceInfo`、标签结构和标记内容上的实际文字/替代文字，图层名改成中性名字。直接写在标记内容资源里（不是单独对象）的属性列表不逐个清理，只是不再被引用。
 - PDF 里被拆开、写成矢量路径，或和 `get_text()` 对不上的词，`search_for` 可能找不到，文字就还在。
 - 独立图片只处理 `png` / `jpg` / `jpeg`。docx 里的 gif、bmp、tiff 照常识别涂黑（动图和多页 tiff 只留第一帧）；带位图备份的 SVG 删掉 SVG、留位图；只有 SVG，或有 emf、wmf 等矢量图时，这个文件不写出。
 - OCR 会漏字，也会把框画大。涂黑不能当成所有扫描件都已经不可读。

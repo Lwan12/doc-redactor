@@ -82,7 +82,8 @@ def _build_image_analyzer(engine: RedactionEngine):
     from presidio_image_redactor import ImageAnalyzerEngine, TesseractOCR
 
     return ImageAnalyzerEngine(
-        analyzer_engine=engine.analyzer,
+        # OCR text forgives one misread character in long terms (see engine).
+        analyzer_engine=engine.for_ocr().analyzer,
         ocr=TesseractOCR(),
     )
 

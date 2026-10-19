@@ -12,6 +12,7 @@ from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
 from doc_redactor.image_redactor import WriteBlocked
+from doc_redactor.leak_check import LeakedText, NoHits, gate_output
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
 
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
@@ -24,8 +25,9 @@ def redact_paths(
 ) -> tuple[list[tuple[str, dict[str, int]]], list[str]]:
     """Redact each file. A file with unlocatable text is skipped, not written.
 
-    Other errors still propagate. The second list is ``name: reason`` lines
-    for files that were not written because glyphs could not be placed.
+    A file with no hit at all, or whose output another reader still sees a
+    hit in, is not written either. Other errors still propagate. The second
+    list is ``name: reason`` lines for files that were not written.
     """
     engine = load_rules(rules_path)
     destination = Path(outdir)
@@ -36,7 +38,7 @@ def redact_paths(
         src = Path(raw)
         try:
             counts = redact_path(src, destination, engine)
-        except (UnlocatedText, WriteBlocked) as exc:
+        except (UnlocatedText, LeakedText, NoHits, WriteBlocked) as exc:
             blocked.append(f"{src.name}: {exc}")
             continue
         summaries.append((src.name, counts))
@@ -59,6 +61,12 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
         counts = redact_image_file(src, redacted, engine)
     else:
         raise ValueError(f"不支持的文件类型: {src.name}")
+    if not counts:
+        # Writing it would hand back the original under a ".redacted" name.
+        redacted.unlink(missing_ok=True)
+        raise NoHits()
+    if suffix in (".docx", ".pdf"):
+        gate_output(redacted, engine, labels=[engine.label(category) for category in counts])
     report.write_text(
         json.dumps(counts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

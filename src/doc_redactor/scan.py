@@ -18,10 +18,12 @@ from doc_redactor.docx_redactor import (
     apply_hits_to_paragraph,
     count_docx_comments,
     docx_media_block_reason,
+    finish_document,
     iter_document_paragraphs,
     scrub_docx_hidden,
 )
 from doc_redactor.engine import Hit, RedactionEngine, counts_from_categories, merge_counts, redaction_label
+from doc_redactor.leak_check import MSG_NO_HITS, LeakedText, gate_output
 from doc_redactor.image_redactor import (
     WriteBlocked,
     _format_for_suffix,
@@ -36,13 +38,16 @@ from doc_redactor.pdf_redactor import (
     UnlocatedText,
     append_legend,
     clear_pdf_hidden,
+    find_page_hits,
     inline_boxes_to_rects,
     inline_images,
     locate_text_hits,
     legend_lines,
+    page_textpage,
     paint_inline_images,
     pdf_image_block_reason,
     pdf_xref_image,
+    prepare_pdf,
     redact_text_placeholders,
 )
 from doc_redactor.image_redactor import MSG_BAD_IMAGE, MSG_INLINE_FAILED, MSG_NO_OCR
@@ -324,7 +329,9 @@ def write_scans(
             continue
         enabled = scan.enabled_hits
         if not enabled:
-            written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True))
+            # No hit at all: say so, so the original is not taken for a redacted copy.
+            note = MSG_NO_HITS if not scan.hits else None
+            written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, note=note))
             continue
         dest = destination_for(scan.path, destination)
         if dest.exists() and not overwrite:
@@ -354,6 +361,14 @@ def write_scans(
                 pass
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
             continue
+        if engine is not None and scan.kind in (KIND_WORD, KIND_PDF):
+            labels = set(mapping.values()) | {engine.label(hit.category) for hit in scan.hits}
+            labels |= {redaction_label(hit.category) for hit in scan.hits}
+            try:
+                gate_output(dest, engine, kept=[hit.text for hit in scan.hits if not hit.enabled], labels=sorted(labels))
+            except LeakedText as exc:
+                written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
+                continue
         if dest.stem == f"{scan.path.stem}.redacted":
             report_path = destination / f"{scan.path.stem}.report.json"
         else:
@@ -431,16 +446,25 @@ def _finish(scan: FileScan) -> FileScan:
 def _scan_docx(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> FileScan:
     document = Document(str(path))
     paragraphs: list[str] = []
-    number = 0
+    # Body and header/footer paragraphs are numbered together; every other
+    # corner (footnotes, alt text, link targets...) counts on its own.
+    numbers: dict[str, int] = {}
     for index, paragraph in enumerate(iter_document_paragraphs(document)):
         text = paragraph.text or ""
         paragraphs.append(text)
         # A tracked deletion comes just before its paragraph and is reported
         # under that paragraph's number.
         deleted = paragraph.is_deletion
-        location = f"第 {number + 1} 段 · 修订删除" if deleted else f"第 {number + 1} 段"
-        if not deleted:
-            number += 1
+        where = paragraph.where
+        number = numbers.get(where, 0)
+        unit_name = "段" if not where or where in ("脚注", "尾注", "批注") else "处"
+        location = f"第 {number + 1} {unit_name}"
+        if where:
+            location = f"{where} {location}"
+        if deleted:
+            location += " · 修订删除"
+        else:
+            numbers[where] = number + 1
         for hit in paragraph.find_hits(engine):
             scan.hits.append(
                 LocatedHit(
@@ -500,14 +524,14 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
+        prepare_pdf(document)
         pages: list[list[str]] = []
         for page_index, page in enumerate(document):
-            flags = pymupdf.TEXTFLAGS_TEXT
-            textpage = page.get_textpage(flags=flags)
+            textpage = page_textpage(page)
             text = page.get_text("text", textpage=textpage)
             lines = text.splitlines()
             pages.append(lines)
-            found = list(engine.find_hits(text))
+            found = find_page_hits(engine, text)
             located = locate_text_hits(page, found, textpage)
             for hit, rects in zip(found, located):
                 if not rects:
@@ -632,6 +656,7 @@ def _write_docx(scan: FileScan, dest: Path, label, engine: RedactionEngine | Non
             Hit(start=hit.start, end=hit.end, category=hit.category, text=hit.text) for hit in unit_hits
         ]
         categories.extend(apply_hits_to_paragraph(paragraph, engine_hits, label))
+    finish_document(document)
     scrub_docx_hidden(document)
     mkdir_output(dest.parent)
     document.save(str(dest))
@@ -695,6 +720,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
+        prepare_pdf(document)
         order = list(getattr(engine, "category_order", []) or [])
         items = []
         for hit in scan.enabled_hits:
