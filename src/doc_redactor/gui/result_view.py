@@ -896,7 +896,10 @@ class ResultView:
         tk.Label(head, text="按类别汇总" + ("（全部文件）" if current is None else ""), bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
             side="left", padx=10, pady=5
         )
-        tree = ttk.Treeview(parent, columns=("cat", "n"), show="headings", height=min(6, len(cats) + 1))
+        # The table sits in its own box so a scrollbar can join it when the
+        # pane is too short for every row (see _fit_right_pane).
+        cat_box = tk.Frame(parent, bg=BG_SURFACE)
+        tree = ttk.Treeview(cat_box, columns=("cat", "n"), show="headings", height=min(6, len(cats) + 1))
         tree.heading("cat", text="类别")
         tree.heading("n", text="个数")
         tree.column("cat", width=140, stretch=True)
@@ -923,7 +926,10 @@ class ResultView:
         if unwritten:
             tree.insert("", "end", values=(MSG_UNWRITTEN, len(unwritten)))
             tree.configure(height=min(7, len(cats) + 2))
-        tree.pack(fill="x")
+        cat_scroll = ttk.Scrollbar(cat_box, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=cat_scroll.set)
+        tree.pack(side="left", fill="x", expand=True)
+        cat_box.pack(fill="x")
 
         def on_cat(_e=None):
             if getattr(self, "_building", False):
@@ -942,7 +948,16 @@ class ResultView:
 
         loc_head = tk.Frame(parent, bg=BG_INSET)
         loc_head.pack(fill="x")
-        tk.Label(loc_head, text=f"被替换的位置 {len(hits)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
+        # Same count as the top summary: checked hits in files that are (or
+        # will be) written. Hits of other files are named apart.
+        pool = [current] if current is not None else scans
+        header = location_header(
+            pool,
+            written=self.app.written,
+            write_errors=self.app.write_errors,
+            category=self.app.selected_cat,
+        )
+        tk.Label(loc_head, text=header, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
             side="left", padx=10, pady=5
         )
         if self.app.selected_cat:
@@ -996,6 +1011,7 @@ class ResultView:
             loc.selection_set(str(self.app.current_hit))
             loc.see(str(self.app.current_hit))
         loc.pack(fill="both", expand=True)
+        self._fit_right_pane(parent, cat_box, tree, cat_scroll, loc)
 
         def on_loc_click(event):
             row = loc.identify_row(event.y)
@@ -1011,6 +1027,50 @@ class ResultView:
             self.refresh()
 
         loc.bind("<Button-1>", on_loc_click)
+
+    def _fit_right_pane(self, parent, cat_box, tree, cat_scroll, loc) -> None:
+        """Share the pane height so the location list keeps LOC_MIN_ROWS full rows.
+
+        The category table gives up rows first (down to CAT_MIN_ROWS) and
+        then scrolls; no row is dropped. Tall windows keep every row.
+        """
+        wanted = int(tree.cget("height"))
+        total_rows = len(tree.get_children())
+        state = {"busy": False}
+
+        def fit(_event=None) -> None:
+            if state["busy"] or not parent.winfo_exists():
+                return
+            avail = parent.winfo_height()
+            if avail < 50:
+                return
+            state["busy"] = True
+            try:
+                row_h = _tree_row_height(tree)
+                shown = int(tree.cget("height"))
+                # Heading plus borders: what a table needs beyond its rows.
+                overhead = max(0, tree.winfo_reqheight() - shown * row_h)
+                others = sum(
+                    child.winfo_reqheight() for child in parent.pack_slaves() if child not in (cat_box, loc)
+                )
+                rows = category_rows_that_fit(
+                    avail - others, row_h=row_h, overhead=overhead, wanted=wanted
+                )
+                if rows != shown:
+                    tree.configure(height=rows)
+                if rows < total_rows:
+                    if not cat_scroll.winfo_ismapped():
+                        cat_scroll.pack(side="right", fill="y", before=tree)
+                    sel = tree.selection()
+                    if sel:
+                        tree.see(sel[0])
+                elif cat_scroll.winfo_ismapped():
+                    cat_scroll.pack_forget()
+            finally:
+                state["busy"] = False
+
+        parent.bind("<Configure>", lambda _e: parent.after_idle(fit), add="+")
+        parent.after_idle(fit)
 
     def _counts_toward_write(self, scan) -> bool:
         return counts_toward_write(scan, written=self.app.written, write_errors=self.app.write_errors)
@@ -1104,16 +1164,70 @@ class ResultView:
         ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
 
 
-def writable_hit_total(scans, *, written: bool, write_errors: dict) -> int:
+def _enabled_in(scan, category) -> int:
+    if category is None:
+        return scan.enabled_count()
+    return sum(1 for hit in scan.enabled_hits if hit.category == category)
+
+
+def writable_hit_total(scans, *, written: bool, write_errors: dict, category: str | None = None) -> int:
     """Checked hits in files that will be (or were) written.
 
-    The one count behind the top summary, the 全部文件 row and the write
-    button. A file blocked by unlocated hits, and after a write a file the
-    write refused, add nothing.
+    The one count behind the top summary, the 全部文件 row, the write
+    button and the 被替换的位置 header. A file blocked by unlocated hits,
+    and after a write a file the write refused, add nothing. ``category``
+    narrows it to one category (the right pane's filter).
     """
     return sum(
-        scan.enabled_count() for scan in scans if counts_toward_write(scan, written=written, write_errors=write_errors)
+        _enabled_in(scan, category)
+        for scan in scans
+        if counts_toward_write(scan, written=written, write_errors=write_errors)
     )
+
+
+def unwritten_hit_total(scans, *, written: bool, write_errors: dict, category: str | None = None) -> int:
+    """Checked hits left out of writable_hit_total (failed files aside)."""
+    return sum(
+        _enabled_in(scan, category)
+        for scan in scans
+        if scan.status != "fail" and not counts_toward_write(scan, written=written, write_errors=write_errors)
+    )
+
+
+def location_header(scans, *, written: bool, write_errors: dict, category: str | None = None) -> str:
+    """「被替换的位置 N」, N from writable_hit_total; 「（另 M 处未写出）」 when some are left out."""
+    n = writable_hit_total(scans, written=written, write_errors=write_errors, category=category)
+    left = unwritten_hit_total(scans, written=written, write_errors=write_errors, category=category)
+    if left:
+        return MSG_LOC_HEADER_UNWRITTEN.format(n=n, m=left)
+    return MSG_LOC_HEADER.format(n=n)
+
+
+# The location list keeps this many full rows; the category table above it
+# gives up rows (and scrolls) first, but keeps at least CAT_MIN_ROWS.
+LOC_MIN_ROWS = 3
+CAT_MIN_ROWS = 3
+
+
+def category_rows_that_fit(space: int, *, row_h: int, overhead: int, wanted: int) -> int:
+    """Rows for the category table when ``space`` px holds both tables.
+
+    Each table costs ``overhead`` (heading and borders) plus its rows; the
+    location list is held to LOC_MIN_ROWS. Never more than ``wanted``, never
+    fewer than CAT_MIN_ROWS (or ``wanted`` when that is smaller).
+    """
+    row_h = max(1, row_h)
+    room = space - 2 * overhead - LOC_MIN_ROWS * row_h
+    fit = room // row_h
+    return max(min(CAT_MIN_ROWS, wanted), min(wanted, fit))
+
+
+def _tree_row_height(tree) -> int:
+    try:
+        value = ttk.Style(tree).lookup("Treeview", "rowheight")
+        return int(float(value)) if value else 20
+    except (tk.TclError, ValueError):
+        return 20
 
 
 def counts_toward_write(scan, *, written: bool, write_errors: dict) -> bool:
@@ -1125,6 +1239,8 @@ def counts_toward_write(scan, *, written: bool, write_errors: dict) -> bool:
 
 
 MSG_UNWRITTEN = "未写出"
+MSG_LOC_HEADER = "被替换的位置 {n}"
+MSG_LOC_HEADER_UNWRITTEN = "被替换的位置 {n}（另 {m} 处未写出）"
 MSG_MATRIX_UNWRITTEN = "{names} 未写出，不计入合计"
 
 
