@@ -533,3 +533,24 @@ def test_cancel_then_rescan_drops_the_previous_generation():
     assert progress == [(0, "scanned")]
     assert adopted == ["new-scan"]
     assert is_current(second, generation) is True
+
+
+def test_failed_write_leaves_no_half_file_for_retry_to_skip(tmp_path: Path, monkeypatch):
+    import doc_redactor.scan as scan_mod
+
+    source = tmp_path / "notes.docx"
+    _docx(source, "ABC-2026-001")
+    scan = scan_path(source, _engine())
+    batch = allocate_batch_dir(tmp_path / "out", datetime(2026, 10, 17, 21, 44))
+
+    def boom(scan_obj, dest, **kwargs):
+        dest.write_bytes(b"half")
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(scan_mod, "write_scan", boom)
+    failed = write_scans([scan], batch, overwrite=False, sequence=False)
+    assert failed[0].error
+    assert not any(batch.glob("*.redacted.*"))
+    monkeypatch.undo()
+    retry = write_scans([scan], batch, overwrite=False, sequence=False)
+    assert retry[0].note is None and retry[0].dest is not None and retry[0].dest.stat().st_size > 4

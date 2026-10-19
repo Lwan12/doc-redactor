@@ -293,6 +293,12 @@ def write_scans(
         try:
             counts = write_scan(scan, dest, replacements=mapping, engine=engine)
         except Exception as exc:
+            # A failed write must not leave a half file that a retry would
+            # mistake for "already written".
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
             continue
         if dest.stem == f"{scan.path.stem}.redacted":
