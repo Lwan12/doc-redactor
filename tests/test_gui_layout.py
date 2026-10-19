@@ -1203,3 +1203,86 @@ def test_header_footer_lines_fold_then_hide_only_when_needed():
     assert hf_level(need + 62, heights, row_h=24, overhead=30, wanted=7) == HF_FOLDED
     assert hf_level(need + 40, heights, row_h=24, overhead=30, wanted=7) == HF_HIDDEN
     assert hf_level(need, [], row_h=24, overhead=30, wanted=7) == HF_FULL
+
+
+def _inside(widget, outer) -> bool:
+    """Widget is drawn and lies wholly inside ``outer`` (on screen)."""
+    if not widget.winfo_ismapped() or widget.winfo_height() <= 1 or widget.winfo_width() <= 1:
+        return False
+    x, y = widget.winfo_rootx(), widget.winfo_rooty()
+    ox, oy = outer.winfo_rootx(), outer.winfo_rooty()
+    return (
+        x >= ox
+        and y >= oy
+        and x + widget.winfo_width() <= ox + outer.winfo_width()
+        and y + widget.winfo_height() <= oy + outer.winfo_height()
+    )
+
+
+@pytest.mark.parametrize(
+    "key", ["res-hf-auto", "res-hf-auto-ok", "res-hf-auto-undo", "res-hf-mixed", "res-hf-mixed-ok"]
+)
+def test_confirm_bar_keeps_preview_pager_and_radios_visible_at_960x640(gui, key):
+    """#28 r2 M3: at 960×640 the 「待确认」 strip squeezed its text into a column
+    three characters wide and pushed the radios, the pager and the preview
+    out of the middle column. Seeing the preview is what makes 确认删除 safe."""
+    import tkinter.font as tkfont
+    from tkinter import ttk
+
+    app = gui
+    app.root.geometry("960x640+0+0")
+    _settle(app)
+    app.apply_shoot_state(key)
+    _settle(app)
+    _settle(app)
+    assert app.root.winfo_height() == 640
+    view = app.result_view
+    text = view._preview_text
+    assert text is not None
+    middle = text
+    while middle.master is not None and middle.master.winfo_width() < 600:
+        middle = middle.master
+    # The preview shows at least five full lines.
+    line = tkfont.Font(font=text.cget("font")).metrics("linespace")
+    assert text.winfo_ismapped() and text.winfo_height() >= 5 * line, (key, text.winfo_height(), line)
+    assert _inside(text, app.root), key
+    # Radios and the pager are on screen.
+    radios = [w for w in _walk(middle) if isinstance(w, ttk.Radiobutton)]
+    assert len(radios) == 2
+    for widget in radios + list(view._pdf_pager.pack_slaves()):
+        assert _inside(widget, middle), (key, widget)
+    # The strip text wraps across the column: no line squeezed to a few characters.
+    bars = [w for w in _walk(middle) if getattr(w, "hf_bar", None)]
+    assert len(bars) == 1
+    label = bars[0]
+    assert _inside(label, middle), key
+    lines = label.cget("text").split("\n")
+    assert all(len(row) >= 10 for row in lines[:-1]), (key, [len(row) for row in lines])
+    assert label.winfo_width() >= middle.winfo_width() * 0.7, key
+
+
+def test_output_hint_is_not_covered_by_the_buttons_at_960x640(gui):
+    """#28 r2 m5: 「每次写出都放进新的文件夹」 ran under the buttons and lost a character."""
+    from tkinter import ttk
+
+    app = gui
+    app.root.geometry("960x640+0+0")
+    _settle(app)
+    app.apply_shoot_state("res-hf-auto")
+    _settle(app)
+    _settle(app)
+    hints = [
+        w
+        for w in _walk(app.result_view.frame)
+        if w.winfo_class() == "Label" and "不会盖掉上一次" in str(getattr(w, "logical_text", w.cget("text")))
+    ]
+    assert len(hints) == 1
+    hint = hints[0]
+    assert "".join(hint.cget("text").split("\n")).endswith("不会盖掉上一次。")
+    assert hint.winfo_reqwidth() <= hint.winfo_width()
+    buttons = [
+        w for w in _walk(app.result_view.frame) if isinstance(w, ttk.Button) and w.cget("text").startswith("返回修改")
+    ]
+    assert len(buttons) == 1
+    assert hint.winfo_rootx() + hint.winfo_width() <= buttons[0].winfo_rootx()
+    assert _inside(hint, app.root)

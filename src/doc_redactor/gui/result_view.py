@@ -1019,25 +1019,29 @@ class ResultView:
                     return
 
     def _confirm_bar(self, head, scan, bar, fonts) -> None:
-        """「⚠ 待确认，不删」 / 「✓ 已确认删除」 strip with its own button, on the right."""
+        """「⚠ 待确认，不删」 / 「✓ 已确认删除」 strip: status and its button on one
+        row, the explanation under them across the whole column.
+
+        Side by side, the button and the status left the text about three
+        characters wide at 960×640; it grew tall enough to push the radios,
+        the pager and the preview out of the column (#28 r2 M3).
+        """
         warn = bar["tone"] == hf_text.TONE_WARN
         bg = WARN_BG if warn else "#e8f5ed"
         fg = WARN if warn else "#008035"
         strip = tk.Frame(head, bg=bg)
         strip.pack(fill="x", padx=0, pady=(1, 0))
+        top = tk.Frame(strip, bg=bg)
+        top.pack(fill="x")
         ttk.Button(
-            strip,
+            top,
             text=bar["button"],
             command=lambda: self.app.toggle_file_hf_confirm(scan),
             state="normal" if bar["enabled"] else "disabled",
-        ).pack(side="right", padx=8, pady=4)
-        tk.Label(strip, text=bar["status"], bg=bg, fg=fg, font=fonts["small"]).pack(
-            side="left", anchor="n", padx=(8, 6), pady=5
-        )
-        holder = tk.Frame(strip, bg=bg)
-        holder.pack(side="left", fill="x", expand=True, pady=3)
-        label = _wrap_label(holder, bar["text"], bg=bg, fg=INK, font=fonts["small"])
-        label.pack(fill="x")
+        ).pack(side="right", padx=8, pady=(3, 0))
+        tk.Label(top, text=bar["status"], bg=bg, fg=fg, font=fonts["small"]).pack(side="left", padx=8, pady=(3, 0))
+        label = _wrap_label(strip, bar["text"], bg=bg, fg=INK, font=fonts["small"])
+        label.pack(fill="x", padx=8, pady=(0, 3))
         label.hf_bar = bar
 
     def _right_pane(self, parent, scans, fonts) -> None:
@@ -1321,16 +1325,9 @@ class ResultView:
                 anchor="w",
             ).pack(fill="x")
         else:
-            tk.Label(
-                left,
-                text=_output_hint(scans, app),
-                bg=BG_SURFACE,
-                fg=INK2,
-                font=fonts["small"],
-                anchor="w",
-                wraplength=480,
-                justify="left",
-            ).pack(fill="x")
+            # Wrap to the room the buttons leave: a fixed 480px ran under them
+            # at 960px and cut the last character (#28 r2 m5).
+            _wrap_label(left, _output_hint(scans, app), bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(fill="x")
         tk.Label(left, text=path, bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"], anchor="w").pack(fill="x")
         if app.written and failures:
             ttk.Button(buttons, text="打开输出文件夹", style="Primary.TButton", command=app.open_output).pack(side="right")
