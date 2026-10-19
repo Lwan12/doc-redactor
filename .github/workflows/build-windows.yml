@@ -33,8 +33,6 @@ jobs:
             foreach ($p in @("C:\Program Files\Tesseract-OCR\tesseract.exe", "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe")) {
               if (Test-Path -LiteralPath $p) { return $p }
             }
-            $f = Get-ChildItem -Path "C:\Program Files","C:\Program Files (x86)" -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($f) { return $f.FullName }
             return $null
           }
           $tess = Find-Tess
@@ -82,7 +80,7 @@ jobs:
           $env:PYTHONPATH = "src"
           $env:TESSERACT_CMD = (Resolve-Path "build\tesseract\tesseract.exe").Path
           $env:TESSDATA_PREFIX = (Resolve-Path "build\tesseract\tessdata").Path
-          python -m pytest
+          python -m pytest -rs
           if ($LASTEXITCODE -ne 0) { throw "pytest failed" }
 
       - name: Build onedir package
