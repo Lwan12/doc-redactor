@@ -90,6 +90,7 @@ STATES = [
     ("63-rules-savefail", "rules-savefail"),
     ("64-main-outmissing", "main-outmissing"),
     ("65-rules-opened", "rules-opened"),
+    ("66-res-leftover", "res-leftover"),
 ]
 
 

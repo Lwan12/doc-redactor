@@ -994,7 +994,15 @@ class App:
             if not self.write_errors or self.batch_dir is None:
                 return
             batch = self.batch_dir
-            targets = [scan for scan in self.scans if str(scan.path) in self.write_errors]
+            # A leftover or a failed check would only fail again (and a file
+            # that could not be deleted must not pass as "already written").
+            from doc_redactor.verify_output import is_final_failure
+
+            targets = [
+                scan
+                for scan in self.scans
+                if str(scan.path) in self.write_errors and not is_final_failure(self.write_errors[str(scan.path)])
+            ]
         else:
             parent = Path(self.output_var.get().strip() or ".")
             batch = allocate_batch_dir(parent, datetime.now())
@@ -1296,6 +1304,12 @@ class App:
                 self.selected = 2
                 self.written = True
                 self.write_errors[str(self.scans[2].path)] = "输出文件夹里这个文件正被别的程序占用"
+            elif key == "res-leftover":
+                from doc_redactor.verify_output import MSG_LEFTOVER
+
+                self.selected = 1
+                self.written = True
+                self.write_errors[str(self.scans[1].path)] = MSG_LEFTOVER.format(n=2)
             elif key == "res-many":
                 self.selected = 1
             elif key == "res-skipped":

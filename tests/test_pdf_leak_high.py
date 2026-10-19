@@ -316,3 +316,19 @@ def test_reader_helper_sees_utf16_strings(tmp_path: Path, words):
     _tagged_pdf(source)
     with pytest.raises(AssertionError):
         assert_no_words(source, words)
+
+
+def test_after_write_check_reads_like_the_scanner(tmp_path: Path):
+    """写出后核对（#17）和扫描同一种读法：裁切框外、连字符断行的命中也算残留。"""
+    from doc_redactor.verify_output import count_leftovers
+
+    path = tmp_path / "left.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((50, 80), "Drug Fictizu-", fontsize=11)
+    page.insert_text((50, 95), "mab given", fontsize=11)
+    page.insert_text((50, 800), "Below crop: Acme Pharma", fontsize=9)
+    page.set_cropbox(pymupdf.Rect(0, 0, 595, 700))
+    path.write_bytes(document.tobytes())
+    document.close()
+    assert count_leftovers(path, engine=_engine()) == 2

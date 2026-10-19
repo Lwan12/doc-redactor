@@ -52,6 +52,7 @@ from doc_redactor.pdf_redactor import (
 )
 from doc_redactor.image_redactor import MSG_BAD_IMAGE, MSG_INLINE_FAILED, MSG_NO_OCR
 from doc_redactor.tesseract_cmd import require_tesseract
+from doc_redactor.verify_output import check_written, count_leftovers
 
 FILE_HIT_WARN = 500
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
@@ -361,11 +362,27 @@ def write_scans(
                 pass
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
             continue
+        # Unlocated files were skipped above, so a leftover here is never one
+        # of those hits counted twice. Any error inside the check blocks only
+        # this file; the output is deleted, or the message names it for the
+        # user to delete by hand.
+        problem = check_written(dest, lambda: _leftovers_after_write(scan, dest, mapping, engine, counts))
+        if problem is not None:
+            written.append(
+                WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=problem[1])
+            )
+            continue
         if engine is not None and scan.kind in (KIND_WORD, KIND_PDF):
             labels = set(mapping.values()) | {engine.label(hit.category) for hit in scan.hits}
             labels |= {redaction_label(hit.category) for hit in scan.hits}
             try:
-                gate_output(dest, engine, kept=[hit.text for hit in scan.hits if not hit.enabled], labels=sorted(labels))
+                gate_output(
+                    dest,
+                    engine,
+                    kept=[hit.text for hit in scan.hits if not hit.enabled],
+                    labels=sorted(labels),
+                    source=scan.path,
+                )
             except LeakedText as exc:
                 written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
                 continue
@@ -385,6 +402,23 @@ def write_scans(
             )
         )
     return written
+
+
+def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], engine, counts=None) -> int:
+    if scan.kind not in (KIND_WORD, KIND_PDF):
+        return 0
+    labels = set(mapping.values()) | {redaction_label(hit.category) for hit in scan.hits}
+    if engine is not None:
+        labels |= {engine.label(hit.category) for hit in scan.hits}
+    return count_leftovers(
+        dest,
+        engine=engine,
+        targets=[hit.text for hit in scan.enabled_hits],
+        kept=[hit.text for hit in scan.hits if not hit.enabled],
+        labels=labels,
+        short_codes=int(getattr(counts, "short_count", 0) or 0) > 0,
+        known=[hit.text for hit in scan.hits],
+    )
 
 
 def write_report(path: Path, counts: dict[str, int]) -> None:

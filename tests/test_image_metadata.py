@@ -113,8 +113,8 @@ def _card(mode: str = "RGB") -> Image.Image:
 # ---------------------------------------------------------------- Word: comments, authors, rsid
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-# Revision authors are scanned by the text walk (#33), not here; this
-# neutral name is not a rule hit and is expected to stay.
+# Revision authors become "Author" on every write (#33), hit or not; this
+# neutral name is not a rule hit and still must not stay.
 REVISOR = "Reviewer A"
 REVISION = (
     '<w:p w:rsidR="00A1B2C3" w:rsidRDefault="00A1B2C3" w:rsidP="00A1B2C3">'
@@ -207,8 +207,9 @@ def _assert_comments_gone(path: Path) -> None:
     body = parts["word/document.xml"].decode("utf-8")
     for tag in ("commentRangeStart", "commentRangeEnd", "commentReference"):
         assert tag not in body
-    # The revision marks stay; their text is replaced.
-    assert body.count(f'w:author="{REVISOR}"') == 2
+    # The revision marks stay; their text is replaced and the author is "Author".
+    assert REVISOR not in body
+    assert body.count('w:author="Author"') == 2
     for secret in SECRETS:
         assert secret not in body
     reopened = Document(str(path))

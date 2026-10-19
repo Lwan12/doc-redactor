@@ -66,15 +66,23 @@ def count_leaks(
     *,
     kept: list[str] | tuple[str, ...] = (),
     labels: list[str] | tuple[str, ...] = (),
+    source: Path | None = None,
 ) -> int:
     """Number of hits across all readings, minus kept text and placeholders.
 
     ``kept`` are texts of hits the user unchecked; the same text elsewhere is
     therefore not counted either. ``labels`` are the placeholders the writer
-    used; a hit inside one of them is the writer's own text.
+    used; a hit inside one of them is the writer's own text. ``source`` is the
+    original: a hit that no reading of the original has, and that neither
+    contains nor is part of any hit there, was made up by the writer's own
+    deletions ("Subject [deleted] 001") and is not counted (same rule as the
+    rescan in verify_output).
     """
     kept_norm = {_norm(text) for text in kept if text}
     label_norm = [_norm(text) for text in labels if text]
+    known = None
+    if source is not None:
+        known = {_norm(hit.text) for text in readings(source) for hit in engine.find_hits(text)}
     # The same place shows up in several readings (an attribute and its
     # decoded form, metadata and the Info object). Per hit text, take the
     # largest count any single reading gives.
@@ -86,6 +94,8 @@ def count_leaks(
             if not flat or flat in kept_norm:
                 continue
             if any(flat in label for label in label_norm):
+                continue
+            if known is not None and flat not in known and not any(k and (k in flat or flat in k) for k in known):
                 continue
             seen[flat] = seen.get(flat, 0) + 1
         for flat, count in seen.items():
@@ -99,13 +109,14 @@ def gate_output(
     *,
     kept: list[str] | tuple[str, ...] = (),
     labels: list[str] | tuple[str, ...] = (),
+    source: Path | None = None,
 ) -> None:
     """Raise ``LeakedText`` and remove ``path`` when any reading still shows a hit.
 
     An error while reading counts as a leak: the file is not let out.
     """
     try:
-        found = count_leaks(path, engine, kept=kept, labels=labels)
+        found = count_leaks(path, engine, kept=kept, labels=labels, source=source)
     except Exception:
         found = 1
     if found <= 0:

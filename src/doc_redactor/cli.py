@@ -14,6 +14,7 @@ from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
 from doc_redactor.image_redactor import WriteBlocked
 from doc_redactor.leak_check import LeakedText, NoHits, gate_output
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
+from doc_redactor.verify_output import LeftoverText, check_written, count_leftovers, original_hit_texts
 
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 
@@ -25,8 +26,9 @@ def redact_paths(
 ) -> tuple[list[tuple[str, dict[str, int]]], list[str]]:
     """Redact each file. A file with unlocatable text is skipped, not written.
 
-    A file with no hit at all, or whose output another reader still sees a
-    hit in, is not written either. Other errors still propagate. The second
+    A file with no hit at all is not written. A file whose output still
+    shows a hit after writing (the rescan, then the other-reader check) is
+    deleted and skipped the same way. Other errors still propagate. The second
     list is ``name: reason`` lines for files that were not written.
     """
     engine = load_rules(rules_path)
@@ -38,7 +40,7 @@ def redact_paths(
         src = Path(raw)
         try:
             counts = redact_path(src, destination, engine)
-        except (UnlocatedText, LeakedText, NoHits, WriteBlocked) as exc:
+        except (UnlocatedText, LeftoverText, LeakedText, NoHits, WriteBlocked) as exc:
             blocked.append(f"{src.name}: {exc}")
             continue
         summaries.append((src.name, counts))
@@ -66,7 +68,23 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
         redacted.unlink(missing_ok=True)
         raise NoHits()
     if suffix in (".docx", ".pdf"):
-        gate_output(redacted, engine, labels=[engine.label(category) for category in counts])
+        # Unlocated hits never reach here: redact_pdf raises before saving.
+        labels = {engine.label(category) for category in counts}
+        short = int(getattr(counts, "short_count", 0) or 0) > 0
+        problem = check_written(
+            redacted,
+            lambda: count_leftovers(
+                redacted,
+                engine=engine,
+                labels=labels,
+                short_codes=short,
+                known=original_hit_texts(src, engine),
+            ),
+        )
+        if problem is not None:
+            raise LeftoverText(*problem)
+        # Then read it the other ways an AI tool would (leak_check).
+        gate_output(redacted, engine, labels=[engine.label(category) for category in counts], source=src)
     report.write_text(
         json.dumps(counts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

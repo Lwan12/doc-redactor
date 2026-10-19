@@ -185,3 +185,55 @@ def test_placeholders_and_legend_page_do_not_trip_the_gate(tmp_path: Path):
     scan = scan_path(source, engine)
     result = write_scans([scan], tmp_path / "gui", engine=engine)[0]
     assert result.dest is not None, result.error
+
+
+def test_hit_made_up_by_deleting_a_word_does_not_trip_the_gate(tmp_path: Path):
+    """删词后前后文字拼成的新命中（原件任何读法里都没有）不算漏遮；原件里有的照算。"""
+    from doc_redactor.leak_check import count_leaks
+
+    engine = build_engine(
+        [RegexRule(name="SUBJECT", pattern=r"Subject\s+\d{3}", flags=0)],
+        [WordlistRule(category="SPONSOR", terms=["Acme Pharma"], case_sensitive=True)],
+    )
+    src = tmp_path / "s.pdf"
+    document = pymupdf.open()
+    document.new_page().insert_text((72, 72), "Subject Acme Pharma 001")
+    document.save(str(src))
+    document.close()
+    out = tmp_path / "o.pdf"
+    document = pymupdf.open()
+    document.new_page().insert_text((72, 72), "Subject 001")
+    document.save(str(out))
+    document.close()
+    assert count_leaks(out, engine, source=src) == 0
+    assert count_leaks(out, engine) == 1
+    # 原件元数据里有、正文里没有的词，在输出里仍算漏遮。
+    document = pymupdf.open(src)
+    document.set_metadata({"title": "Acme Pharma"})
+    document.saveIncr()
+    document.close()
+    document = pymupdf.open(out)
+    document.set_metadata({"author": "Acme Pharma"})
+    document.saveIncr()
+    document.close()
+    assert count_leaks(out, engine, source=src) == 1
+
+
+def test_cli_and_gui_keep_a_file_whose_only_new_hit_is_made_up(tmp_path: Path):
+    engine_rules = tmp_path / "rules.yaml"
+    words = tmp_path / "sp.txt"
+    words.write_text("Acme Pharma\n", encoding="utf-8")
+    engine_rules.write_text(
+        "regex:\n  - name: SUBJECT\n    pattern: 'Subject\\s+\\d{3}'\n    flags: ''\n"
+        "wordlists:\n  - path: sp.txt\n    case_sensitive: true\n    category: SPONSOR\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "s.docx"
+    doc = Document()
+    doc.add_paragraph("Subject Acme Pharma 001")
+    doc.save(str(src))
+    summaries, blocked = redact_paths([src], engine_rules, tmp_path / "cli")
+    assert blocked == []
+    engine = load_rules(engine_rules)
+    [res] = write_scans([scan_path(src, engine)], tmp_path / "gui", engine=engine)
+    assert res.error is None and res.dest is not None
