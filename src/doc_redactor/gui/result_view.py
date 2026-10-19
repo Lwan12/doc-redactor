@@ -338,6 +338,8 @@ class ResultView:
         bar.pack(fill="x")
         inner = tk.Frame(bar, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=4)
+        # Marks the top-bar counts so tests read 失败 N here, not the bottom bar (r2-3).
+        inner.top_counts = True
         if all_fail:
             tk.Label(inner, text="0", bg=BG_SURFACE, fg=INK, font=fonts["mono_big"]).pack(side="left")
             tk.Label(inner, text=" 个文件可处理", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
@@ -1230,6 +1232,16 @@ class ResultView:
                 spare = max(0, width - 32)
                 loc.column("on", width=width, minwidth=width)
                 loc.column("text", width=max(60, 126 - spare), minwidth=max(60, 124 - spare))
+        approx_rows = [h for h in hits if getattr(h, "approx", False)] if not self.app.hide_text else []
+        if approx_rows:
+            # 方案 A: the row must show the whole 「近似：读成 …」. Take the room
+            # from the location column (image hits all start 「第 N 页图 M」).
+            need = max(fonts["small"].measure(f"近似：读成 {h.text}") for h in approx_rows) + 16
+            cur = int(loc.column("text", "width"))
+            grow = max(0, min(need - cur, int(loc.column("loc", "width")) - 72))
+            if grow:
+                loc.column("loc", width=int(loc.column("loc", "width")) - grow, minwidth=72)
+                loc.column("text", width=cur + grow, minwidth=cur + grow)
         for hit in hits:
             if self.app.written and hit.enabled and hit.hit_id in unwritten_ids:
                 mark = MSG_UNWRITTEN
@@ -1239,7 +1251,7 @@ class ResultView:
             if getattr(hit, "approx", False):
                 # OCR read a look-alike; show what it read so the user can judge.
                 # Screen only: nothing here is written to disk.
-                content = f"近似 {content}"
+                content = f"近似：读成 {content}" if not self.app.hide_text else f"近似 {content}"
             loc.insert(
                 "",
                 "end",
@@ -1767,7 +1779,7 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
     if str(scan.path) in app.write_errors:
         return "nowrite", "没写出", "bad"
     if app.write_notes.get(str(scan.path)) == MSG_NO_HITS:
-        return "nohit_unwritten", MSG_NO_HITS, "warn"
+        return "nohit_unwritten", MSG_NO_HITS, "no"
     if str(scan.path) in app.write_notes:
         return "skipped", app.write_notes[str(scan.path)], "ok"
     if _hf_only_write(scan, app):

@@ -138,3 +138,19 @@ def test_image_entity_marks_approximate_and_keeps_what_ocr_read():
     assert MISREAD in by_text, list(by_text)
     assert by_text[MISREAD]["approx"] is True
     assert by_text["Fictizumab"]["approx"] is False
+
+
+# --- M34-2 不做：含数字的词不放宽，必须完全一样 ---------------------------------
+
+
+def test_wordlist_terms_with_digits_stay_exact_under_ocr():
+    """编号差一位就是另一个号；OCR 容错不能把它当命中。编造数据。"""
+    engine = build_engine(
+        [],
+        [WordlistRule(category="PROTOCOL", terms=["ABC-2026-001", "合同编号2026001号"], case_sensitive=False)],
+    )
+    ocr = engine.for_ocr()
+    assert [h.category for h in ocr.find_hits("见 ABC-2026-001 。")] == ["PROTOCOL"]
+    assert ocr.find_hits("见 ABC-2026-002 。") == []
+    assert ocr.find_hits("见 ABC-2026-0O1 。") == []
+    assert ocr.find_hits("合同编号2026002号") == []

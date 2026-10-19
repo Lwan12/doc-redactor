@@ -200,10 +200,15 @@ def _ocr_term_regex(term: str) -> str:
     still read the real name off the image, so the box must be painted anyway.
     One substitution is allowed when the term has at least four CJK characters
     or six other characters; shorter terms stay exact so common words survive.
+    A term containing any digit is never loosened (M34-2 is not done).
     """
     exact = _term_regex(term)
     letters = [ch for ch in term if not ch.isspace()]
     cjk = sum(1 for ch in letters if _is_cjk(ch))
+    # Terms with a digit (contract, protocol, subject numbers) stay exact:
+    # one digit off is another number, and painting it is a wrong redaction.
+    if any(ch.isdigit() for ch in letters):
+        return exact
     if cjk >= 4 or (cjk == 0 and len(letters) >= 6):
         return f"(?:{exact}){{s<=1}}"
     return exact
