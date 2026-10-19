@@ -486,21 +486,33 @@ class ResultView:
 
         for col, title in enumerate(headers):
             cell(0, col, title, header=True)
+        # After a write, a file that was not written keeps its found counts,
+        # says 未写出 in the 合计 row, and adds nothing to the totals.
+        counted = [not self.app.written or self._counts_toward_write(scan) for scan in ok_scans]
         for index, cat in enumerate(cats):
             cell(index + 1, 0, f"{marker_for(index)} {cat}", name=True)
             total = 0
             for file_index, scan in enumerate(ok_scans):
                 count = sum(1 for hit in scan.enabled_hits if hit.category == cat)
-                total += count
+                if counted[file_index]:
+                    total += count
                 cell(index + 1, file_index + 1, str(count))
             cell(index + 1, ncols - 1, str(total))
         cell(len(cats) + 1, 0, "合计", name=True)
         grand = 0
         for file_index, scan in enumerate(ok_scans):
             count = scan.enabled_count()
-            grand += count
-            cell(len(cats) + 1, file_index + 1, str(count))
+            if counted[file_index]:
+                grand += count
+                cell(len(cats) + 1, file_index + 1, str(count))
+            else:
+                cell(len(cats) + 1, file_index + 1, "—")
         cell(len(cats) + 1, ncols - 1, str(grand))
+        # The column stays narrow ("—"); the note names the file under the table.
+        skipped = [scan.path.name for scan, ok in zip(ok_scans, counted) if not ok]
+        if skipped:
+            note = MSG_MATRIX_UNWRITTEN.format(names="、".join(skipped))
+            _wrap_label(parent, note, bg=BG_SURFACE, fg=INK2, font=small).pack(side="bottom", fill="x", padx=8, pady=(0, 4))
 
         def sync(_event=None) -> None:
             bbox = table.grid_bbox(0, 0)
@@ -512,7 +524,9 @@ class ResultView:
                 if int(lab.cget("wraplength")) != wrap:
                     lab.configure(wraplength=wrap)
 
-        table.bind("<Configure>", sync)
+        # Grid works out column widths at idle time, after <Configure>; read
+        # the cell width then, or the names wrap to the previous width.
+        table.bind("<Configure>", lambda _e: table.after_idle(sync), add="+")
         table.after_idle(sync)
 
     def _file_preview(self, parent, scan: FileScan, fonts) -> None:
@@ -889,6 +903,15 @@ class ResultView:
         source = current.enabled_hits if current is not None else [h for s in scans for h in s.enabled_hits]
         if current is not None and current.status == "fail":
             source = []
+        # After a write, hits of a file that was not written are counted apart
+        # so 合计 matches 已替换.
+        unwritten = []
+        if self.app.written:
+            pool = [current] if current is not None else scans
+            blocked = [s for s in pool if s.status != "fail" and not self._counts_toward_write(s)]
+            unwritten = [h for s in blocked for h in s.enabled_hits]
+            blocked_ids = {id(h) for h in unwritten}
+            source = [h for h in source if id(h) not in blocked_ids]
         for i, cat in enumerate(cats):
             n = sum(1 for h in source if h.category == cat)
             item = tree.insert("", "end", values=(f"{marker_for(i)} {cat}", n))
@@ -896,6 +919,9 @@ class ResultView:
                 tree.selection_set(item)
         total = len(source)
         tree.insert("", "end", values=("合计", total))
+        if unwritten:
+            tree.insert("", "end", values=(MSG_UNWRITTEN, len(unwritten)))
+            tree.configure(height=min(7, len(cats) + 2))
         tree.pack(fill="x")
 
         def on_cat(_e=None):
@@ -941,8 +967,23 @@ class ResultView:
         loc.column("cat", width=28, minwidth=28, stretch=False)
         loc.column("text", width=126, minwidth=124, stretch=True)
         cat_index = {c: i for i, c in enumerate(cats)}
+        unwritten_ids = set()
+        if self.app.written:
+            for scan in scans:
+                if scan.status != "fail" and not self._counts_toward_write(scan):
+                    unwritten_ids.update(h.hit_id for h in scan.hits)
+            if any(h.hit_id in unwritten_ids and h.enabled for h in hits):
+                width = fonts["small"].measure(MSG_UNWRITTEN) + 12
+                # Take the room from the content column so the pane keeps its
+                # width and the middle column does not shrink.
+                spare = max(0, width - 32)
+                loc.column("on", width=width, minwidth=width)
+                loc.column("text", width=max(60, 126 - spare), minwidth=max(60, 124 - spare))
         for hit in hits:
-            mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
+            if self.app.written and hit.enabled and hit.hit_id in unwritten_ids:
+                mark = MSG_UNWRITTEN
+            else:
+                mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
             content = "▇▇▇▇" if self.app.hide_text else hit.text
             loc.insert(
                 "",
@@ -969,6 +1010,9 @@ class ResultView:
             self.refresh()
 
         loc.bind("<Button-1>", on_loc_click)
+
+    def _counts_toward_write(self, scan) -> bool:
+        return counts_toward_write(scan, written=self.app.written, write_errors=self.app.write_errors)
 
     def _clear_cat(self) -> None:
         self.app.selected_cat = None
@@ -1078,6 +1122,10 @@ def counts_toward_write(scan, *, written: bool, write_errors: dict) -> bool:
     return not (written and str(scan.path) in write_errors)
 
 
+MSG_UNWRITTEN = "未写出"
+MSG_MATRIX_UNWRITTEN = "{names} 未写出，不计入合计"
+
+
 # Characters that must not begin a line, and ones that must not end one.
 NO_LINE_START = frozenset("，。、；：！？）」』》〉】,.;:!?)%")
 NO_LINE_END = frozenset("（「『《〈【(")
@@ -1174,7 +1222,7 @@ def _wrap_label(parent, text: str, *, bg: str, fg: str, font) -> tk.Label:
         width = parent.winfo_width()
         if width <= 20:
             return
-        target = max(40, width - 8)
+        target = max(40, width - _horizontal_chrome(label))
         if state["width"] == target:
             return
         state["width"] = target
@@ -1183,6 +1231,30 @@ def _wrap_label(parent, text: str, *, bg: str, fg: str, font) -> tk.Label:
     parent.bind("<Configure>", sync, add="+")
     parent.after_idle(sync)
     return label
+
+
+def _horizontal_chrome(label: tk.Label) -> int:
+    """Pixels on both sides of the text: pack padx plus the label's own padding.
+
+    Leaving these out let a full line run under the column edge, so the
+    last glyph (the 「空」 of 只留了空白) was cut in half.
+    """
+    total = 0
+    try:
+        padx = label.pack_info().get("padx", 0)
+    except tk.TclError:
+        padx = 0
+    if isinstance(padx, (tuple, list)):
+        total += sum(int(v) for v in padx)
+    else:
+        parts = str(padx).split()
+        total += sum(int(float(v)) for v in parts) if len(parts) > 1 else 2 * int(float(parts[0] or 0))
+    for option in ("padx", "borderwidth", "highlightthickness"):
+        try:
+            total += 2 * int(float(label.cget(option)))
+        except (tk.TclError, ValueError):
+            pass
+    return total
 
 
 def _has_findings(scan: FileScan) -> bool:
