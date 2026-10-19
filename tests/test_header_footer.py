@@ -396,3 +396,56 @@ def test_word_without_headers_has_nothing_to_do(tmp_path):
     document.save(path)
     plan = hf.identify_docx(Document(path))
     assert plan.route == hf.ROUTE_NONE and plan.candidates == ()
+
+
+def test_check_text_tolerates_tiny_glyph_moves_after_rewrite():
+    before = [("药", 255.1, 216.0), ("名", 267.1, 216.0), ("A", 72.0, 50.0)]
+    after = [("药", 255.05, 216.03), ("名", 267.05, 216.03)]
+    left, lost = hf.check_text(before, after, [(60, 40, 200, 60)])
+    assert (left, lost) == (0, 0)
+    assert hf.check_text(before, [], [(60, 40, 200, 60)]) == (0, 2)
+
+
+def test_check_boxes_does_not_take_a_neighbouring_table_rule_for_the_header_rule():
+    header_rule = (72.0, 82.45, 523.0, 82.95)
+    table_rule = (72.0, 83.35, 300.0, 83.85)  # body table border, 0.4pt below
+    left, lost = hf.check_boxes([header_rule, table_rule], [table_rule], [header_rule])
+    assert (left, lost) == (0, 0)
+    assert hf.check_boxes([header_rule, table_rule], [header_rule], [header_rule]) == (1, 1)
+
+
+def test_repeats_take_thin_rules_but_not_filled_boxes():
+    rule = hf.Element(kind=hf.KIND_LINE, bbox=(72, 82.4, 523, 83.0))
+    box = hf.Element(kind=hf.KIND_LINE, bbox=(15, 10, 285, 20))  # e.g. a stamp background
+    pages = [_layout(i, W, H, [rule, box]) for i in range(4)]
+    (only,) = hf.find_repeats(pages)
+    assert {e.bbox for e in only.elements} == {rule.bbox}
+
+
+def test_header_rule_with_a_body_border_inside_it_is_kept_on_that_page():
+    """A table border that sits inside the header rule's box would be wiped
+    together with it, so the rule stays on that page (verify would fail)."""
+    doc = _open(_repeat_pdf())
+    page = doc[2]
+    # Short table border segment lying wholly inside the rule's stroke box.
+    page.draw_line((90, 70.1), (160, 70.1), width=0.2)
+    doc = _open(doc.tobytes())
+    plan = hf.identify_pdf(doc)
+    lines = [e for c in plan.candidates for e in c.elements if e.kind == hf.KIND_LINE]
+    assert {e.page for e in lines} == set(range(12)) - {2}
+    assert plan.kept_crowded == 1
+    before = len(doc[2].get_drawings())
+    result = hf.apply_pdf(doc, hf.confirm(plan))
+    assert result.body_lost == 0
+    assert len(_open(doc.tobytes())[2].get_drawings()) == before
+
+
+def test_drop_crowded_lines_is_pure():
+    rule = hf.Element(kind=hf.KIND_LINE, bbox=(72, 69.75, 540, 70.25), page=0)
+    border = hf.Element(kind=hf.KIND_LINE, bbox=(90, 69.9, 160, 70.2))
+    layout = _layout(0, W, H, (rule, border))
+    cand = hf._candidate("repeat-header", hf.SOURCE_REPEAT, hf.ROLE_HEADER, (rule,), confirmed=False)
+    kept, dropped = hf.drop_crowded_lines([cand], [layout])
+    assert kept == [] and dropped == 1
+    kept, dropped = hf.drop_crowded_lines([cand], [_layout(0, W, H, (rule,))])
+    assert kept == [cand] and dropped == 0

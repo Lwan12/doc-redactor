@@ -86,8 +86,12 @@ def rules_signature(rules) -> str:
     return repr(checked)
 
 
-def session_signature(paths, rules) -> str:
-    return files_signature(paths) + "||" + rules_signature(rules)
+def session_signature(paths, rules, remove_hf: bool | None = None) -> str:
+    """``remove_hf`` is the 「去掉页眉页脚」 box. Flipping it changes which hits
+    count, so it is a rule change (header-footer-flow.md 5). None keeps the
+    signature of callers that have no such box."""
+    base = files_signature(paths) + "||" + rules_signature(rules)
+    return base if remove_hf is None else base + "||hf=" + str(bool(remove_hf))
 
 
 def hit_identity(path, hit) -> tuple:
@@ -138,7 +142,8 @@ def unchecked_count(scans) -> int:
     for scan in scans:
         if getattr(scan, "status", "") == "fail":
             continue
-        total += sum(1 for hit in scan.hits if not hit.enabled)
+        # Hits inside a header/footer block to be deleted are not shown.
+        total += sum(1 for hit in getattr(scan, "visible_hits", scan.hits) if not hit.enabled)
     return total
 
 

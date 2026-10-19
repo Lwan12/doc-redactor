@@ -161,6 +161,8 @@ class App:
             self.save_failed = loaded.save_failed
             self.corrupt_name = loaded.corrupt_name
         self.output_var = tk.StringVar(value=shown_output)
+        self.remove_hf = loaded.remove_hf if not shoot else True
+        self.remove_hf_var = tk.BooleanVar(value=self.remove_hf)
         self.output_error: str | None = None
         self.running = False
         self.cancelled = False
@@ -310,7 +312,7 @@ class App:
     def signature_matches_memory(self) -> bool:
         if self.uncheck_memory is None:
             return True
-        return session_signature(self.files, self.ruleset.rules) == self.uncheck_memory.signature
+        return session_signature(self.files, self.ruleset.rules, self.remove_hf) == self.uncheck_memory.signature
 
     def remembered_unchecks(self) -> int:
         if self.uncheck_memory is None:
@@ -351,7 +353,7 @@ class App:
         return True
 
     def _clear_preview(self) -> None:
-        signature = session_signature(self.files, self.ruleset.rules)
+        signature = session_signature(self.files, self.ruleset.rules, self.remove_hf)
         self.uncheck_memory = capture_unchecks(self.scans, signature)
         self.scans = []
         self.from_result = True
@@ -420,6 +422,18 @@ class App:
     def _check_output(self) -> None:
         self.output_error = check_output_dir(self.output_var.get()).error
 
+    def set_remove_hf(self, value: bool) -> None:
+        self.remove_hf = bool(value)
+        self.persist_now()
+        self.refresh()
+
+    def toggle_file_hf(self, scan) -> None:
+        """Per-file box on the result page. Not remembered, and not a rule change."""
+        if self.written or not scan.hf_found:
+            return
+        scan.hf_keep = not scan.hf_keep
+        self.refresh()
+
     def persist_now(self) -> None:
         if self.shoot:
             return
@@ -427,6 +441,7 @@ class App:
             self.ruleset.rules,
             self.lib_checked,
             self.output_var.get().strip() or str(default_output_dir()),
+            remove_hf=self.remove_hf,
         )
         self.save_failed = not ok
 
@@ -485,8 +500,11 @@ class App:
         if choice != "reset":
             return
         self._reset_lib_snap = list(self.lib_checked)
+        self._reset_hf_snap = self.remove_hf
         self.ruleset.restore_defaults(label=MSG_RESET_DONE)
         self.lib_checked = default_library_checked()
+        self.remove_hf = True
+        self.remove_hf_var.set(True)
         self.persist_now()
         self._arm_undo_expiry()
         self.refresh()
@@ -602,6 +620,10 @@ class App:
         if self._reset_lib_snap is not None:
             self.lib_checked = self._reset_lib_snap
             self._reset_lib_snap = None
+        if getattr(self, "_reset_hf_snap", None) is not None:
+            self.remove_hf = self._reset_hf_snap
+            self.remove_hf_var.set(self.remove_hf)
+            self._reset_hf_snap = None
         self.persist_now()
         if self._undo_job is not None:
             try:
@@ -856,7 +878,7 @@ class App:
 
                 self.root.after(0, apply)
 
-            results = scan_paths(paths, engine, cancel=self.cancel_event, progress=progress)
+            results = scan_paths(paths, engine, cancel=self.cancel_event, progress=progress, remove_hf=self.remove_hf)
             self.root.after(0, lambda results=results, ticket=ticket: self._scan_done(results, ticket))
 
         Thread(target=worker, daemon=True).start()
@@ -881,7 +903,7 @@ class App:
             self.scans = discard_scan_results(results)
             return
         self.running = False
-        signature = session_signature(self.files, self.ruleset.rules)
+        signature = session_signature(self.files, self.ruleset.rules, self.remove_hf)
         outcome = apply_unchecks(results, self.uncheck_memory, signature)
         self.note_cleared = outcome == "cleared"
         self.uncheck_memory = None
@@ -964,9 +986,16 @@ class App:
                 continue
             if int(getattr(scan, "unlocated_count", 0) or 0) > 0:
                 continue
-            if scan.enabled_count() > 0:
+            if scan.will_write():
                 total += 1
         return total
+
+    def hf_written_count(self) -> int:
+        return sum(
+            1
+            for scan in self.scans
+            if scan.hf_active and scan.status != "fail" and str(scan.path) not in self.write_errors
+        )
 
     def write_failure_rows(self) -> list[tuple[str, str]]:
         rows = []
@@ -1155,6 +1184,29 @@ class App:
                 pass
             self.toast = None
 
+        self.remove_hf = True
+        self.remove_hf_var.set(True)
+        if key.startswith("res-hf-"):
+            from doc_redactor.gui.demo import demo_hf_scans
+
+            mode = {"res-hf-auto": "auto", "res-hf-none": "none"}.get(key, "tag")
+            self.scans = demo_hf_scans(mode)
+            self.output_display = r"D:\脱敏输出\20261017-2140"
+            self.selected = 0 if key in {"res-hf-word", "res-hf-filecancel"} else 1
+            if key == "res-hf-filecancel":
+                self.scans[0].hf_keep = True
+            if key == "res-hf-after":
+                self.preview_mode = "after"
+            if key == "res-hf-written":
+                self.written = True
+            self.show("result")
+            return
+        if key == "main-hf-off":
+            self.remove_hf = False
+            self.remove_hf_var.set(False)
+            self.main_step = 1
+            self.show("main")
+            return
         if key == "main-empty":
             self.files = []
             self.file_sizes = []
@@ -1219,7 +1271,7 @@ class App:
 
             self.main_step = 1
             self.from_result = True
-            signature = session_signature(self.files, self.ruleset.rules)
+            signature = session_signature(self.files, self.ruleset.rules, self.remove_hf)
             if key == "main-rules-changed":
                 signature = "changed"
             self.uncheck_memory = UncheckMemory(signature=signature, keys=(("kept-1",), ("kept-2",)))

@@ -234,3 +234,113 @@ def demo_files() -> list[Path]:
         Path("旧版协议_加密.pdf"),
         Path("随访表_模板.docx"),
     ]
+
+
+# ---------------------------------------------------------------- 去掉页眉页脚
+# Placeholders only: the signing envelope number is all zeros.
+DEMO_SIGN = "DocuSign 信封号：00000000-0000-0000-0000-000000000000"
+DEMO_PDF_HEAD = "PRJ-2026-017 中期统计分析　版本 2.0　2026-10-08"
+DEMO_WORD_HEAD = "PRJ-2026-017　访视记录　版本 2.1"
+DEMO_WORD_FOOT = "华曜医药 机密　第 1 页 / 共 3 页"
+
+
+def _page_hits(lines, mapping, page, hid, roles):
+    """Hits with page-text offsets, as the scanner stores them."""
+    text = "\n".join(lines)
+    hits = []
+    used: dict[str, int] = {}
+    for cat, needle, *line in mapping:
+        floor = used.get(needle, 0)
+        if line:
+            floor = max(floor, len("\n".join(lines[: line[0]])) + (1 if line[0] else 0))
+        start = text.find(needle, floor)
+        if start < 0:
+            continue
+        used[needle] = start + len(needle)
+        line_no = text[:start].count("\n")
+        hits.append(
+            _hit(
+                hid,
+                cat,
+                needle,
+                f"第 {page + 1} 页 · 第 {line_no + 1} 行",
+                f"page:{page}",
+                start,
+                start + len(needle),
+                page=page,
+                rects=[(40, 60 + 30 * line_no, 220, 76 + 30 * line_no)],
+                hf_role=roles.get(line_no, ""),
+            )
+        )
+        hid += 1
+    return hits, hid
+
+
+def demo_hf_scans(mode: str = "tag") -> list[FileScan]:
+    """demo_scans with headers/footers in Word file 1 and PDF file 2.
+
+    mode: "tag" (PDF has tags), "auto" (found by repetition), "none"
+    (nothing found). Other files are unchanged.
+    """
+    from doc_redactor import header_footer as hf
+
+    scans = demo_scans()
+    word, pdf = scans[0], scans[1]
+    body = list(word.paragraphs)
+    paras = body + [DEMO_WORD_HEAD, DEMO_WORD_FOOT]
+    head_i, foot_i = len(body), len(body) + 1
+    hid = max(h.hit_id for s in scans for h in s.hits) + 1
+    extra = [
+        _hit(hid, "项目号", "PRJ-2026-017", f"第 {head_i + 1} 段", f"p:{head_i}", 0, 12, hf_role=hf.ROLE_HEADER),
+        _hit(hid + 1, "申办方", "华曜医药", f"第 {foot_i + 1} 段", f"p:{foot_i}", 0, 4, hf_role=hf.ROLE_FOOTER),
+    ]
+    hid += 2
+    word.paragraphs = paras
+    word.hits = list(word.hits) + extra
+    word.hf_route = hf.ROUTE_WORD
+    word.hf_pages = 3
+    word.hf_watermark = True
+    word.hf_watermark_text = "机密"
+    word.hf_units = {f"p:{head_i}": hf.ROLE_HEADER, f"p:{foot_i}": hf.ROLE_FOOTER}
+
+    body_pages = [
+        [
+            "入组统计报告（V2）",
+            "PRJ-2026-017 中期统计分析",
+            "申办方：华曜医药有限公司",
+            "报告日期：2026 年 10 月 8 日",
+            "本报告汇总截至数据截止日的入组情况。",
+        ],
+        [
+            "1. 入组概况",
+            "截至 9 月 30 日，PRJ-2026-017 共筛选 214 例，入组 168 例。",
+            "其中使用瑞沃替尼片组 84 例，对照组 84 例。",
+            "各中心入组例数见表 1。",
+            "PRJ-2026-017-S02 中心入组速度最快。",
+        ],
+    ]
+    body_map = [
+        [("项目号", "PRJ-2026-017"), ("申办方", "华曜医药有限公司")],
+        [("项目号", "PRJ-2026-017"), ("药名", "瑞沃替尼片"), ("项目号", "PRJ-2026-017-S02")],
+    ]
+    pages, hits, lines_role = [], [], {}
+    for page, lines in enumerate(body_pages):
+        footer = f"华曜医药 CONFIDENTIAL　Page {page + 1}/2"
+        full = [DEMO_SIGN, DEMO_PDF_HEAD] + lines + [footer]
+        roles = {0: hf.ROLE_SIGNATURE, 1: hf.ROLE_HEADER, len(full) - 1: hf.ROLE_FOOTER}
+        if mode == "none":
+            roles_for_hits = {}
+        else:
+            roles_for_hits = roles
+            for line_no, role in roles.items():
+                lines_role[(page, line_no)] = role
+        mapping = [("项目号", "PRJ-2026-017")] + body_map[page] + [("申办方", "华曜医药", len(full) - 1)]
+        found, hid = _page_hits(full, mapping, page, hid, roles_for_hits)
+        hits.extend(found)
+        pages.append(full)
+    pdf.pages = pages
+    pdf.hits = hits
+    pdf.hf_lines = lines_role
+    pdf.hf_route = {"tag": hf.ROUTE_TAG, "auto": hf.ROUTE_REPEAT, "none": hf.ROUTE_NONE}[mode]
+    pdf.hf_pages = None if mode == "none" else 2
+    return scans

@@ -60,9 +60,14 @@ KIND_LINE = "line"
 # A4 pages (595pt tall) have footers about 96pt from the bottom, so 15% is
 # too tight. This is a limit, not a deletion band.
 ZONE_FRACTION = 0.20
+MATCH_TOL = 0.5
+LINE_INFLATE = 0.1  # redaction box around a rule, in points
 MIN_PAGES = 3
 TOL_VERTICAL = 2.0
 TOL_HORIZONTAL = 4.0
+# Repeats only take thin rules. Filled boxes (stamp backgrounds, cover
+# layers) may hide body content inside them; tags are trusted, repeats not.
+MAX_RULE_THICKNESS = 3.0
 
 # Wording from header-footer-flow.md section 6, verbatim.
 UI_TEXT = {
@@ -153,8 +158,11 @@ class Plan:
     page_count: int
     candidates: tuple[Candidate, ...] = ()
     has_watermark: bool = False
+    watermark_text: str = field(default="", repr=False, compare=False)
     page_sizes: tuple[tuple[float, float], ...] = ()
     skipped_rotated: int = 0
+    # Header/footer rules left alone because body drawings sit inside their box.
+    kept_crowded: int = 0
 
 
 @dataclass(frozen=True)
@@ -239,6 +247,8 @@ def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAG
             zone = zone_of(element.bbox, page.height)
             if zone is None:
                 continue
+            if element.kind == KIND_LINE and min(element.bbox[2] - element.bbox[0], element.bbox[3] - element.bbox[1]) > MAX_RULE_THICKNESS:
+                continue
             if any(_overlaps(element.bbox, box) for box in exclude.get(page.index, ())):
                 continue
             clusters = groups.setdefault(_key(element, zone), [])
@@ -299,6 +309,54 @@ def tag_candidates(pages) -> list[Candidate]:
     ]
 
 
+def _same_box(a: Box, b: Box, tol: float = MATCH_TOL) -> bool:
+    return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def _covers(outer: Box, inner: Box) -> bool:
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
+
+
+def drop_crowded_lines(candidates, layouts) -> tuple[list[Candidate], int]:
+    """Drop rule elements whose redaction box would also cover a body drawing.
+
+    Line redaction removes every drawing wholly inside the box, so a table
+    border right under the header rule would go too. Such a rule stays on
+    that page (conservative: not deleting beats deleting body content).
+    Returns the remaining candidates and how many elements were dropped.
+    """
+    drawings = {
+        layout.index: [e.bbox for e in layout.items if e.kind == KIND_LINE] for layout in layouts
+    }
+    planned: dict[int, list[Box]] = {}
+    for candidate in candidates:
+        for element in candidate.elements:
+            if element.kind == KIND_LINE:
+                planned.setdefault(element.page, []).append(element.bbox)
+    out, dropped = [], 0
+    for candidate in candidates:
+        keep = []
+        for element in candidate.elements:
+            if element.kind == KIND_LINE:
+                area = _inflate(element.bbox, LINE_INFLATE)
+                own = planned.get(element.page, [])
+                crowded = any(
+                    _covers(area, box) and not any(_same_box(box, mine) for mine in own)
+                    for box in drawings.get(element.page, [])
+                )
+                if crowded:
+                    dropped += 1
+                    continue
+            keep.append(element)
+        if len(keep) == len(candidate.elements):
+            out.append(candidate)
+        elif keep:
+            out.append(
+                replace(candidate, elements=tuple(keep), pages=tuple(sorted({e.page for e in keep})))
+            )
+    return out, dropped
+
+
 def build_pdf_plan(tagged, layouts, page_count: int, page_sizes=(), skipped_rotated: int = 0) -> Plan:
     tags = tag_candidates(tagged)
     exclude: dict[int, list[Box]] = {}
@@ -306,6 +364,8 @@ def build_pdf_plan(tagged, layouts, page_count: int, page_sizes=(), skipped_rota
         for element in candidate.elements:
             exclude.setdefault(element.page, []).append(element.bbox)
     repeats = find_repeats(layouts, exclude=exclude)
+    tags, crowded_tags = drop_crowded_lines(tags, layouts)
+    repeats, crowded_repeats = drop_crowded_lines(repeats, layouts)
     if tags:
         route = ROUTE_TAG
     elif repeats:
@@ -319,6 +379,7 @@ def build_pdf_plan(tagged, layouts, page_count: int, page_sizes=(), skipped_rota
         candidates=tuple(tags + repeats),
         page_sizes=tuple(page_sizes),
         skipped_rotated=skipped_rotated,
+        kept_crowded=crowded_tags + crowded_repeats,
     )
 
 
@@ -406,6 +467,69 @@ def inside_removed(plan: Plan, page: int, bbox: Box) -> bool:
     return any(_contains(box, cx, cy) for box in removed_boxes(plan, page))
 
 
+def role_at(plan: Plan | None, page: int, bbox) -> str:
+    """Role of the candidate (confirmed or not) whose block holds this box's centre."""
+    if plan is None or bbox is None:
+        return ""
+    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    for candidate in plan.candidates:
+        for element in candidate.elements:
+            if element.page == page and _contains(element.bbox, cx, cy):
+                return candidate.role
+    return ""
+
+
+def pdf_line_roles(page, plan: Plan | None, lines: list[str]) -> dict[int, str]:
+    """Plain-text line index -> role, for drawing the preview blocks.
+
+    Lines of ``page.get_text("text")`` come in the same order as rawdict
+    lines; they are paired by their text. A line counts as header/footer
+    when most of its characters sit in a candidate block.
+    """
+    if plan is None or not plan.candidates:
+        return {}
+    raw = []
+    for block in page.get_text("rawdict")["blocks"]:
+        for line in block.get("lines", ()):
+            chars = [ch for span in line["spans"] for ch in span["chars"]]
+            text = "".join(ch["c"] for ch in chars)
+            roles = Counter()
+            for ch in chars:
+                if not ch["c"].strip():
+                    continue
+                roles[role_at(plan, page.number, ch["bbox"])] += 1
+            role, count = roles.most_common(1)[0] if roles else ("", 0)
+            total = sum(roles.values())
+            raw.append((_SPACES.sub("", text), role if role and count * 2 > total else ""))
+    out: dict[int, str] = {}
+    j = 0
+    for index, line in enumerate(lines):
+        key = _SPACES.sub("", line)
+        if not key:
+            continue
+        for k in range(j, min(len(raw), j + 50)):
+            if raw[k][0] == key:
+                if raw[k][1]:
+                    out[index] = raw[k][1]
+                j = k + 1
+                break
+    return out
+
+
+def docx_pages(path) -> int | None:
+    """Page count Word stored in docProps/app.xml, if any. Word itself has no
+    fixed pages, so this is what the last save recorded."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            raw = zf.read("docProps/app.xml").decode("utf-8", "replace")
+    except (KeyError, OSError, zipfile.BadZipFile):
+        return None
+    found = re.search(r"<(?:\w+:)?Pages>(\d+)</", raw)
+    return int(found.group(1)) if found else None
+
+
 def union(boxes) -> Box | None:
     boxes = list(boxes)
     if not boxes:
@@ -458,6 +582,28 @@ def char_marks(chars, size: float) -> tuple[Box, ...]:
     return tuple(tuple(m) for m in marks)
 
 
+
+
+def _match_points(before, after, tol: float = MATCH_TOL) -> int:
+    """How many of ``before`` (char, x, y) have no partner in ``after``.
+
+    A rewritten content stream can move a glyph by a few hundredths of a
+    point, so partners are matched within ``tol``.
+    """
+    pool: dict[str, list[list]] = {}
+    for ch, x, y in after:
+        pool.setdefault(ch, []).append([x, y, False])
+    missing = 0
+    for ch, x, y in before:
+        for item in pool.get(ch, ()):
+            if not item[2] and abs(item[0] - x) <= tol and abs(item[1] - y) <= tol:
+                item[2] = True
+                break
+        else:
+            missing += 1
+    return missing
+
+
 def check_text(before, after, removed: list[Box]) -> tuple[int, int]:
     """(left, lost). ``before``/``after`` are (char, cx, cy) for one page.
 
@@ -465,30 +611,21 @@ def check_text(before, after, removed: list[Box]) -> tuple[int, int]:
     lost: characters outside every removed box that disappeared.
     """
     left = sum(1 for ch, x, y in after if ch.strip() and any(_contains(b, x, y) for b in removed))
-    keep_before = Counter(
-        (ch, round(x, 1), round(y, 1)) for ch, x, y in before if ch.strip() and not any(_contains(b, x, y) for b in removed)
-    )
-    keep_after = Counter((ch, round(x, 1), round(y, 1)) for ch, x, y in after if ch.strip())
-    lost = sum((keep_before - keep_after).values())
+    keep = [(ch, x, y) for ch, x, y in before if ch.strip() and not any(_contains(b, x, y) for b in removed)]
+    lost = _match_points(keep, [(ch, x, y) for ch, x, y in after if ch.strip()])
     return left, lost
 
 
+def _same_box(a: Box, b: Box, tol: float = MATCH_TOL) -> bool:
+    return all(abs(p - q) <= tol for p, q in zip(a, b))
+
+
 def check_boxes(before: list[Box], after: list[Box], removed: list[Box]) -> tuple[int, int]:
-    """Same as :func:`check_text` for images or line art (by centre)."""
-
-    def centre(b):
-        return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
-
-    left = sum(1 for b in after if any(_contains(r, *centre(b)) for r in removed))
-    outside = [b for b in before if not any(_contains(r, *centre(b)) for r in removed)]
-    remaining = Counter(tuple(round(v, 1) for v in b) for b in after)
-    lost = 0
-    for b in outside:
-        key = tuple(round(v, 1) for v in b)
-        if remaining[key]:
-            remaining[key] -= 1
-        else:
-            lost += 1
+    """Images or line art. An item is the removed one only if its box is the
+    same box (within ``MATCH_TOL``); anything else on the page must survive."""
+    left = sum(1 for b in after if any(_same_box(b, r) for r in removed))
+    keep = [("", (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in before if not any(_same_box(b, r) for r in removed)]
+    lost = _match_points(keep, [("", (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in after])
     return left, lost
 
 
@@ -809,7 +946,7 @@ def apply_pdf(document, plan: Plan) -> ApplyResult:
             )
         if lines:
             for element in lines:
-                page.add_redact_annot(pymupdf.Rect(_inflate(element.bbox, 0.5)), fill=False, cross_out=False)
+                page.add_redact_annot(pymupdf.Rect(_inflate(element.bbox, LINE_INFLATE)), fill=False, cross_out=False)
             page.apply_redactions(
                 images=pymupdf.PDF_REDACT_IMAGE_NONE,
                 graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
@@ -832,13 +969,14 @@ def _snapshot(page):
 
 def _verify(document, plan: Plan, by_page, before) -> tuple[int, int]:
     """Re-open the saved bytes and compare with the snapshot before removal."""
-    reopened = pymupdf.open("pdf", document.tobytes(garbage=3, deflate=True))
+    # No garbage collection here: it would renumber objects of the live document.
+    reopened = pymupdf.open("pdf", document.tobytes())
     try:
         left = lost = 0
         for index, elements in by_page.items():
             after = _snapshot(reopened[index])
-            for kind, grow in ((KIND_TEXT, 0.0), (KIND_IMAGE, 0.0), (KIND_LINE, 0.5)):
-                boxes = [_inflate(e.bbox, grow) for e in elements if e.kind == kind]
+            for kind in (KIND_TEXT, KIND_IMAGE, KIND_LINE):
+                boxes = [e.bbox for e in elements if e.kind == kind]
                 if kind == KIND_TEXT:
                     l, m = check_text(before[index][kind], after[kind], boxes)
                 else:
@@ -897,13 +1035,16 @@ def identify_docx(document) -> Plan:
     """Every header/footer part with content. Word removes whole blocks, so
     candidates come pre-confirmed (flow doc section 3)."""
     slots = _slots(document)
-    candidates, watermark = [], False
+    candidates, watermark, mark_text = [], False, ""
     for role, part in _hf_parts(document):
         element = part._element
         if not _has_content(element):
             continue
         xml = element.xml
-        watermark = watermark or (role == ROLE_HEADER and any(mark in xml for mark in _WATERMARK))
+        if role == ROLE_HEADER and any(mark in xml for mark in _WATERMARK):
+            watermark = True
+            found = re.search(r'<v:textpath[^>]*\bstring="([^"]*)"', xml)
+            mark_text = mark_text or (found.group(1) if found else "")
         name = str(part.partname)
         text = "".join(node.text or "" for node in element.iter(f"{{{_W}}}t"))
         candidates.append(
@@ -927,6 +1068,7 @@ def identify_docx(document) -> Plan:
         page_count=0,
         candidates=tuple(candidates),
         has_watermark=watermark,
+        watermark_text=mark_text,
     )
 
 
