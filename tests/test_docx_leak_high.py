@@ -416,3 +416,80 @@ def test_authors_style_names_docvars_template_and_altchunk(tmp_path: Path):
         assert "<w:ins " in xml
         document = Document(str(output))
         assert document.paragraphs[1].style.name != "Fictizumab Heading"
+
+
+# --- M33-1：外部链接地址整条换成占位符 -------------------------------------------
+
+LINK_PLACEHOLDER = "https://redacted.invalid/"  # 写出时外部链接地址一律换成它
+LINK_VARIANTS = ("acme-pharma", "acme_pharma", "acmepharma", "fictizumab", "abc-2026-001")
+
+
+def _hyphen_links_docx(path: Path) -> None:
+    """规则写的是「Acme Pharma」，链接里写成 acme-pharma（规则匹配不到），外加页眉里的链接和域代码。"""
+    document = Document()
+    document.add_paragraph("Sponsor Acme Pharma in body.")
+    document.sections[0].header.add_paragraph("Header.")
+    document.save(str(path))
+
+    def edit(files):
+        _add_rel(
+            files, "word/_rels/document.xml.rels", "rIdH1", _RT + "hyperlink",
+            "https://acme-pharma.example/trials/42?ref=acme_pharma", external=True,
+        )
+        _body_xml(
+            files,
+            '<w:p><w:hyperlink r:id="rIdH1"><w:r><w:t>portal</w:t></w:r></w:hyperlink></w:p>'
+            '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            '<w:r><w:instrText xml:space="preserve"> HYPERLINK "https://acme-pharma.exa</w:instrText></w:r>'
+            '<w:r><w:instrText xml:space="preserve">mple/subject/7" \\o "tip" </w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>field link</w:t></w:r>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+            '<w:p><w:fldSimple w:instr=" HYPERLINK https://www.acmepharma.example/x "><w:r><w:t>simple</w:t></w:r></w:fldSimple></w:p>',
+        )
+        header = next(n for n in files if n.startswith("word/header") and n.endswith(".xml"))
+        rels = header.replace("word/", "word/_rels/") + ".rels"
+        files.setdefault(
+            rels,
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>',
+        )
+        _add_rel(files, rels, "rIdH2", _RT + "hyperlink", "mailto:pi@acme-pharma.example", external=True)
+        files[header] = files[header].replace(
+            b"</w:hdr>",
+            f'<w:p><w:hyperlink xmlns:r="{R}" r:id="rIdH2"><w:r><w:t>mail</w:t></w:r></w:hyperlink></w:p></w:hdr>'.encode(),
+        )
+
+    _rewrite(path, edit)
+
+
+def _link_views(path: Path) -> dict[str, str]:
+    views = {k: v for k, v in _zip_views(path.read_bytes()).items() if k.endswith((".xml", ".rels"))}
+    result = subprocess.run(["pandoc", "-f", "docx", "-t", "native", str(path)], capture_output=True, check=True)
+    views["pandoc native"] = result.stdout.decode("utf-8", "replace")
+    return views
+
+
+@pytest.mark.skipif(shutil.which("pandoc") is None, reason="没装 pandoc")
+def test_external_link_targets_become_a_placeholder(tmp_path: Path):
+    source = tmp_path / "hyphen-links.docx"
+    _hyphen_links_docx(source)
+    before = _link_views(source)
+    assert "acme-pharma" in before["pandoc native"]
+    for output in _write_both_ways(source, tmp_path):
+        views = _link_views(output)
+        for name, text in views.items():
+            flat = text.casefold()
+            for number, word in enumerate(LINK_VARIANTS, 1):
+                assert word not in flat, f"{output.parent.name} {name} 读出了链接变体 #{number}"
+        shown = views["pandoc native"]
+        assert LINK_PLACEHOLDER in shown, shown
+        # 链接本身和显示文字都还在（pandoc 不显示域代码链接和页眉，直接看 XML）。
+        for label in ('Str "portal"', 'Str "field"'):
+            assert label in shown
+        with zipfile.ZipFile(output) as archive:
+            body = archive.read("word/document.xml").decode()
+            rels = [archive.read(n).decode() for n in archive.namelist() if n.endswith(".rels") and "word/" in n]
+        assert "simple" in body
+        assert body.count(f"HYPERLINK &quot;{LINK_PLACEHOLDER}&quot;") + body.count(f'HYPERLINK "{LINK_PLACEHOLDER}"') == 2
+        assert '\\o "tip"' in body or "\\o &quot;tip&quot;" in body
+        assert sum(r.count(LINK_PLACEHOLDER) for r in rels) == 2

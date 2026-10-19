@@ -517,6 +517,7 @@ def finish_document(document) -> None:
     _rename_custom_styles(document)
     _drop_embedded_objects(document)
     _drop_unscannable(document)
+    replace_link_targets(document)
     anonymize_authors(document)
 
 
@@ -550,6 +551,70 @@ def _rename_custom_styles(document) -> None:
                 value = node.get(_W + "val")
                 if value in ids:
                     node.set(_W + "val", ids[value])
+
+
+# External link targets are replaced whole on every write. A rule needs the
+# exact spelling, and an address spells names its own way (acme-pharma.example,
+# acme_pharma, %20), so matching inside it cannot be trusted (review M33-1).
+LINK_PLACEHOLDER = "https://redacted.invalid/"
+_HYPERLINK_INSTR = re.compile(r'^(\s*HYPERLINK\s+)("[^"]*"|(?!\\)\S+)(.*)$', re.S | re.I)
+
+
+def _replaced_hyperlink_instr(instr: str) -> str | None:
+    """The instruction with its address replaced, or None when it has no address."""
+    match = _HYPERLINK_INSTR.match(instr)
+    if not match or match.group(2) == f'"{LINK_PLACEHOLDER}"':
+        return None
+    return f'{match.group(1)}"{LINK_PLACEHOLDER}"{match.group(3)}'
+
+
+def replace_link_targets(document) -> None:
+    """Replace every external hyperlink address with ``LINK_PLACEHOLDER``.
+
+    - relationship targets (``TargetMode="External"``, hyperlink type) of every
+      part: body, headers, footers, notes, comments; ``w:hyperlink`` and
+      drawing ``a:hlinkClick`` both point at these;
+    - the address argument of ``HYPERLINK`` field codes (``w:fldSimple`` and
+      ``w:instrText`` runs, even when split over several runs). Switches such
+      as ``\\o`` (tooltip) and ``\\l`` (bookmark) stay.
+    Internal links (``w:anchor``) and the link's display text are not touched.
+    """
+    for part in document.part.package.iter_parts():
+        for rel in getattr(part, "rels", {}).values():
+            if rel.is_external and rel.reltype == RT.HYPERLINK:
+                rel._target = LINK_PLACEHOLDER
+    for _part, element in _xml_parts(document):
+        for node in element.iter(_W_FLDSIMPLE):
+            new = _replaced_hyperlink_instr(node.get(_W + "instr") or "")
+            if new is not None:
+                node.set(_W + "instr", new)
+        stack: list[list] = []
+        for node in element.iter(_W_FLDCHAR, *_W_INSTR):
+            if node.tag == _W_FLDCHAR:
+                kind = node.get(_W_FLDTYPE)
+                if kind == "begin":
+                    stack.append([])
+                elif kind in ("separate", "end") and stack:
+                    _rewrite_instr_runs(stack.pop())
+                continue
+            if stack:
+                stack[-1].append(node)
+            else:
+                _rewrite_instr_runs([node])
+        for runs in stack:
+            _rewrite_instr_runs(runs)
+
+
+def _rewrite_instr_runs(runs) -> None:
+    if not runs:
+        return
+    new = _replaced_hyperlink_instr("".join(run.text or "" for run in runs))
+    if new is None:
+        return
+    runs[0].text = new
+    runs[0].set(_XML_SPACE, "preserve")
+    for run in runs[1:]:
+        run.text = ""
 
 
 # Every revision mark and comment gets this name, whether or not a rule hit
