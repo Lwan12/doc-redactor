@@ -122,3 +122,99 @@ def test_trimming_never_leaves_hit_text(tmp_path, font, hit, neighbour, sizes, g
     assert hit not in out[0].get_text()
     streams = b"".join(out.xref_stream(x) or b"" for x in range(1, out.xref_length()) if out.xref_is_stream(x))
     assert hit.encode() not in streams
+
+
+# --- 第 2 轮（出品审 PR #40 M1/S2）---------------------------------------
+
+SCAN_HIT = "Fictizumab-gyp"
+
+
+def _scan_like(tmp_path: Path, with_hit: bool, gap: float) -> Path:
+    """A scanned page: the picture is an image, an invisible text layer on top."""
+
+    def lines(page, render_mode):
+        hit = SCAN_HIT if with_hit else " " * len(SCAN_HIT)
+        page.insert_text((72, 100 - gap), "Upper neighbour gggyyyppp", fontsize=9, render_mode=render_mode)
+        page.insert_text((72, 100), f"ID {hit} tail", fontsize=9, render_mode=render_mode)
+        page.insert_text((72, 100 + gap), "Lower neighbour bdfhkl", fontsize=9, render_mode=render_mode)
+
+    visible = pymupdf.open()
+    lines(visible.new_page(width=595, height=842), 0)
+    png = visible[0].get_pixmap(dpi=200).tobytes("png")
+    visible.close()
+    document = pymupdf.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_image(page.rect, stream=png)
+    lines(page, 3)
+    path = tmp_path / f"scan-{int(with_hit)}.pdf"
+    document.save(path)
+    document.close()
+    return path
+
+
+def _render_gray(path: Path, clip) -> bytes:
+    document = pymupdf.open(path)
+    try:
+        pix = document[0].get_pixmap(dpi=300, clip=clip, colorspace=pymupdf.csGRAY)
+        return pix.samples
+    finally:
+        document.close()
+
+
+@pytest.mark.parametrize("gap", [8.0, 10.0])
+def test_scanned_page_keeps_no_stroke_of_the_hit_inside_its_box(tmp_path, gap, monkeypatch):
+    # M1: a trimmed white box left the top and bottom of the hit's strokes in
+    # the image visible. Output vs. the same page drawn without the hit,
+    # 300dpi, inside the hit's whole box: no extra dark pixel.
+    from doc_redactor import pdf_redactor as pr
+
+    monkeypatch.setattr(pr, "_write_choice", lambda page, rect, full, short: "blank")
+    source = _scan_like(tmp_path, True, gap)
+    reference = _scan_like(tmp_path, False, gap)
+    document = pymupdf.open(source)
+    rects = document[0].search_for(SCAN_HIT)
+    assert rects
+    box = pymupdf.Rect(rects[0])
+    for rect in rects[1:]:
+        box |= rect
+    pr.redact_text_placeholders(document, [(0, rects, "项目号", SCAN_HIT)], lambda category: f"[{category}]")
+    out = tmp_path / "out.pdf"
+    document.save(out)
+    document.close()
+    got, want = _render_gray(out, box), _render_gray(reference, box)
+    assert len(got) == len(want)
+    residue = sum(1 for g, w in zip(got, want) if g < 128 and w >= 128)
+    assert residue == 0, (gap, residue)
+
+
+def test_redaction_box_falls_back_to_the_whole_box_when_the_core_is_lost():
+    # S2: a neighbour reaching past the hit's middle leaves too little of it.
+    from doc_redactor import pdf_redactor as pr
+
+    box = pymupdf.Rect(72, 90, 140, 102)
+    glyphs = [
+        (pymupdf.Rect(72, 90, 80, 102), 1),  # the hit's own glyph
+        (pymupdf.Rect(72, 80, 140, 101), 2),  # neighbour line covering most of it
+    ]
+    assert pr._redaction_box(box, glyphs) == box
+    # Control: a small overlap is trimmed, not the whole box.
+    glyphs[1] = (pymupdf.Rect(72, 80, 140, 91), 2)
+    assert pr._redaction_box(box, glyphs) != box
+
+
+def test_trimmed_box_that_missed_hit_glyphs_is_redone_with_the_whole_box(tmp_path, monkeypatch):
+    # S2: if the first, trimmed deletion leaves a hit glyph behind, the whole
+    # box is deleted again. The trim is forced to miss the hit entirely.
+    from doc_redactor import pdf_redactor as pr
+
+    def miss(box, glyphs):
+        return pymupdf.Rect(box.x0, box.y0 - 40, box.x1, box.y0 - 39)
+
+    monkeypatch.setattr(pr, "_redaction_box", miss)
+    monkeypatch.setattr(pr, "_write_choice", lambda page, rect, full, short: "blank")
+    document = pymupdf.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((72, 200), f"{HIT} alone", fontsize=9)
+    rects = page.search_for(HIT)
+    pr.redact_text_placeholders(document, [(0, rects, "项目号", HIT)], lambda category: f"[{category}]")
+    assert HIT not in document[0].get_text()
