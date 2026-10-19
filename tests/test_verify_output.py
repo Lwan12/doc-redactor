@@ -632,3 +632,116 @@ def test_actual_text_is_dropped_so_the_check_passes(tmp_path: Path):
     text = "".join(page.get_text() for page in out)
     out.close()
     assert "Acme Pharma" not in text
+
+
+# --- Partial overlap: a leftover that only shares part of an original hit ---
+# The writer covered only part of an original hit; the rest joined the next
+# words into another hit. It neither contains the original hit nor is part of
+# it, but it shares at least two characters with it, so it is a leftover.
+
+
+def _overlap_engine(words: dict, regex: dict | None = None):
+    return build_engine(
+        [RegexRule(name=n, pattern=p, flags=0) for n, p in (regex or {}).items()],
+        [WordlistRule(category=c, terms=t, case_sensitive=True) for c, t in words.items()],
+    )
+
+
+def test_partial_overlap_with_wordlist_term_counts():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _overlap_engine({"SPONSOR": ["Acme Pharma", "Pharma Zeta"]})
+    out = "Sponsor [SPONSOR] Pharma Zeta visit"
+    assert leftover_hits_in_unit(out, engine=engine, labels=["[SPONSOR]"], known=["Acme Pharma"]) == ["Pharma Zeta"]
+
+
+def test_partial_overlap_with_pattern_counts():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _overlap_engine({}, {"PERSON": r"[A-Z][a-z]+ [A-Z][a-z]+"})
+    out = "investigator: [PERSON] Jane Watson, signed"
+    assert leftover_hits_in_unit(out, engine=engine, labels=["[PERSON]"], known=["Mary Jane"]) == ["Jane Watson"]
+
+
+def test_partial_overlap_cjk_counts():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _overlap_engine({"SPONSOR": ["星辰海医药"], "SITE": ["医药大学"]})
+    out = "合作单位 [SPONSOR]医药大学附属医院"
+    assert leftover_hits_in_unit(out, engine=engine, labels=["[SPONSOR]"], known=["星辰海医药"]) == ["医药大学"]
+
+
+def test_partial_overlap_docx_end_to_end(tmp_path: Path):
+    src = tmp_path / "v1.docx"
+    doc = Document()
+    doc.add_paragraph("Sponsor Acme Pharma Zeta visit")
+    doc.save(str(src))
+    engine = _overlap_engine({"SPONSOR": ["Acme Pharma", "Pharma Zeta"]})
+    scan = scan_path(src, engine)
+    assert [h.text for h in scan.hits] == ["Acme Pharma"]
+    for hit in scan.hits:
+        hit.end = hit.start + len("Acme")  # the writer covers only "Acme"
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error and "写出后仍可见" in res.error
+    assert not any((tmp_path / "out").glob("*.docx"))
+
+
+def test_no_shared_text_is_still_not_a_leftover():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    # Removing "Acme Pharma" joins "Subject" and "001"; nothing shared.
+    engine = _overlap_engine({"SPONSOR": ["Acme Pharma"]}, {"SUBJECT": r"Subject\s+\d{3}"})
+    assert leftover_hits_in_unit("Subject  001\n[SPONSOR]", engine=engine, labels=["[SPONSOR]"], known=["Acme Pharma"]) == []
+
+
+# --- A tagged PDF whose only leftover is in its hidden tagged text ---
+
+
+def _tagged_pdf(path: Path) -> None:
+    d = pymupdf.open()
+    page = d.new_page()
+    page.insert_text((72, 72), "Sponsor Acme Pharma visit")
+    xref = page.get_contents()[0]
+    body = d.xref_stream(xref)
+    d.update_stream(xref, b"/Span <</ActualText (Sponsor Acme Pharma visit)>> BDC\n" + body + b"\nEMC\n")
+    d.save(str(path))
+    d.close()
+
+
+def test_visible_leftover_in_tagged_pdf_keeps_plain_message(tmp_path: Path):
+    from doc_redactor.verify_output import count_leftovers, tagged_text_only
+
+    # Visible text still has the term: it is an ordinary leftover.
+    src = tmp_path / "tagged.pdf"
+    _tagged_pdf(src)
+    engine = _engine()
+    assert count_leftovers(src, engine=engine) == 1
+    assert not tagged_text_only(src, engine=engine)
+
+
+def test_failed_file_count_matches_top_and_bottom():
+    from types import SimpleNamespace
+
+    from doc_redactor.backpath import failed_file_count
+
+    scans = [
+        SimpleNamespace(path=Path("a.pdf"), status="ok"),
+        SimpleNamespace(path=Path("b.pdf"), status="ok"),
+        SimpleNamespace(path=Path("c.pdf"), status="fail"),
+    ]
+    assert failed_file_count(scans, {}) == 1
+    assert failed_file_count(scans, {"b.pdf": "1\u00a0处写出后仍可见"}) == 2
+    # A scan failure that also has a write error counts once.
+    assert failed_file_count(scans, {"c.pdf": "x", "b.pdf": "y"}) == 2
+
+
+def test_tagged_banner_lines_never_start_with_punctuation():
+    from doc_redactor.backpath import partial_banner
+    from doc_redactor.gui.result_view import NO_LINE_START, wrap_lines
+    from doc_redactor.verify_output import MSG_DELETED_TAIL, MSG_TAGGED_HEAD
+
+    banner = partial_banner([("tagged.pdf", MSG_TAGGED_HEAD.format(n=3) + "，" + MSG_DELETED_TAIL)])
+    for width in range(300, 1000, 37):
+        lines = wrap_lines(banner, width, lambda s: 12 * len(s))
+        assert lines[0].startswith("✕\u00a0tagged.pdf\u00a0没")
+        assert all(line[0] not in NO_LINE_START for line in lines)
