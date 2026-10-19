@@ -63,12 +63,13 @@ class LeaveDecision:
 
 
 def _rule_token(rule) -> tuple:
+    """What decides the hits. Replacement text and short codes are left out:
+    changing only them keeps unchecked hits and just redraws the preview."""
     return (
         rule.name,
         rule.kind,
         rule.pattern or "",
         getattr(rule, "placeholder", "") or "",
-        getattr(rule, "replacement", "") or "",
         bool(getattr(rule, "case_sensitive", False)),
         tuple(getattr(rule, "terms", []) or []),
         tuple(getattr(rule, "examples", []) or []),
