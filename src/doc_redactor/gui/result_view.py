@@ -55,6 +55,7 @@ from doc_redactor.pdf_redactor import (
     placeholder_choice,
     placeholder_rect,
 )
+from doc_redactor.leak_check import MSG_NO_HITS, MSG_NO_HITS_LINE
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan
 
 # Left is the previous page, right is the next page.
@@ -177,6 +178,9 @@ class ResultView:
             s.status == "nohit" or not _has_findings(s) for s in scans
         ):
             nohit_all = True
+        if any(_hf_only_write(s, self.app) for s in scans):
+            # Header/footer removal still writes these files: not "nothing to write".
+            nohit_all = False
 
         head = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         head.pack(fill="x")
@@ -428,7 +432,7 @@ class ResultView:
             label = f"{icon} {scan.path.name}"
             if kind in {"skipped", "unlocated"}:
                 label = f"{icon} {scan.path.name}  {text}"
-            elif kind in {"many", "nowrite"}:
+            elif kind in {"many", "nowrite", "nohit_unwritten"}:
                 label = f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
@@ -483,7 +487,7 @@ class ResultView:
                 body,
                 "—",
                 "这批文件里没有找到要遮的内容",
-                "文件都正常打开了，但规则一处都没命中。下一步：检查规则里的例子是否和这批文件的写法一致，或换一类规则再扫。",
+                "文件都正常打开了，但规则一处都没命中，所以不会写出任何文件，原件也不要当成脱敏件交出去。下一步：检查规则里的例子是否和这批文件的写法一致，或换一类规则再扫。",
                 [("检查规则", self.app.leave_to_rules, True), ("换一批文件", self.app.back_to_files, False)],
                 fonts,
             )
@@ -660,11 +664,22 @@ class ResultView:
                     fonts,
                 )
                 return
+            if _hf_only_write(scan, self.app):
+                _empty_state(
+                    body,
+                    "✓" if self.app.written else "—",
+                    _hf_only_line(self.app),
+                    "所选规则在这个文件里都没有命中，只删除了页眉页脚。"
+                    + ("脱敏件已写出。" if self.app.written else "写出时会生成脱敏件。"),
+                    [("去看规则", self.app.leave_to_rules, False)],
+                    fonts,
+                )
+                return
             _empty_state(
                 body,
                 "—",
                 "没有找到要遮的内容",
-                "所选规则在这个文件里都没有命中。可以检查规则里的例子，或看看这个文件是不是扫描件。",
+                f"所选规则在这个文件里都没有命中。{MSG_NO_HITS_LINE}。可以检查规则里的例子，或看看这个文件是不是扫描件。",
                 [("去看规则", self.app.leave_to_rules, False)],
                 fonts,
             )
@@ -1188,6 +1203,10 @@ class ResultView:
             else:
                 mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
             content = "▇▇▇▇" if self.app.hide_text else hit.text
+            if getattr(hit, "approx", False):
+                # OCR read a look-alike; show what it read so the user can judge.
+                # Screen only: nothing here is written to disk.
+                content = f"近似 {content}"
             loc.insert(
                 "",
                 "end",
@@ -1649,13 +1668,29 @@ def _pdf_fit_notice(scan: FileScan, app) -> str:
     return fit_notice(short_count, blank_count, unlocated)
 
 
+def _hf_only_write(scan: FileScan, app) -> bool:
+    """No hit to replace, but 「去掉页眉页脚」 still writes this file (#34 r3 M1)."""
+    if scan.status == "fail" or scan.enabled_hits or not scan.hf_active:
+        return False
+    key = str(scan.path)
+    return key not in app.write_errors and key not in app.write_notes
+
+
+def _hf_only_line(app) -> str:
+    return "无命中词，已删除页眉页脚并写出" if app.written else "无命中词，将删除页眉页脚并写出"
+
+
 def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
     if scan.status == "fail":
         return "fail", "失败", "bad"
     if str(scan.path) in app.write_errors:
         return "nowrite", "没写出", "bad"
+    if app.write_notes.get(str(scan.path)) == MSG_NO_HITS:
+        return "nohit_unwritten", MSG_NO_HITS, "warn"
     if str(scan.path) in app.write_notes:
         return "skipped", app.write_notes[str(scan.path)], "ok"
+    if _hf_only_write(scan, app):
+        return ("hf_written" if app.written else "hf_only"), _hf_only_line(app), "ok"
     if scan.too_many:
         return "many", "命中偏多", "warn"
     if app.written and scan.enabled_count() > 0:

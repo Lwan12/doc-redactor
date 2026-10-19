@@ -191,32 +191,96 @@ def _term_regex(term: str) -> str:
     return prefix + body + suffix
 
 
-def _wordlist_regex(terms: list[str]) -> str | None:
+def _ocr_term_regex(term: str) -> str:
+    """``_term_regex`` that also accepts one misread character, for OCR text only.
+
+    Tesseract reads a glyph as a look-alike now and then (a fabricated drug name
+    菲替珠单抗 comes back as 菲蔡珠单抗 in a plain 34 px scan). Upscaling,
+    binarising, and chi_sim best do not fix it, and another OCR engine would
+    still read the real name off the image, so the box must be painted anyway.
+    One substitution is allowed when the term has at least four CJK characters
+    or six other characters; shorter terms stay exact so common words survive.
+    """
+    exact = _term_regex(term)
+    letters = [ch for ch in term if not ch.isspace()]
+    cjk = sum(1 for ch in letters if _is_cjk(ch))
+    if cjk >= 4 or (cjk == 0 and len(letters) >= 6):
+        return f"(?:{exact}){{s<=1}}"
+    return exact
+
+
+def _wordlist_regex(terms: list[str], ocr: bool = False) -> str | None:
     usable = [term for term in terms if term and not term.isspace()]
     if not usable:
         return None
     # Longer terms first so a prefix alternative does not consume a longer term.
     ordered = sorted(usable, key=len, reverse=True)
-    return "|".join(f"(?:{_term_regex(term)})" for term in ordered)
+    build = _ocr_term_regex if ocr else _term_regex
+    return "|".join(f"(?:{build(term)})" for term in ordered)
 
 
-def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) -> "RedactionEngine":
+# ``\b`` in a user pattern, ASCII edition: a boundary unless both sides are
+# ASCII word characters. Unicode ``\b`` counts Han as a word character, so
+# ``\bABC-2026-001`` never matched right after Chinese (``受试者ABC-2026-001``).
+_ASCII_BOUNDARY = rf"(?:(?<![{_ASCII_EDGE}])|(?![{_ASCII_EDGE}]))"
+
+
+def ascii_word_boundaries(pattern: str) -> str:
+    """Replace each ``\b`` outside a character class with ``_ASCII_BOUNDARY``.
+
+    ``\\b`` (a literal backslash and b) and ``[\b]`` (backspace) stay as they are.
+    """
+    out: list[str] = []
+    in_class = False
+    index = 0
+    while index < len(pattern):
+        ch = pattern[index]
+        if ch == "\\" and index + 1 < len(pattern):
+            pair = pattern[index : index + 2]
+            out.append(_ASCII_BOUNDARY if pair == "\\b" and not in_class else pair)
+            index += 2
+            continue
+        if in_class:
+            if ch == "]":
+                in_class = False
+        elif ch == "[":
+            in_class = True
+            out.append(ch)
+            index += 1
+            # A ] right after [ or [^ is a literal, not the end of the class.
+            if pattern[index : index + 1] == "^":
+                out.append("^")
+                index += 1
+            if pattern[index : index + 1] == "]":
+                out.append("]")
+                index += 1
+            continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+def build_engine(
+    regex_rules: list[RegexRule], wordlists: list[WordlistRule], ocr: bool = False
+) -> "RedactionEngine":
+    """``ocr=True`` lets long wordlist terms match with one misread character."""
     recognizers: list[PatternRecognizer] = []
     for rule in regex_rules:
+        pattern = ascii_word_boundaries(rule.pattern)
         try:
-            re.compile(rule.pattern, flags=rule.flags)
+            re.compile(pattern, flags=rule.flags)
         except re.error as exc:
             raise ValueError(f"匹配写法 {rule.name} 无法编译: {exc}") from exc
         recognizers.append(
             PatternRecognizer(
                 supported_entity=rule.name,
                 name=rule.name,
-                patterns=[Pattern(name=rule.name, regex=rule.pattern, score=1.0)],
+                patterns=[Pattern(name=rule.name, regex=pattern, score=1.0)],
                 global_regex_flags=rule.flags,
             )
         )
     for rule in wordlists:
-        pattern = _wordlist_regex(rule.terms)
+        pattern = _wordlist_regex(rule.terms, ocr=ocr)
         if pattern is None:
             continue
         flags = re.DOTALL | re.MULTILINE
@@ -251,7 +315,12 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
         context_aware_enhancer=_PassthroughEnhancer(),
     )
     order = [rule.name for rule in regex_rules] + [rule.category for rule in wordlists]
-    return RedactionEngine(analyzer, _replacements_from_rules(regex_rules, wordlists), order)
+    engine = RedactionEngine(analyzer, _replacements_from_rules(regex_rules, wordlists), order)
+    if ocr:
+        engine._ocr = engine
+    else:
+        engine._ocr_rules = (list(regex_rules), list(wordlists))
+    return engine
 
 
 class RedactionEngine:
@@ -264,6 +333,30 @@ class RedactionEngine:
         self.analyzer = analyzer
         self.replacements = dict(replacements or {})
         self.category_order = list(category_order or [])
+        self._ocr: RedactionEngine | None = None
+        self._ocr_rules: tuple[list[RegexRule], list[WordlistRule]] | None = None
+
+    def for_ocr(self) -> "RedactionEngine":
+        """The engine used on OCR text: same rules, long terms forgive one misread character."""
+        if self._ocr is None:
+            if self._ocr_rules is None:
+                return self
+            self._ocr = build_engine(*self._ocr_rules, ocr=True)
+        return self._ocr
+
+    def is_approximate_ocr_match(self, text: str) -> bool:
+        """True when ``text`` (what OCR read for one hit) is only a near match.
+
+        The exact rules (this engine, not ``for_ocr``) must cover the whole
+        text; otherwise the hit came from the one-misread-character allowance
+        and the screen marks it 近似 (review M34-2).
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        lead = len(text) - len(text.lstrip())
+        end = lead + len(stripped)
+        return not any(hit.start <= lead and hit.end >= end for hit in self.find_hits(text))
 
     def label(self, category: str) -> str:
         return redaction_label(category, self.replacements)

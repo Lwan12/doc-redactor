@@ -57,8 +57,13 @@ def analyze_image_entities(image: Image.Image, engine: RedactionEngine) -> list[
             }
         else:
             item["boxes"].append(rect)
+    ocr_text = getattr(analyzer, "last_ocr_text", "") or ""
     for item in grouped.values():
-        item["text"] = _ocr_crop(prepared, item["boxes"][0]) or item["category"]
+        # What OCR read for this hit. Kept in memory for the screen only: the
+        # hit list and reports carry category counts, never this text.
+        read = ocr_text[item["start"] : item["end"]].strip()
+        item["text"] = read or _ocr_crop(prepared, item["boxes"][0]) or item["category"]
+        item["approx"] = engine.is_approximate_ocr_match(read) if read else False
     return list(grouped.values())
 
 
@@ -81,10 +86,21 @@ def _build_image_analyzer(engine: RedactionEngine):
     os.environ.setdefault("MPLBACKEND", "Agg")
     from presidio_image_redactor import ImageAnalyzerEngine, TesseractOCR
 
-    return ImageAnalyzerEngine(
-        analyzer_engine=engine.analyzer,
+    analyzer = ImageAnalyzerEngine(
+        # OCR text forgives one misread character in long terms (see engine).
+        analyzer_engine=engine.for_ocr().analyzer,
         ocr=TesseractOCR(),
     )
+    # Keep the text the rules ran on, so a hit can show what OCR read.
+    joined = analyzer.ocr.get_text_from_ocr_dict
+
+    def remember(ocr_result, *args, **kwargs):
+        text = joined(ocr_result, *args, **kwargs)
+        analyzer.last_ocr_text = text
+        return text
+
+    analyzer.ocr.get_text_from_ocr_dict = remember
+    return analyzer
 
 
 def _ocr_crop(image: Image.Image, box: tuple[int, int, int, int]) -> str:

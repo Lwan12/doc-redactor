@@ -74,7 +74,7 @@ Expand-Archive .\doc-redactor-windows.zip -DestinationPath "$env:USERPROFILE\app
 ```yaml
 regex:
   - name: PROJECT_ID
-    pattern: '\bABC-\d{4}-\d{3}\b'
+    pattern: '(?<![A-Za-z0-9])ABC-\d{4}-\d{3}(?![A-Za-z0-9])'
     flags: ""
     replacement: "[PROTOCOL]"
 wordlists:
@@ -91,6 +91,8 @@ wordlists:
 - 下面的键名只出现在规则文件里。`regex` 可增可删。每条有 `name`、`pattern`、`flags`，以及可选的 `replacement`。`name` 就是报告里的类别。`flags` 可以省略，也可以写成 `IGNORECASE`，或用 `|` / 列表组合 `MULTILINE`、`DOTALL`。
 - `wordlists` 可增可删。每条有 `path`、`case_sensitive`、`category`，以及可选的 `replacement`。`case_sensitive: false` 时忽略大小写。
 - `replacement` 是写入文件的占位符。同一类所有命中都换成这一串，不编号。缺省（旧文件没有这个字段也可以）按类别走默认表：`PROJECT_ID` → `[PROTOCOL]`，`SPONSOR` → `[SPONSOR]`，`DRUG` → `[STUDY DRUG]`，`NCT` → `[NCT ID]`，方案号清单和「字母加数字」→ `[PROTOCOL NO]`，邮箱 → `[EMAIL]`，手机号 → `[PHONE]`。其它类别 → `[REDACTED:类别]`。
+- 编号两边的边界请照上面的写法用 `(?<![A-Za-z0-9])…(?![A-Za-z0-9])`。Python 的 `\b` 把汉字也算作单词字符，编号紧挨中文（如「受试者ABC-2026-001」）时不算边界，会整串漏掉。为防照网上的写法踩坑，工具会把规则里的 `\b` 自动换成「两边不同时是英文字母、数字或下划线」，`[\b]` 和 `\\b` 不动。
+- 图片和扫描件里的字由 tesseract 识别。识别偶尔会把一个字认成形近字，所以只在识别出的文字上，词表里 4 个汉字以上、或不含汉字且 6 个字符以上的词允许错一个字。这条也管词表里的编号（如 `HT-2026-0815` 会连带遮住 `HT-2026-0816`）；不到 4 个汉字的词、含汉字但不到 4 个的词、正则规则（含编号规则）不放宽，按原样匹配。代价是和词表词只差一个字的别的词（同类药名、另一家医院）也会被遮。这类近似命中在结果页「内容」栏前面标「近似」，后面是 OCR 实际读出的字；这几个字只在本机窗口里临时显示，不写进任何文件，也不进命中清单。近似命中和其他命中一样默认勾选，可以取消。
 - 词表一行一个。空行忽略。`.csv` 取第一列，不要表头。
 - 相对路径相对于规则文件所在目录，不相对于当前工作目录。
 
@@ -107,6 +109,10 @@ python -m doc_redactor samples/sample.docx samples/sample.pdf samples/sample.png
 
 - `out/<文件名>.redacted.<原扩展名>`
 - `out/<文件名>.report.json`
+
+整份文件一处命中都没有时，不写出这个文件，也不写报告，并在错误输出里提示「整份文件没有找到要遮的内容，没有写出……」，退出码为 1，免得把原件当成脱敏件交出去。
+
+写出后还有一道复核：换几种读法（Word 的全部 XML 文字和属性、内层压缩包；PDF 的整页文字、链接、页标签、图层名和全部字符串对象）把输出再读一遍，任何一种读法还能读出命中，就删掉这个输出、提示「写出后复核：换一种读法仍能读出 N 处」，不放行。用户在界面上取消勾选的那几处不算。
 
 报告只写「类别 → 次数」，例如 `{"DRUG": 1, "PROJECT_ID": 2, "SPONSOR": 1}`。里面没有命中的原文。同一输出目录里，主文件名相同的输入会共用 `report.json` 这个名字，后写的会盖住先写的。
 
@@ -204,7 +210,9 @@ pyinstaller --noconfirm --clean --distpath dist --workpath build/pyi doc-redacto
 TESSERACT_CMD=/path/to/tesseract PYTHONPATH=src pytest
 ```
 
-覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run、文本框、简单域、内容控件、超链接、修订插入与删除，断言直接读输出 XML）、PDF 文本删除（含文档属性、XMP、批注、书签、表单、附件里不再留下原词）并写入占位符（放不下会缩小或换成短码，不再截成半截）、报告不含原文也不含占位符、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分、无 replacement 字段走默认表）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。同一类多处命中写成同一个占位符，不编号。
+覆盖规则加载、词表大小写、docx（正文、表格、嵌套表格、页眉页脚、跨 run、文本框、简单域、内容控件、超链接、修订插入与删除，断言直接读输出 XML）、PDF 文本删除（含文档属性、XMP、批注、书签、表单、附件里不再留下原词）并写入占位符（放不下会缩小或换成短码，不再截成半截）、报告不含原文也不含占位符、脱敏后再次 OCR 确认原词不可读，以及规则新增/导入（重名跳过、旧 yaml 保留大小写、缺省不区分、无 replacement 字段走默认表）、撤销 10 分钟、常用库 7 条（方案号清单 + 字母加数字门控）、照样写、命中过多阈值（测试框 20/21、单文件 500/501）、词表重复词、取消勾选后写出数一致。
+
+出厂门禁（`tests/test_ai_read_gate.py`，CI 的 `ai-read-gate` 作业里必过）：`tools/ai_gate/make_samples.py` 生成一批编造样本（PDF 的花样文字、隐藏处、增量保存、带标签、整页图片的扫描件；Word 的正文和隐藏处、替代文字、嵌入对象、不显眼处），经命令行和界面两条路写出，再用 AI 程序最常用的读法读输出：PDF 用 PyMuPDF、pymupdf4llm（遇到扫描图用 RapidOCR 看图）和 pdftotext，Word 用 python-docx（含 core 属性）和 pandoc。任何一种读法读出 `tools/ai_gate/words.txt` 里的原词，或解析器出错，测试失败。CI 作业装齐这五种并设 `AI_GATE_STRICT=1`，缺一种也算失败；本地和 Windows 的测试步骤里没装的读法跳过。门禁要的额外包在 `requirements-gate.txt`（软件本身不依赖，也不打进包），pdftotext 来自 poppler-utils。本地单独跑：`python tools/ai_gate/make_samples.py in && python -m doc_redactor in/* -r tools/ai_gate/rules.yaml -o out && python tools/ai_gate/read_outputs.py out --strict`。Word 文档属性的清理在另一个改动里，样本暂不含。
 
 ## 限制
 

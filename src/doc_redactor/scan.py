@@ -22,6 +22,7 @@ from doc_redactor.docx_redactor import (
 )
 from doc_redactor import header_footer as hf
 from doc_redactor.engine import Hit, RedactionEngine, counts_from_categories, merge_counts, redaction_label
+from doc_redactor.leak_check import MSG_NO_HITS, LeakedText, gate_output
 from doc_redactor.image_redactor import (
     analyze_image_entities,
     is_raster_suffix,
@@ -119,6 +120,8 @@ class LocatedHit:
     boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
     rects: list[tuple[float, float, float, float]] = field(default_factory=list)
     page: int = 0
+    # OCR hit that only matched with one misread character (shown as 近似).
+    approx: bool = False
     # Set when the hit lies in a header/footer block that 「去掉页眉页脚」 finds.
     hf_role: str = ""
     # Which way that block was found (tag / sign / repeat / word).
@@ -416,7 +419,9 @@ def write_scans(
             )
             continue
         if not scan.will_write():
-            written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True))
+            # No hit at all: say so, so the original is not taken for a redacted copy.
+            note = MSG_NO_HITS if not scan.hits else None
+            written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, note=note))
             continue
         dest = destination_for(scan.path, destination)
         if dest.exists() and not overwrite:
@@ -461,6 +466,20 @@ def write_scans(
                 WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=problem[1])
             )
             continue
+        if engine is not None and scan.kind in (KIND_WORD, KIND_PDF):
+            labels = set(mapping.values()) | {engine.label(hit.category) for hit in scan.hits}
+            labels |= {redaction_label(hit.category) for hit in scan.hits}
+            try:
+                gate_output(
+                    dest,
+                    engine,
+                    kept=[hit.text for hit in scan.hits if not hit.enabled],
+                    labels=sorted(labels),
+                    source=scan.path,
+                )
+            except LeakedText as exc:
+                written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
+                continue
         if dest.stem == f"{scan.path.stem}.redacted":
             report_path = destination / f"{scan.path.stem}.report.json"
         else:
@@ -654,6 +673,7 @@ def _scan_docx_media(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
                     hit_id=ids.next(),
                     category=entity["category"],
                     text=entity["text"],
+                    approx=bool(entity.get("approx")),
                     location=f"内嵌图 {media_index} · 图内 第 {_row_of(top)} 行",
                     unit=f"media:{name}",
                     boxes=list(entity["boxes"]),
@@ -753,6 +773,7 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                         hit_id=ids.next(),
                         category=entity["category"],
                         text=entity["text"],
+                        approx=bool(entity.get("approx")),
                         location=f"第 {page.number + 1} 页图 {image_index} · 图内 第 {_row_of(top)} 行",
                         unit=f"pdfimg:{xref}",
                         boxes=list(entity["boxes"]),
@@ -775,6 +796,7 @@ def _scan_image_file(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
                 hit_id=ids.next(),
                 category=entity["category"],
                 text=entity["text"],
+                approx=bool(entity.get("approx")),
                 location=f"图内 第 {_row_of(top)} 行",
                 unit="image",
                 boxes=list(entity["boxes"]),
