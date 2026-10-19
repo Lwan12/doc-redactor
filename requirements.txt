@@ -7,5 +7,6 @@ pytesseract==0.3.13
 pillow==12.3.0
 reportlab==5.0.1
 pytest==9.1.1
+pypandoc-binary==1.17
 pyinstaller==6.22.3
 tkinterdnd2==0.6.4
