@@ -199,7 +199,7 @@ def _extract(path: Path) -> tuple[str, str]:
     finally:
         document.close()
     proc = subprocess.run(
-        ["pdftotext", "-layout", str(path), "-"],
+        ["pdftotext", "-enc", "UTF-8", "-layout", str(path), "-"],
         check=True,
         capture_output=True,
     )

@@ -413,7 +413,7 @@ def _extract(path: Path) -> tuple[str, str]:
         mupdf_text = "\n".join(page.get_text("text") for page in document)
     finally:
         document.close()
-    proc = subprocess.run(["pdftotext", str(path), "-"], check=True, capture_output=True)
+    proc = subprocess.run(["pdftotext", "-enc", "UTF-8", str(path), "-"], check=True, capture_output=True)
     return mupdf_text, proc.stdout.decode("utf-8", errors="replace")
 
 
