@@ -27,8 +27,11 @@ from doc_redactor.pdf_redactor import (
     UnlocatedText,
     append_legend,
     clear_pdf_hidden,
+    find_page_hits,
     locate_text_hits,
     legend_lines,
+    page_textpage,
+    prepare_pdf,
     redact_text_placeholders,
 )
 from doc_redactor.tesseract_cmd import require_tesseract
@@ -477,14 +480,14 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
+        prepare_pdf(document)
         pages: list[list[str]] = []
         for page_index, page in enumerate(document):
-            flags = pymupdf.TEXTFLAGS_TEXT
-            textpage = page.get_textpage(flags=flags)
+            textpage = page_textpage(page)
             text = page.get_text("text", textpage=textpage)
             lines = text.splitlines()
             pages.append(lines)
-            found = list(engine.find_hits(text))
+            found = find_page_hits(engine, text)
             located = locate_text_hits(page, found, textpage)
             for hit, rects in zip(found, located):
                 if not rects:
@@ -647,6 +650,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
+        prepare_pdf(document)
         order = list(getattr(engine, "category_order", []) or [])
         items = []
         for hit in scan.enabled_hits:
