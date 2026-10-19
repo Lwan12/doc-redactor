@@ -328,7 +328,9 @@ def write_scans(
                 pass
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
             continue
-        leftover = _leftovers_after_write(scan, dest, mapping, engine)
+        # Unlocated files were skipped above, so a leftover here is never one
+        # of those hits counted twice.
+        leftover = _leftovers_after_write(scan, dest, mapping, engine, counts)
         if leftover:
             try:
                 dest.unlink(missing_ok=True)
@@ -356,7 +358,7 @@ def write_scans(
     return written
 
 
-def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], engine) -> int:
+def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], engine, counts=None) -> int:
     if scan.kind not in (KIND_WORD, KIND_PDF):
         return 0
     labels = set(mapping.values()) | {redaction_label(hit.category) for hit in scan.hits}
@@ -368,6 +370,7 @@ def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], 
         targets=[hit.text for hit in scan.enabled_hits],
         kept=[hit.text for hit in scan.hits if not hit.enabled],
         labels=labels,
+        short_codes=int(getattr(counts, "short_count", 0) or 0) > 0,
     )
 
 

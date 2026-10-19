@@ -120,3 +120,92 @@ def test_cli_leak_exits_nonzero_and_deletes(tmp_path: Path, monkeypatch, capsys)
     assert "写出后仍可见" in capsys.readouterr().err
     assert not (outdir / "in.redacted.docx").exists()
     assert not (outdir / "in.report.json").exists()
+
+
+def _short_code_pdf(path: Path) -> None:
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Sponsor SP and Fictizumab", fontsize=11)
+    doc.save(str(path))
+    doc.close()
+
+
+def _short_code_engine():
+    # "SP" is narrow, so the writer falls back to the short code [SP] and adds
+    # a legend page. Neither the code nor the legend is original text.
+    return build_engine([], [WordlistRule(category="SPONSOR", terms=["SP"], case_sensitive=True)])
+
+
+def test_short_code_and_legend_are_not_leftovers(tmp_path: Path):
+    src = tmp_path / "s.pdf"
+    _short_code_pdf(src)
+    engine = _short_code_engine()
+    scan = scan_path(src, engine)
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error is None and res.dest is not None and res.dest.is_file()
+    assert res.short_count == 1
+
+
+def test_cli_short_code_is_not_a_leftover(tmp_path: Path):
+    from doc_redactor.verify_output import count_leftovers
+    from doc_redactor.pdf_redactor import redact_pdf
+
+    src = tmp_path / "s.pdf"
+    _short_code_pdf(src)
+    engine = _short_code_engine()
+    out = tmp_path / "s.redacted.pdf"
+    counts = redact_pdf(src, out, engine)
+    assert counts.short_count == 1
+    labels = {engine.label(category) for category in counts}
+    assert count_leftovers(out, engine=engine, labels=labels, short_codes=True) == 0
+    # A real leftover is still found on a page that also has short codes.
+    assert count_leftovers(src, engine=engine, labels=labels, short_codes=True) == 1
+
+
+def test_cli_leak_blocks_only_that_file(tmp_path: Path, monkeypatch, capsys):
+    leak = tmp_path / "leak.docx"
+    doc = Document()
+    doc.add_paragraph("Project ABC-2026-001")
+    doc.save(str(leak))
+    ok = tmp_path / "ok.pdf"
+    _pdf(ok)
+    monkeypatch.setattr(
+        docx_redactor, "_redact_paragraph", lambda p, e: [h.category for h in e.find_hits(p.text)]
+    )
+    outdir = tmp_path / "out"
+    code = main([str(leak), str(ok), "-r", str(RULES), "-o", str(outdir)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "leak.docx: 1 处写出后仍可见" in err
+    assert "错误" not in err
+    assert not (outdir / "leak.redacted.docx").exists()
+    assert (outdir / "ok.redacted.pdf").is_file()
+
+
+def test_unlocated_file_is_blocked_once_not_rechecked(tmp_path: Path, monkeypatch):
+    src = tmp_path / "a.pdf"
+    _pdf(src)
+    engine = _engine()
+    scan = scan_path(src, engine)
+    scan.unlocated_count = 2
+    calls = []
+    monkeypatch.setattr(scan_mod, "count_leftovers", lambda *a, **k: calls.append(1) or 0)
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error and "2 处无法定位" in res.error
+    assert "写出后仍可见" not in res.error
+    assert calls == []
+    assert not any((tmp_path / "out").glob("*.pdf"))
+
+
+def test_cli_unlocated_reports_only_unlocated(tmp_path: Path, monkeypatch, capsys):
+    import doc_redactor.pdf_redactor as pdf_redactor
+
+    src = tmp_path / "in.pdf"
+    _pdf(src)
+    monkeypatch.setattr(pdf_redactor, "locate_text_hits", lambda page, found, tp: [[] for _ in found])
+    outdir = tmp_path / "out"
+    code = main([str(src), "-r", str(RULES), "-o", str(outdir)])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "无法定位" in err and "写出后仍可见" not in err
+    assert not (outdir / "in.redacted.pdf").exists()
