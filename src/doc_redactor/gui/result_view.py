@@ -989,6 +989,10 @@ class ResultView:
             else:
                 mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
             content = "▇▇▇▇" if self.app.hide_text else hit.text
+            if getattr(hit, "approx", False):
+                # OCR read a look-alike; show what it read so the user can judge
+                # (文案待前端定). Screen only: nothing here is written to disk.
+                content = f"近似 {content}"
             loc.insert(
                 "",
                 "end",

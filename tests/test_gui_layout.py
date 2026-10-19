@@ -1040,3 +1040,51 @@ def test_no_hit_file_after_write_is_not_shown_as_written(gui):
     copy = _visible_copy(app.root)
     assert line in copy
     assert "之前已写出" not in copy
+
+
+def _tree_values(root) -> str:
+    from tkinter import ttk
+
+    out = []
+    for node in _walk(root):
+        if isinstance(node, ttk.Treeview):
+            out += [" | ".join(str(v) for v in node.item(item, "values")) for item in node.get_children()]
+    return "\n".join(out)
+
+
+def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
+    """M34-2：近似命中标「近似」并显示 OCR 读出的字；这几个字不进命中清单（文案待前端定）。"""
+    import json
+
+    from doc_redactor.backpath import hit_list_payload
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    hit = LocatedHit(
+        hit_id=1, category="DRUG", text="Fictlzumab", location="第 1 页图 1 · 图内 第 1 行",
+        unit="pdfimg:5", boxes=[(10, 10, 100, 20)], page=0, approx=True,
+    )
+    exact = LocatedHit(
+        hit_id=2, category="DRUG", text="Fictizumab", location="第 1 页图 1 · 图内 第 2 行",
+        unit="pdfimg:5", boxes=[(10, 40, 100, 20)], page=0,
+    )
+    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit, exact], pages=[[""]])
+    app = gui
+    app.scans = [scan]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    copy = _tree_values(app.root)
+    assert "近似 Fictlzumab" in copy
+    assert copy.count("近似") == 1
+    payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
+    assert "Fictlzumab" not in payload and "近似" not in payload
+    app.hide_text = True
+    app.show("result")
+    _settle(app)
+    hidden = _tree_values(app.root)
+    assert "近似" in hidden and "Fictlzumab" not in hidden

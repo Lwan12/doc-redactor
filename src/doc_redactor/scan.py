@@ -114,6 +114,8 @@ class LocatedHit:
     boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
     rects: list[tuple[float, float, float, float]] = field(default_factory=list)
     page: int = 0
+    # OCR hit that only matched with one misread character (shown as 近似).
+    approx: bool = False
 
 
 @dataclass
@@ -513,6 +515,7 @@ def _scan_docx_media(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
                     hit_id=ids.next(),
                     category=entity["category"],
                     text=entity["text"],
+                    approx=bool(entity.get("approx")),
                     location=f"内嵌图 {media_index} · 图内 第 {_row_of(top)} 行",
                     unit=f"media:{name}",
                     boxes=list(entity["boxes"]),
@@ -588,6 +591,7 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                         hit_id=ids.next(),
                         category=entity["category"],
                         text=entity["text"],
+                        approx=bool(entity.get("approx")),
                         location=f"第 {page.number + 1} 页图 {image_index} · 图内 第 {_row_of(top)} 行",
                         unit=f"pdfimg:{xref}",
                         boxes=list(entity["boxes"]),
@@ -610,6 +614,7 @@ def _scan_image_file(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
                 hit_id=ids.next(),
                 category=entity["category"],
                 text=entity["text"],
+                approx=bool(entity.get("approx")),
                 location=f"图内 第 {_row_of(top)} 行",
                 unit="image",
                 boxes=list(entity["boxes"]),

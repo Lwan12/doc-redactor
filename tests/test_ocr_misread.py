@@ -102,3 +102,40 @@ def test_misread_drug_in_scanned_pdf_is_painted(tmp_path: Path):
     # 认错的近似词也不能留下：放宽后的 OCR 匹配读整张输出图，药名一处都找不到。
     assert [h for h in engine.for_ocr().find_hits(text) if h.category == "DRUG"] == []
     assert "星辰海" not in flat
+
+
+# --- M34-2：近似命中要标出来，并显示 OCR 实际读出的字（只在界面临时显示） -----------
+
+MISREAD = "Fictlzumab"  # 编造药名 Fictizumab 错了一个字母
+
+
+def test_engine_tells_approximate_from_exact():
+    engine = _engine()
+    assert engine.is_approximate_ocr_match("Fictizumab") is False
+    assert engine.is_approximate_ocr_match(MISREAD) is True
+    assert engine.is_approximate_ocr_match("菲 蔡 珠 单 抗") is True
+
+
+def _dejavu() -> str | None:
+    for path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "C:/Windows/Fonts/arial.ttf"):
+        if Path(path).is_file():
+            return path
+    return None
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None and sys.platform != "win32", reason="需要 tesseract")
+def test_image_entity_marks_approximate_and_keeps_what_ocr_read():
+    from doc_redactor.image_redactor import analyze_image_entities
+
+    font = _dejavu()
+    if font is None:
+        pytest.skip("需要 DejaVu 或 Arial 字体")
+    image = Image.new("RGB", (1400, 260), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((40, 30), f"Drug {MISREAD} tablets", font=ImageFont.truetype(font, 56), fill="black")
+    draw.text((40, 140), "Control Fictizumab tablets", font=ImageFont.truetype(font, 56), fill="black")
+    entities = analyze_image_entities(image, _engine())
+    by_text = {entity["text"]: entity for entity in entities}
+    assert MISREAD in by_text, list(by_text)
+    assert by_text[MISREAD]["approx"] is True
+    assert by_text["Fictizumab"]["approx"] is False
