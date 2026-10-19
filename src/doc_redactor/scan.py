@@ -644,12 +644,13 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan, r
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
-        prepare_pdf(document)
         plan = None
         if remove_hf:
+            # Before prepare_pdf: it drops the /Pagination artifact tags.
             plan = hf.identify_pdf(document)
             scan.hf_plan = plan
             scan.hf_route = plan.route
+        prepare_pdf(document)
         pages: list[list[str]] = []
         for page_index, page in enumerate(document):
             textpage = page_textpage(page)
@@ -846,11 +847,12 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
-        prepare_pdf(document)
         if scan.hf_active:
             # Tags and the signing line always; blocks found by repetition
             # only after the user confirmed this file (产品 10-19, 选 b).
+            # Before prepare_pdf, which drops the /Pagination artifact tags.
             hf.apply_pdf(document, scan.hf_write_plan())
+        prepare_pdf(document)
         order = list(getattr(engine, "category_order", []) or [])
         items = []
         for hit in scan.enabled_hits:
