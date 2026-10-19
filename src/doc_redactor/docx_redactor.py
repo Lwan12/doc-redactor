@@ -517,6 +517,7 @@ def finish_document(document) -> None:
     _rename_custom_styles(document)
     _drop_embedded_objects(document)
     _drop_unscannable(document)
+    anonymize_authors(document)
 
 
 _STYLE_REFS = ("pStyle", "rStyle", "tblStyle", "basedOn", "next", "link", "numStyleLink", "styleLink")
@@ -549,6 +550,53 @@ def _rename_custom_styles(document) -> None:
                 value = node.get(_W + "val")
                 if value in ids:
                     node.set(_W + "val", ids[value])
+
+
+# Every revision mark and comment gets this name, whether or not a rule hit
+# the original: a person's name is sensitive in itself.
+FIXED_AUTHOR = "Author"
+_W15 = "{http://schemas.microsoft.com/office/word/2012/wordml}"
+# (attribute, namespaces it is read in). w:author sits on w:ins, w:del,
+# w:moveFrom/To, w:*PrChange, w:cellIns/Del/Merge, w:numberingChange and
+# w:comment; w:initials on w:comment; w15:author on people.xml's w15:person.
+_AUTHOR_ATTRIBUTES = (_W + "author", _W + "initials", _W15 + "author")
+
+
+def anonymize_authors(document) -> None:
+    """Set every revision and comment author (and comment initials) to ``FIXED_AUTHOR``.
+
+    Covers every XML part under ``/word/``: the body, headers, footers,
+    footnotes, endnotes, comments, styles and numbering (format changes),
+    the glossary, and ``people.xml``. python-docx keeps some of these as raw
+    bytes (``people.xml``); those are parsed, edited and stored back.
+    ``w15:presenceInfo`` (the account id, often an e-mail address) is removed.
+    """
+    from lxml import etree
+
+    for part in document.part.package.iter_parts():
+        name = str(part.partname)
+        if not name.startswith("/word/") or not name.endswith(".xml"):
+            continue
+        element = getattr(part, "_element", None)
+        parsed = element is not None
+        if not parsed:
+            try:
+                element = etree.fromstring(part.blob)
+            except (etree.XMLSyntaxError, ValueError, AttributeError):
+                continue
+        changed = False
+        for node in element.iter():
+            if not isinstance(node.tag, str):
+                continue
+            for attribute in _AUTHOR_ATTRIBUTES:
+                if attribute in node.attrib and node.get(attribute) != FIXED_AUTHOR:
+                    node.set(attribute, FIXED_AUTHOR)
+                    changed = True
+        for node in list(element.iter(_W15 + "presenceInfo")):
+            node.getparent().remove(node)
+            changed = True
+        if changed and not parsed:
+            part._blob = etree.tostring(element, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
 def _drop_unscannable(document) -> None:
