@@ -119,20 +119,6 @@ def test_table_border_touching_a_repeated_rule_keeps_the_rule():
     assert not [e for c in plan.candidates for e in c.elements if e.kind == hf.KIND_LINE]
 
 
-def test_rows_beyond_the_two_outermost_are_not_taken():
-    def draw(page, i):
-        page.insert_text((72, 40), HEADER, fontsize=9)
-        page.insert_text((72, 52), "Acme Pharma", fontsize=9)
-        page.insert_text((72, 64), "Clinical Study Report", fontsize=9)
-        _body(page, i)
-
-    doc = _pdf(5, draw)
-    plan = hf.identify_pdf(doc)
-    # A third repeated row right under two others: the edge band is unclear,
-    # so nothing in it is taken.
-    assert plan.candidates == ()
-
-
 # ---------------------------------------------------------------- S1
 
 

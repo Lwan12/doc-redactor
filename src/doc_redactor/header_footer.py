@@ -71,10 +71,16 @@ TOL_HORIZONTAL = 4.0
 # layers) may hide body content inside them; tags are trusted, repeats not.
 MAX_RULE_THICKNESS = 3.0
 # Repetition is only trusted at the very edge of the page (review M1):
-# at most this many text rows counted from the edge,
+# at most this many text rows counted from the edge, unless a further row is
+# fixed text (identical on every page) or a bare page number (review r2 M2:
+# three-row headers such as company / protocol / version),
 MAX_EDGE_ROWS = 2
-# rows of one header/footer no further apart than this (points),
+# rows of one header/footer no further apart than this (points), or than
+# BAND_GAP_LINES times the shorter of the two row heights, whichever is more:
+# about one blank line, so a 9pt footer may have its page number one empty
+# line below (review r2 M2; a fixed 12pt dropped a row 12.0pt away),
 MAX_BAND_GAP = 12.0
+BAND_GAP_LINES = 1.5
 # and some white space between the header/footer and what follows.
 MIN_BAND_GAP = 1.0
 # A rule with another drawing this close (points) belongs to a table.
@@ -280,27 +286,32 @@ def same_place(a, b, tol_v: float = TOL_VERTICAL, tol_h: float = TOL_HORIZONTAL)
     return any(abs(a[i] - b[i]) <= tol_h for i in (1, 2, 3))
 
 
-def _parity_groups(pages) -> dict[int, set[int]]:
-    groups: dict[int, set[int]] = {0: set(), 1: set()}
+def _page_groups(pages) -> list[set[int]]:
+    """Page sets judged on their own when a cluster misses half of all pages:
+    odd and even pages (S2), each page size such as a landscape section
+    (review r2 M2: its header sits elsewhere), and size and parity together."""
+    groups: dict[tuple, set[int]] = {}
     for page in pages:
-        groups[page.index % 2].add(page.index)
-    return groups
+        size = (round(page.width), round(page.height))
+        for key in (("parity", page.index % 2), ("size", size), ("both", size, page.index % 2)):
+            groups.setdefault(key, set()).add(page.index)
+    return list(groups.values())
 
 
 def _need(count: int, min_pages: int) -> int:
     return max(min_pages, count // 2 + 1)
 
 
-def _kept_pages(found: set[int], total: int, parity: dict[int, set[int]], min_pages: int) -> set[int]:
+def _kept_pages(found: set[int], total: int, groups: list[set[int]], min_pages: int) -> set[int]:
     """Pages of a cluster that count as repeating.
 
-    More than half of all pages (and at least ``min_pages``); otherwise odd and
-    even pages are judged on their own, for different odd/even headers (S2).
+    More than half of all pages (and at least ``min_pages``); otherwise each
+    group of :func:`_page_groups` is judged on its own the same way.
     """
     if len(found) >= _need(total, min_pages):
         return set(found)
     kept: set[int] = set()
-    for group in parity.values():
+    for group in groups:
         mine = found & group
         if group and len(mine) >= _need(len(group), min_pages):
             kept |= mine
@@ -404,13 +415,36 @@ def _table_rule(rule: Element, page: PageLayout, band: set) -> bool:
     return False
 
 
-def edge_band(page: PageLayout, zone: str, accepted: set, covered: set) -> set:
+def _fixed_row(row) -> bool:
+    """Every text in the row is the same on every page (no digits were
+    ignored to match it), or the row is only a page number."""
+    for element in row["items"]:
+        if element.kind != KIND_TEXT:
+            continue
+        collapsed = _SPACES.sub(" ", element.text).strip()
+        if _NUMBER_ONLY.match(collapsed) or _PAGE_PHRASE.fullmatch(collapsed):
+            continue
+        if repeat_text_key(collapsed) != collapsed:
+            return False
+    return True
+
+
+def _band_gap(a: dict, b: dict, lines: float = BAND_GAP_LINES) -> float:
+    """Largest white space allowed between two rows of one header/footer."""
+    height = min(a["bfar"] - a["bnear"], b["bfar"] - b["bnear"])
+    return max(MAX_BAND_GAP, lines * height)
+
+
+def edge_band(page: PageLayout, zone: str, accepted: set, covered: set, *, audit: bool = False) -> set:
     """ids of ``accepted`` elements that form this page's header or footer.
 
     Walks rows from the page edge: every element of a row must repeat (or be
-    covered by tags), at most ``MAX_EDGE_ROWS`` text rows, rows close
-    together, and a gap before what follows. If the row after the band
-    would also qualify, the edge is unclear and nothing is taken.
+    covered by tags), rows about one line apart at most (:func:`_band_gap`),
+    and a gap before what follows. Past ``MAX_EDGE_ROWS`` text rows only
+    fixed rows (:func:`_fixed_row`) go on; the band ends before any other.
+
+    ``audit`` (for :func:`leftover_edge_rows`) drops the row limit and allows
+    twice the spacing, to report what removal might have missed.
     """
     limit = page.height * ZONE_FRACTION
     items = []
@@ -439,11 +473,13 @@ def edge_band(page: PageLayout, zone: str, accepted: set, covered: set) -> set:
             stop = row
             break
         if content:
-            if last_content is not None and row["bnear"] - last_content["bfar"] > MAX_BAND_GAP:
+            lines = BAND_GAP_LINES * (2 if audit else 1)
+            if last_content is not None and row["bnear"] - last_content["bfar"] > _band_gap(last_content, row, lines):
                 stop = row
                 break
-            if text_rows == MAX_EDGE_ROWS:
-                return set()  # a third repeated row: not clearly a header
+            if text_rows >= MAX_EDGE_ROWS and not audit and not _fixed_row(row):
+                stop = row
+                break
             text_rows += 1
             last_content = row
         band.append(row)
@@ -467,7 +503,9 @@ def _is_table_rule(eid: int, page: PageLayout, band: set) -> bool:
     return False
 
 
-def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAGES) -> list[Candidate]:
+def find_repeats(
+    pages, *, exclude: dict | None = None, min_pages: int = MIN_PAGES, audit: bool = False
+) -> list[Candidate]:
     """Things at the same place on more than half the pages (and >= 3 pages),
     in the outermost rows of the page only.
 
@@ -480,13 +518,13 @@ def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAG
     if total < min_pages:
         return []
     exclude = exclude or {}
-    parity = _parity_groups(pages)
+    groups = _page_groups(pages)
     by_index = {page.index: page for page in pages}
 
     def passing(clusters):
         out = []
         for cluster in clusters:
-            kept = _kept_pages(cluster["pages"], total, parity, min_pages)
+            kept = _kept_pages(cluster["pages"], total, groups, min_pages)
             if kept:
                 out.append((cluster, kept))
         return out
@@ -507,14 +545,14 @@ def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAG
         }
         chosen: set = set()
         for zone in (ROLE_HEADER, ROLE_FOOTER):
-            chosen |= edge_band(page, zone, ids, covered)
+            chosen |= edge_band(page, zone, ids, covered, audit=audit)
         keep_ids[index] = {
             (e.kind, e.bbox, e.text) for e in page.items if id(e) in chosen
         }
     by_role: dict[str, list[Element]] = {}
     for cluster, kept in first:
         items = [i for i in cluster["items"] if (i.kind, i.bbox, i.text) in keep_ids.get(i.page, set())]
-        still = _kept_pages({i.page for i in items}, total, parity, min_pages)
+        still = _kept_pages({i.page for i in items}, total, groups, min_pages)
         for element in items:
             if element.page in still:
                 by_role.setdefault(role_for(element, cluster["zone"]), []).append(element)
@@ -522,6 +560,21 @@ def find_repeats(pages, *, exclude: dict | None = None, min_pages: int = MIN_PAG
         _candidate(f"{SOURCE_REPEAT}-{role}", SOURCE_REPEAT, role, items, confirmed=REPEAT_CONFIRMED_BY_DEFAULT)
         for role, items in sorted(by_role.items())
     ]
+
+
+def leftover_edge_rows(document) -> tuple[int, int]:
+    """(text rows, pages) still repeating at the page edges of ``document``.
+
+    For checking a written file (review r2 M2): 「残留」 used to count only
+    glyphs of recognised candidates, so a header nobody recognised showed as
+    0. This looks at the file itself, with looser rules than removal
+    (:func:`edge_band` ``audit``), so it can also count a repeated body row
+    near the edge. Counts only; rotated pages are not read.
+    """
+    layouts = [layout_of(page) for page in document if not page.rotation]
+    found = find_repeats(layouts, audit=True)
+    rows = [(e.page, e.bbox) for c in found for e in c.elements if e.kind == KIND_TEXT]
+    return len(rows), len({page for page, _box in rows})
 
 
 def _candidate(cid: str, source: str, role: str, items, *, confirmed: bool) -> Candidate:
