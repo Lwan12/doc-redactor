@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 from docx import Document
-from docx.table import Table
+from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
 from doc_redactor.engine import Hit, RedactionEngine, merge_counts, redaction_label
@@ -36,14 +36,20 @@ def _redact_container(container, engine: RedactionEngine, counts: dict[str, int]
 
 
 def _redact_table(table: Table, engine: RedactionEngine, counts: dict[str, int]) -> None:
-    seen: set[int] = set()
-    for row in table.rows:
-        for cell in row.cells:
-            marker = id(cell._tc)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            _redact_container(cell, engine, counts)
+    for cell in iter_table_cells(table):
+        _redact_container(cell, engine, counts)
+
+
+def iter_table_cells(table: Table):
+    """Yield each physical ``w:tc`` once, in XML order.
+
+    ``row.cells`` repeats merged cells, and deduping by ``id(cell._tc)`` breaks
+    because lxml proxies are freed and ids reused. Walking ``w:tc`` directly
+    visits every cell exactly once (gridSpan and vMerge included).
+    """
+    for tr in table._tbl.tr_lst:
+        for tc in tr.tc_lst:
+            yield _Cell(tc, table)
 
 
 def _owned_headers_footers(section):
@@ -115,14 +121,8 @@ def _iter_container_paragraphs(container):
 
 
 def _iter_table_paragraphs(table: Table):
-    seen: set[int] = set()
-    for row in table.rows:
-        for cell in row.cells:
-            marker = id(cell._tc)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            yield from _iter_container_paragraphs(cell)
+    for cell in iter_table_cells(table):
+        yield from _iter_container_paragraphs(cell)
 
 
 def apply_hits_to_paragraph(paragraph: Paragraph, hits: list[Hit], replacement_for) -> list[str]:

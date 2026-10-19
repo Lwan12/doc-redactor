@@ -4,7 +4,7 @@ from docx import Document
 
 from doc_redactor.cli import redact_path
 from doc_redactor.config import load_rules
-from doc_redactor.docx_redactor import redact_docx
+from doc_redactor.docx_redactor import iter_table_cells, redact_docx
 from helpers import RULES, assert_report_has_no_secrets
 
 
@@ -62,14 +62,8 @@ def _parts(document):
 def _container_text(container) -> list[str]:
     chunks = [paragraph.text for paragraph in container.paragraphs]
     for table in container.tables:
-        seen = set()
-        for row in table.rows:
-            for cell in row.cells:
-                marker = id(cell._tc)
-                if marker in seen:
-                    continue
-                seen.add(marker)
-                chunks.extend(_container_text(cell))
+        for cell in iter_table_cells(table):
+            chunks.extend(_container_text(cell))
     return chunks
 
 
