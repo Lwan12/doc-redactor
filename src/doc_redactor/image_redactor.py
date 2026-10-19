@@ -233,7 +233,6 @@ class WriteBlocked(ValueError):
     """
 
 
-# 文案待前端定。
 # 没装 Tesseract：说清为什么不写出（图里的字查不了），和怎么办（MSG_NO_OCR_FIX）。
 MSG_NO_OCR = "有 {n} 张图片没法检查：没找到 Tesseract（识别图片文字的程序），查不了图里的字有没有敏感词，所以未写出"
 MSG_NO_OCR_FIX = "装好 Tesseract（带中文 chi_sim 和英文 eng 语言数据）后重新扫描；已经装了的，把环境变量 TESSERACT_CMD 设成 tesseract 程序的路径"

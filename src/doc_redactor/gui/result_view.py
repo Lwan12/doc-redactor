@@ -1519,7 +1519,6 @@ def counts_toward_write(scan, *, written: bool, write_errors: dict) -> bool:
 
 
 MSG_UNWRITTEN = "未写出"
-# 文案待前端定.
 MSG_BLOCKED_TITLE = "有图片没法检查，未写出"
 MSG_LOC_HEADER = "被替换的位置 {n}"
 MSG_LOC_HEADER_UNWRITTEN = "被替换的位置 {n}（另 {m} 处未写出）"
@@ -1662,7 +1661,7 @@ def _blocked_reason(scan) -> str:
 
 
 def _comment_notice(scan: FileScan, app) -> str:
-    """Word comments are deleted on write; say so. Wording 待前端定."""
+    """Word comments are deleted on write; say so."""
     count = int(getattr(scan, "comment_count", 0) or 0)
     if scan.kind != KIND_WORD or count <= 0 or scan.status == "fail" or _blocked_reason(scan):
         return ""

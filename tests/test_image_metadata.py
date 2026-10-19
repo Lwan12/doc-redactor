@@ -556,7 +556,7 @@ def test_missing_tesseract_blocks_pdf_with_inline_image(tmp_path: Path, monkeypa
     _assert_blocked(_inline_pdf(tmp_path), tmp_path, ("Tesseract", "未写出"))
 
 
-# 没装 Tesseract 不写出时，要说清为什么不写出、怎么办（命令行和界面都看）。文案待前端定。
+# 没装 Tesseract 不写出时，要说清为什么不写出、怎么办（命令行和界面都看）。
 NO_OCR_WHY = "图里的字"
 NO_OCR_FIX = ("装好 Tesseract", "TESSERACT_CMD")
 

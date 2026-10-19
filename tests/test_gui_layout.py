@@ -1567,7 +1567,7 @@ def test_word_comment_notice_before_and_after_write(gui):
 
 
 def test_blocked_no_tesseract_says_why_and_what_to_do(gui):
-    """没装 Tesseract：空状态写清为什么不写出、怎么办，不叫用户把图换成普通图片（文案待前端定）。"""
+    """没装 Tesseract：空状态写清为什么不写出、怎么办，不叫用户把图换成普通图片。"""
     from doc_redactor.image_redactor import MSG_NO_OCR
     from doc_redactor.scan import KIND_WORD, FileScan
 
