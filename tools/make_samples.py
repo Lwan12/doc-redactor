@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import parse_xml
 from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -51,6 +52,54 @@ def render_png(path: Path) -> None:
     image.save(path, format="PNG", dpi=(300, 300))
 
 
+_NS = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:v="urn:schemas-microsoft-com:vml"'
+)
+_REV = 'w:author="Sample" w:date="2026-01-01T00:00:00Z"'
+
+
+def _run_xml(text: str) -> str:
+    return f'<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+
+
+def _el(fragment: str):
+    head, _sep, rest = fragment.partition(">")
+    return parse_xml(f"{head} {_NS}>{rest}")
+
+
+def _add_hidden_containers(document) -> None:
+    """Text box, simple field, content control, and tracked changes (all fictional)."""
+    box = f"<w:txbxContent><w:p>{_run_xml('BOX ' + SPONSOR)}</w:p></w:txbxContent>"
+    header = document.sections[0].header.paragraphs[0]._p
+    header.append(
+        _el(
+            "<w:r><mc:AlternateContent>"
+            '<mc:Choice Requires="wps"><w:drawing><wp:anchor><a:graphic>'
+            '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+            f"<wps:wsp><wps:txbx>{box}</wps:txbx></wps:wsp>"
+            "</a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>"
+            f"<mc:Fallback><w:pict><v:shape><v:textbox>{box}</v:textbox></v:shape></w:pict></mc:Fallback>"
+            "</mc:AlternateContent></w:r>"
+        )
+    )
+    p = document.add_paragraph("Field ")._p
+    p.append(_el(f'<w:fldSimple w:instr=" DOCPROPERTY Company ">{_run_xml(SPONSOR)}</w:fldSimple>'))
+    p = document.add_paragraph("Control ")._p
+    p.append(_el(f"<w:sdt><w:sdtPr/><w:sdtContent>{_run_xml(DRUG)}</w:sdtContent></w:sdt>"))
+    p = document.add_paragraph("Revised ")._p
+    p.append(_el(f'<w:ins w:id="901" {_REV}>{_run_xml(PROJECT_ID)}</w:ins>'))
+    p.append(
+        _el(
+            f'<w:del w:id="902" {_REV}><w:r><w:delText xml:space="preserve"> {DRUG}</w:delText></w:r></w:del>'
+        )
+    )
+
+
 def render_docx(path: Path, png: Path) -> None:
     document = Document()
     section = document.sections[0]
@@ -83,6 +132,8 @@ def render_docx(path: Path, png: Path) -> None:
     cell.paragraphs[0].text = f"Site {SPONSOR}"
     nested = cell.add_table(rows=1, cols=1)
     nested.cell(0, 0).text = f"Drug {DRUG}"
+
+    _add_hidden_containers(document)
 
     document.add_picture(str(png))
     path.parent.mkdir(parents=True, exist_ok=True)

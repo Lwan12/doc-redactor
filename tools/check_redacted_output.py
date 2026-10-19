@@ -1,6 +1,6 @@
 """Fail if packaged redaction left fictional source terms in the output.
 
-Docx and PDF checks read extracted text. The png check OCRs with the
+Docx checks read the body, header and footer XML (w:t and w:delText); PDF checks read extracted text. The png check OCRs with the
 tesseract executable passed on the command line (the copy inside the zip),
 not with PATH or TESSERACT_CMD.
 """
@@ -25,35 +25,29 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def _container_text(container) -> list[str]:
-    chunks = [paragraph.text for paragraph in container.paragraphs]
-    for table in container.tables:
-        seen: set[int] = set()
-        for row in table.rows:
-            for cell in row.cells:
-                marker = id(cell._tc)
-                if marker in seen:
-                    continue
-                seen.add(marker)
-                chunks.extend(_container_text(cell))
-    return chunks
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def docx_text(path: Path) -> str:
-    from docx import Document
+    """Text of every w:p in the body, header and footer parts, read from the XML.
 
-    document = Document(str(path))
-    chunks = _container_text(document)
-    for section in document.sections:
-        for part in (
-            section.header,
-            section.footer,
-            section.first_page_header,
-            section.first_page_footer,
-            section.even_page_header,
-            section.even_page_footer,
-        ):
-            chunks.extend(_container_text(part))
+    Includes text boxes, fields, content controls, hyperlinks, tracked
+    insertions (w:t) and tracked deletions (w:delText).
+    """
+    import re
+    import zipfile
+
+    from lxml import etree
+
+    part = re.compile(r"word/(document|header\d*|footer\d*)\.xml$")
+    chunks: list[str] = []
+    with zipfile.ZipFile(path) as archive:
+        for name in archive.namelist():
+            if not part.match(name):
+                continue
+            root = etree.fromstring(archive.read(name))
+            for p in root.iter(_W + "p"):
+                chunks.append("".join(el.text or "" for el in p.iter(_W + "t", _W + "delText")))
     return "\n".join(chunks)
 
 

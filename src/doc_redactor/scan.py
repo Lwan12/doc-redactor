@@ -402,16 +402,23 @@ def _finish(scan: FileScan) -> FileScan:
 def _scan_docx(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> FileScan:
     document = Document(str(path))
     paragraphs: list[str] = []
+    number = 0
     for index, paragraph in enumerate(iter_document_paragraphs(document)):
         text = paragraph.text or ""
         paragraphs.append(text)
-        for hit in engine.find_hits(text):
+        # A tracked deletion comes just before its paragraph and is reported
+        # under that paragraph's number.
+        deleted = paragraph.is_deletion
+        location = f"第 {number + 1} 段 · 修订删除" if deleted else f"第 {number + 1} 段"
+        if not deleted:
+            number += 1
+        for hit in paragraph.find_hits(engine):
             scan.hits.append(
                 LocatedHit(
                     hit_id=ids.next(),
                     category=hit.category,
                     text=hit.text,
-                    location=f"第 {index + 1} 段",
+                    location=location,
                     unit=f"p:{index}",
                     start=hit.start,
                     end=hit.end,
