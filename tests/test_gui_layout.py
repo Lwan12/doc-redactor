@@ -433,6 +433,217 @@ def _walk(widget):
         yield from _walk(child)
 
 
+def _visible_copy(widget) -> str:
+    chunks = []
+    for node in _walk(widget):
+        try:
+            value = node.cget("text")
+        except Exception:
+            continue
+        if isinstance(value, str) and value:
+            chunks.append(value)
+    return "\n".join(chunks)
+
+
+def test_blank_only_result_notice_and_column_wrap(gui):
+    import tkinter as tk
+
+    from doc_redactor.pdf_redactor import MSG_FIT_BLANK
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    app = gui
+    blank = FileScan(
+        path=Path("blank_only.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[
+            LocatedHit(
+                hit_id=1,
+                category="申办方",
+                text="I",
+                location="第 1 页 · 第 1 行",
+                unit="page:0",
+                start=0,
+                end=1,
+                rects=[(72.0, 80.0, 82.0, 88.0)],
+                page=0,
+            )
+        ],
+        pages=[["I"]],
+    )
+    lost = FileScan(
+        path=Path("lost.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[
+            LocatedHit(
+                hit_id=2,
+                category="申办方",
+                text="Acme",
+                location="第 1 页 · 第 1 行",
+                unit="page:0",
+                start=0,
+                end=4,
+                rects=[(72.0, 80.0, 280.0, 110.0)],
+                page=0,
+            )
+        ],
+        pages=[["Acme"]],
+        unlocated_count=2,
+    )
+    app.scans = [blank, lost]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    app.root.update_idletasks()
+    app.root.update()
+
+    notices = []
+    for node in _walk(app.root):
+        if not isinstance(node, tk.Label):
+            continue
+        try:
+            text = node.cget("text")
+        except tk.TclError:
+            continue
+        if "只留了空白" in text or "无法定位" in text:
+            notices.append(node)
+    assert notices
+    assert MSG_FIT_BLANK.format(m=1) in _visible_copy(app.root)
+    assert "2\u00a0处无法定位，未写出" in _visible_copy(app.root)
+    assert "换成短码" not in _visible_copy(app.root)
+    for node in notices:
+        text = node.cget("text")
+        assert "\n" not in text
+        parent_w = node.master.winfo_width()
+        wrap = int(node.cget("wraplength"))
+        assert parent_w > 80
+        assert abs(wrap - (parent_w - 8)) <= 4
+
+
+def test_mixed_unlocated_row_warns_and_write_button_skips_it(gui):
+    """A file with both placed and unplaced hits is warned before writing.
+
+    The write button counts only files that will actually be written.
+    """
+    from tkinter import ttk
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.gui.theme import status_style
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    def _hit(hit_id: int, text: str) -> LocatedHit:
+        return LocatedHit(
+            hit_id=hit_id,
+            category="申办方",
+            text=text,
+            location="第 1 页 · 第 1 行",
+            unit="page:0",
+            start=0,
+            end=len(text),
+            rects=[(72.0, 80.0, 140.0, 94.0)],
+            page=0,
+        )
+
+    kept = FileScan(
+        path=Path("kept.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(1, "Acme")],
+        pages=[["Acme"]],
+    )
+    mixed = FileScan(
+        path=Path("mixed.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(2, "星辰海")],
+        pages=[["星辰海"]],
+        unlocated_count=1,
+    )
+    app = gui
+    app.scans = [kept, mixed]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, text, tag = _scan_status(mixed, app)
+    assert kind == "unlocated"
+    assert tag == "warn"
+    assert text == "1 处无法定位"
+    icon, _label, _color = status_style(kind)
+    assert icon == "⚠"
+
+    labels = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            labels += [node.item(item, "values")[0] for item in node.get_children()]
+    mixed_row = next(row for row in labels if "mixed.pdf" in row)
+    kept_row = next(row for row in labels if "kept.pdf" in row)
+    assert mixed_row.startswith("⚠")
+    assert "mixed.pdf" in mixed_row
+    assert "1 处无法定位" in mixed_row
+    assert mixed_row.index("mixed.pdf") < mixed_row.index("无法定位")
+    assert kept_row.startswith("✓")
+    assert "无法定位" not in kept_row
+
+    buttons = [node.cget("text") for node in _walk(app.root) if isinstance(node, ttk.Button)]
+    assert any(label.startswith("写出 1 个脱敏文件") for label in buttons)
+    assert not any("写出 2 个" in label for label in buttons)
+    write_label = next(label for label in buttons if label.startswith("写出 "))
+    assert "替换 1 处" in write_label
+    assert "替换 2 处" not in write_label
+
+
+def test_pdf_fit_notices_use_the_product_copy(gui):
+    from doc_redactor.pdf_redactor import MSG_FIT_BLANK, MSG_FIT_SHORT, MSG_PDF_WIDTH, MSG_REPL_HINT
+
+    app = gui
+    app.apply_shoot_state("res-pdf")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert MSG_FIT_SHORT.format(n=2) in copy
+    assert MSG_FIT_BLANK.format(m=1) in copy
+    assert "有\u00a02\u00a0处" in copy
+    assert "另有\u00a01\u00a0处" in copy
+    assert MSG_PDF_WIDTH in copy
+    assert "正则" not in copy
+
+    app.apply_shoot_state("rule-placeholder")
+    _settle(app)
+    rules = _visible_copy(app.root)
+    assert MSG_REPL_HINT in rules
+    assert "正则" not in rules
+
+    app.apply_shoot_state("words-list")
+    _settle(app)
+    words = _visible_copy(app.root)
+    assert MSG_REPL_HINT in words
+    assert "正则" not in words
+
+    app.apply_shoot_state("plan-list")
+    _settle(app)
+    plan = _visible_copy(app.root)
+    assert MSG_REPL_HINT in plan
+    assert "正则" not in plan
+
+    app.apply_shoot_state("main-rules")
+    _settle(app)
+    main = _visible_copy(app.root)
+    assert "截断" not in main
+    assert "换成短码" in main
+    assert "正则" not in main
+
+
 def test_skipped_row_puts_the_file_name_before_the_note(gui):
     from tkinter import ttk
 

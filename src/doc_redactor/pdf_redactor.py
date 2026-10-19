@@ -1,8 +1,16 @@
-"""Redact PDF text by deletion, and raster images by OCR plus black boxes."""
+"""Redact PDF text by deletion, and raster images by OCR plus black boxes.
+
+PDF placeholders stay on one line. The full label shrinks down to 6pt.
+If it still does not fit, the category's short code is used. If that does
+not fit either, the box stays blank. A half-written label is never emitted.
+"""
 
 from __future__ import annotations
 
+import difflib
 import io
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pymupdf
@@ -11,10 +19,267 @@ from PIL import Image
 from doc_redactor.engine import Hit, RedactionEngine, merge_counts
 from doc_redactor.image_redactor import redact_image
 
-MIN_PLACEHOLDER_SIZE = 4.0
+MIN_PLACEHOLDER_SIZE = 6.0
+MSG_REPL_HINT = (
+    "PDF 里位置窄时，会先把字缩小；还放不下就换成短码（如 [SP]），并在 PDF 最后加一页说明。Word 里总是写完整的替换文字。"
+)
+# Non-breaking spaces keep the count on the same line as 处. A normal space
+# lets the result column wrap as "2 / 处".
+MSG_FIT_SHORT = "ⓘ 这个 PDF 有\u00a0{n}\u00a0处位置太窄，已换成短码，最后一页有对照说明。"
+MSG_FIT_BLANK = "⚠ 另有\u00a0{m}\u00a0处太窄，连短码也放不下，只留了空白，原文已删除。"
+MSG_UNLOCATED = "{n} 处无法定位，未写出"
+MSG_PDF_WIDTH = "PDF 只能在原来的位置写字，空位和原文一样宽，看的人能看出原文大概多长。"
+LEGEND_TITLE = "替换说明"
+LEGEND_FOOTER = "本页由 doc-redactor 生成，只说明替换文字的意思，不含任何原文。"
+
+# Shared by aliases. The title is the name printed on the legend page.
+_SHORT_GROUPS = (
+    ("[PR]", "项目号", ("PROJECT_ID", "项目号")),
+    ("[PN]", "方案号清单", ("方案号清单", "字母加数字")),
+    ("[SP]", "申办方", ("SPONSOR", "申办方")),
+    ("[SD]", "药名", ("DRUG", "药名")),
+    ("[NCT]", "NCT", ("NCT", "NCT 试验登记号")),
+    ("[EM]", "邮箱", ("EMAIL", "邮箱")),
+    ("[PH]", "手机", ("PHONE", "手机号", "手机号（中国大陆）")),
+)
+_BUILTIN_SHORT = {
+    key: (code, title) for code, title, keys in _SHORT_GROUPS for key in keys
+}
+_CODE_RANK = {code: index for index, (code, _title, _keys) in enumerate(_SHORT_GROUPS)}
+_FONT_INFO: dict[str, dict] = {}
+_HEIGHT_EPSILON = 1e-5
 
 
-def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]:
+class UnlocatedText(ValueError):
+    """Plain text has a hit whose glyphs could not be placed on the page.
+
+    The file must not be written: a partial PDF would keep the original text.
+    ``count`` is the number of such hits. The message does not include them.
+    """
+
+    def __init__(self, count: int) -> None:
+        self.count = int(count)
+        super().__init__(MSG_UNLOCATED.format(n=self.count))
+
+
+class RedactionCounts(dict):
+    """Category counts plus how many boxes used a short code or stayed blank.
+
+    ``json.dumps`` and ``==`` only see the category keys, so a report stays
+    free of the extra tallies.
+    """
+
+    def __init__(self, counts: dict | None = None, short_count: int = 0, blank_count: int = 0):
+        super().__init__()
+        if counts:
+            self.update(counts)
+        self.short_count = int(short_count)
+        self.blank_count = int(blank_count)
+
+
+@dataclass
+class PlaceholderStats:
+    short_count: int = 0
+    blank_count: int = 0
+    used: list[tuple[str, str, str]] = field(default_factory=list)
+
+
+class ShortPlan:
+    """One short code per category, stable for a single PDF."""
+
+    def __init__(self, category_order: list[str] | None = None) -> None:
+        self._custom: dict[str, tuple[str, str]] = {}
+        seen: set[str] = set()
+        number = 0
+        for name in category_order or []:
+            if not name or name in _BUILTIN_SHORT or name in seen:
+                continue
+            seen.add(name)
+            number += 1
+            self._custom[name] = (f"[R{number}]", name)
+        self._next = number + 1
+
+    def resolve(self, category: str) -> tuple[str, str]:
+        builtin = _BUILTIN_SHORT.get(category)
+        if builtin is not None:
+            return builtin
+        known = self._custom.get(category)
+        if known is not None:
+            return known
+        code = (f"[R{self._next}]", category)
+        self._next += 1
+        self._custom[category] = code
+        return code
+
+
+def legend_lines(used: list[tuple[str, str, str]]) -> list[str]:
+    """One line per short code actually used. The first full label wins."""
+    chosen: dict[str, tuple[str, str]] = {}
+    for code, title, full in used:
+        if code not in chosen:
+            chosen[code] = (title, full)
+
+    def sort_key(code: str) -> tuple:
+        if code in _CODE_RANK:
+            return (0, _CODE_RANK[code], 0, code)
+        body = code[1:-1] if code.startswith("[") and code.endswith("]") else code
+        if body.startswith("R") and body[1:].isdigit():
+            return (1, int(body[1:]), 0, code)
+        return (2, 0, 0, code)
+
+    lines = []
+    for code in sorted(chosen, key=sort_key):
+        title, full = chosen[code]
+        lines.append(f"{code} = {title}（{full}）")
+    return lines
+
+
+def fit_notice(short_count: int, blank_count: int, unlocated: int = 0) -> str:
+    """One sentence per reason, joined by a space so the column can wrap them."""
+    parts = []
+    if short_count > 0:
+        parts.append(MSG_FIT_SHORT.format(n=short_count))
+    if blank_count > 0:
+        parts.append(MSG_FIT_BLANK.format(m=blank_count))
+    if unlocated > 0:
+        parts.append(f"{unlocated}\u00a0处无法定位，未写出")
+    return " ".join(parts)
+
+
+def _font_for(text: str) -> str:
+    if any(ord(ch) > 255 for ch in text):
+        return "china-s"
+    return "helv"
+
+
+def _fontinfo(fontname: str) -> dict:
+    cached = _FONT_INFO.get(fontname)
+    if cached is not None:
+        return cached
+    document = pymupdf.open()
+    try:
+        page = document.new_page()
+        xref = page.insert_font(fontname=fontname)
+        fontdict = pymupdf.CheckFontInfo(document, xref)[1]
+        glyphs = document.get_char_widths(xref)
+        cached = {
+            "ascender": float(fontdict["ascender"]),
+            "descender": float(fontdict["descender"]),
+            "ordering": int(fontdict["ordering"]),
+            "glyphs": glyphs,
+        }
+    finally:
+        document.close()
+    _FONT_INFO[fontname] = cached
+    return cached
+
+
+def _line_box(fontsize: float, info: dict) -> float:
+    ascender = info["ascender"]
+    descender = info["descender"]
+    factor = 1.2 if ascender - descender <= 1 else ascender - descender
+    return fontsize * factor - descender * fontsize
+
+
+def _single_line_fits(text: str, fontsize: float, max_width: float, max_height: float, info: dict) -> bool:
+    """True only when insert_textbox would keep the whole string on one line."""
+    if not text or "\n" in text or max_width <= 0 or max_height <= 0:
+        return False
+    if _line_box(fontsize, info) - max_height > _HEIGHT_EPSILON:
+        return False
+    ordering = info["ordering"]
+    glyphs = info["glyphs"]
+
+    def pixlen(value: str) -> float:
+        if ordering >= 0:
+            return len(value) * fontsize
+        return sum(glyphs[ord(ch)][1] for ch in value) * fontsize
+
+    space = fontsize if ordering >= 0 else glyphs[32][1] * fontsize
+    words = text.expandtabs(1).split(" ")
+    rest = max_width
+    for index, word in enumerate(words):
+        width = pixlen(word)
+        if width > max_width or rest < width:
+            return False
+        rest -= width
+        if index < len(words) - 1:
+            rest -= space
+    return True
+
+
+def fitted_fontsize(rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> float | None:
+    box = pymupdf.Rect(rect)
+    if not text or box.is_empty or box.width <= 0 or box.height <= 0:
+        return None
+    info = _fontinfo(_font_for(text))
+    half = int(math.floor(min(float(box.height), 72.0) * 2 + 1e-9))
+    min_half = int(round(min_size * 2))
+    if half < min_half:
+        return None
+    while half >= min_half:
+        size = half / 2.0
+        if _single_line_fits(text, size, float(box.width), float(box.height), info):
+            return size
+        half -= 1
+    return None
+
+
+def placeholder_choice(rect, full: str, short: str) -> tuple[str, str]:
+    if fitted_fontsize(rect, full) is not None:
+        return "full", full
+    if short and fitted_fontsize(rect, short) is not None:
+        return "short", short
+    return "blank", ""
+
+
+def placeholder_rect(rects, full: str, short: str, text: str = ""):
+    """Box that receives the placeholder. Other segments of the hit stay blank.
+
+    The first segment is the default. A one-character first segment, or a first
+    segment that cannot hold even the short code, uses the widest segment.
+    """
+    boxes = []
+    for rect in rects or []:
+        box = pymupdf.Rect(rect)
+        if box.is_empty or box.width <= 0 or box.height <= 0:
+            continue
+        boxes.append(box)
+    if not boxes:
+        return None
+    if len(boxes) == 1:
+        return boxes[0]
+    first_len = len(text.split("\n", 1)[0]) if text else 0
+    if first_len == 1 or placeholder_choice(boxes[0], full, short)[0] == "blank":
+        return max(boxes, key=lambda box: (box.width, box.height))
+    return boxes[0]
+
+
+def pdf_fit_counts(hits, label, category_order: list[str] | None = None) -> tuple[int, int]:
+    """How many enabled hits with rectangles need a short code or a blank."""
+    plan = ShortPlan(category_order)
+    short_count = 0
+    blank_count = 0
+    for hit in hits:
+        if not getattr(hit, "enabled", True):
+            continue
+        rects = getattr(hit, "rects", None) or []
+        if not rects:
+            continue
+        full = label(hit.category)
+        code, _title = plan.resolve(hit.category)
+        anchor = placeholder_rect(rects, full, code, getattr(hit, "text", "") or "")
+        if anchor is None:
+            continue
+        kind, _shown = placeholder_choice(anchor, full, code)
+        if kind == "short":
+            short_count += 1
+        elif kind == "blank":
+            blank_count += 1
+    return short_count, blank_count
+
+
+def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCounts:
     if src.resolve() == dest.resolve():
         raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
     document = pymupdf.open(src)
@@ -22,15 +287,35 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]
         if document.is_encrypted:
             raise ValueError(f"不支持加密的 PDF: {src.name}")
         counts: dict[str, int] = {}
-        for page in document:
-            merge_counts(counts, _redact_page_text(page, engine))
+        items: list[tuple] = []
+        unlocated = 0
+        page_total = document.page_count
+        for index in range(page_total):
+            page = document[index]
+            flags = pymupdf.TEXTFLAGS_TEXT
+            textpage = page.get_textpage(flags=flags)
+            text = page.get_text("text", textpage=textpage)
+            found = list(engine.find_hits(text))
+            located = locate_text_hits(page, found, textpage)
+            for hit, usable in zip(found, located):
+                if not usable:
+                    unlocated += 1
+                    continue
+                items.append((index, usable, hit.category, hit.text))
+                counts[hit.category] = counts.get(hit.category, 0) + 1
+        if unlocated:
+            raise UnlocatedText(unlocated)
+        order = list(getattr(engine, "category_order", []) or [])
+        stats = redact_text_placeholders(document, items, engine.label, order)
         merge_counts(counts, _redact_images(document, engine))
+        if stats.used:
+            append_legend(document, legend_lines(stats.used))
         clear_pdf_hidden(document)
         dest.parent.mkdir(parents=True, exist_ok=True)
         document.save(dest, garbage=4, clean=True)
     finally:
         document.close()
-    return counts
+    return RedactionCounts(counts, stats.short_count, stats.blank_count)
 
 
 _INFO_FIELDS = ("title", "author", "subject", "keywords", "creator", "producer")
@@ -78,75 +363,91 @@ def _drop_catalog_attachments(document) -> None:
         document.xref_set_key(names_xref, "EmbeddedFiles", "null")
 
 
-def _redact_page_text(page, engine: RedactionEngine) -> dict[str, int]:
-    flags = pymupdf.TEXTFLAGS_TEXT
-    textpage = page.get_textpage(flags=flags)
-    text = page.get_text("text", textpage=textpage)
-    hits = engine.find_hits(text)
-    if not hits:
-        return {}
-    matched: list[Hit] = []
-    fills: list[tuple[object, str]] = []
-    placed = False
-    for hit in hits:
-        rects = _search_hit(page, hit, textpage)
-        usable = []
-        for rect in rects:
-            if rect.is_empty or rect.width <= 0 or rect.height <= 0:
-                continue
-            # search_for is case-insensitive. Keep the rect only when the
-            # visible text still contains this hit's exact characters.
-            extracted = page.get_textbox(rect) or ""
-            if hit.text not in extracted:
-                continue
-            usable.append(rect)
-        if not usable:
+def redact_text_placeholders(document, items, label, category_order: list[str] | None = None) -> PlaceholderStats:
+    """Delete each hit's rectangles and write one single-line placeholder.
+
+    ``items`` are ``(page_index, rects, category)`` or
+    ``(page_index, rects, category, text)``. Every rectangle is deleted.
+    The label sits on one segment (see ``placeholder_rect``). The other
+    segments of a cross-line hit stay blank. ``resolve`` runs once per hit.
+    """
+    plan = ShortPlan(category_order)
+    stats = PlaceholderStats()
+    by_page: dict[int, list[tuple]] = {}
+    page_total = document.page_count
+    for item in items:
+        page_index, rects, category = item[0], item[1], item[2]
+        text = item[3] if len(item) > 3 else ""
+        if page_index < 0 or page_index >= page_total or not rects:
             continue
-        for rect in usable:
-            page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
-        fills.append((max(usable, key=_rect_area), engine.label(hit.category)))
-        matched.append(hit)
-        placed = True
-    if placed:
-        # images=0 keeps image xobjects intact so the later OCR pass can see them.
+        by_page.setdefault(page_index, []).append((rects, category, text))
+    for page_index, jobs in by_page.items():
+        page = document[page_index]
+        fills: list[tuple] = []
+        placed = False
+        for rects, category, text in jobs:
+            usable = []
+            for rect in rects:
+                box = pymupdf.Rect(rect)
+                if box.is_empty or box.width <= 0 or box.height <= 0:
+                    continue
+                page.add_redact_annot(box, fill=(1, 1, 1), cross_out=False)
+                usable.append(box)
+                placed = True
+            if not usable:
+                continue
+            full = label(category)
+            code, title = plan.resolve(category)
+            anchor = placeholder_rect(usable, full, code, text) or usable[0]
+            fills.append((anchor, full, code, title))
+        if not placed:
+            continue
+        # images=0 keeps image xobjects intact so a later OCR pass can see them.
         page.apply_redactions(images=0, graphics=0, text=0)
-        for rect, label in fills:
-            fill_placeholder(page, rect, label)
-    return _category_counts(matched)
+        for box, full, code, title in fills:
+            kind = _write_choice(page, box, full, code)
+            if kind == "short":
+                stats.short_count += 1
+                stats.used.append((code, title, full))
+            elif kind == "blank":
+                stats.blank_count += 1
+    return stats
 
 
-def _rect_area(rect) -> float:
-    return float(rect.width) * float(rect.height)
+def _write_choice(page, rect, full: str, short: str) -> str:
+    """Full label, then short code, then blank. Never a clipped string."""
+    for kind, text in (("full", full), ("short", short)):
+        if not text:
+            continue
+        size = fitted_fontsize(rect, text)
+        if size is None:
+            continue
+        if _commit_textbox(page, rect, text, size, _font_for(text)):
+            return kind
+    return "blank"
 
 
-def fill_placeholder(page, rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> None:
-    """Write ``text`` into ``rect``, shrinking then truncating so it stays inside.
+def fill_placeholder(page, rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> bool:
+    """Write ``text`` on one line inside ``rect``, or write nothing.
 
     Original page text must already have been deleted (apply_redactions).
-    A box too small for even one glyph is left empty — never the source word.
+    The size starts near the box height and stops at ``min_size``. A box that
+    cannot hold the whole string is left empty — never a shortened label.
     """
     box = pymupdf.Rect(rect)
-    if not text or box.is_empty or box.width <= 0 or box.height <= 0:
-        return
-    fontsize = min(11.0, max(min_size, float(box.height) * 0.9))
-    while fontsize >= min_size - 1e-6:
-        if _commit_textbox(page, box, text, fontsize):
-            return
-        fontsize -= 0.5
-    shown = text
-    while shown:
-        if _commit_textbox(page, box, shown, min_size):
-            return
-        shown = shown[:-1]
+    size = fitted_fontsize(box, text, min_size=min_size)
+    if size is None:
+        return False
+    return _commit_textbox(page, box, text, size, _font_for(text))
 
 
-def _commit_textbox(page, rect, text: str, fontsize: float) -> bool:
+def _commit_textbox(page, rect, text: str, fontsize: float, fontname: str) -> bool:
     shape = page.new_shape()
     leftover = shape.insert_textbox(
         rect,
         text,
         fontsize=fontsize,
-        fontname="helv",
+        fontname=fontname,
         color=(0, 0, 0),
         align=pymupdf.TEXT_ALIGN_LEFT,
     )
@@ -156,38 +457,438 @@ def _commit_textbox(page, rect, text: str, fontsize: float) -> bool:
     return True
 
 
-def _category_counts(hits: list[Hit]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for hit in hits:
-        counts[hit.category] = counts.get(hit.category, 0) + 1
-    return counts
+def _font_runs(text: str):
+    """Split into helv and china-s runs so ASCII keeps a proportional advance.
+
+    A CJK font draws every character one em wide. pdftotext then treats the
+    gaps inside ``[SP]`` as columns and reads the line out of order.
+    """
+    if not text:
+        return
+    font = _font_for(text[0])
+    chunk = [text[0]]
+    for ch in text[1:]:
+        nxt = _font_for(ch)
+        if nxt == font:
+            chunk.append(ch)
+            continue
+        yield font, "".join(chunk)
+        font = nxt
+        chunk = [ch]
+    yield font, "".join(chunk)
+
+
+def _insert_mixed(page, x: float, y: float, text: str, fontsize: float) -> None:
+    cursor = float(x)
+    for font, chunk in _font_runs(text):
+        page.insert_text((cursor, y), chunk, fontname=font, fontsize=fontsize, color=(0, 0, 0))
+        if font == "helv":
+            cursor += pymupdf.get_text_length(chunk, fontname="helv", fontsize=fontsize)
+        else:
+            cursor += len(chunk) * fontsize
+
+
+def append_legend(document, lines: list[str]) -> None:
+    """Add one unrotated page that explains the short codes used in this file."""
+    if not lines:
+        return
+    template = document[document.page_count - 1]
+    width = float(template.rect.width)
+    height = float(template.rect.height)
+    page = document.new_page(width=width, height=height)
+    _insert_mixed(page, 72, 72, LEGEND_TITLE, 16)
+    y = 108.0
+    limit = height - 80
+    for line in lines:
+        if y > limit:
+            break
+        _insert_mixed(page, 72, y, line, 12)
+        y += 22
+    footer_y = min(max(y + 28, height - 56), height - 28)
+    _insert_mixed(page, 72, footer_y, LEGEND_FOOTER, 11)
 
 
 def find_hit_rects(page, hit: Hit, textpage) -> list[tuple[float, float, float, float]]:
-    rects = []
-    for rect in _search_hit(page, hit, textpage):
-        if rect.is_empty or rect.width <= 0 or rect.height <= 0:
-            continue
-        extracted = page.get_textbox(rect) or ""
-        if hit.text not in extracted:
-            continue
-        rects.append((float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)))
-    return rects
+    """Rectangles for this hit only, one per text line it covers.
+
+    Offsets into the textpage's plain text select this hit. A line that matches
+    character for character uses those glyphs. A line that does not is placed
+    only from that line's own rawdict glyphs, and only when the plain text and
+    the glyph string contain the fragment the same number of times. A cross-line
+    hit returns one rectangle per line, including a one-character fragment.
+
+    Those boxes are already in the space ``add_redact_annot`` and
+    ``insert_textbox`` use. Extraction and redaction annotations temporarily
+    clear ``/Rotate``, and ``insert_textbox`` adds the CropBox origin itself.
+    Multiplying by ``page.derotation_matrix`` would move the placeholder off
+    the deleted glyphs.
+    """
+    located = locate_text_hits(page, [hit], textpage)
+    return located[0] if located else []
 
 
-def _search_hit(page, hit: Hit, textpage) -> list:
-    pieces = [hit.text]
-    if "\n" in hit.text:
-        pieces = [part.strip() for part in hit.text.splitlines() if part.strip()]
-    rects = []
-    for piece in pieces:
-        if len(piece) < 2:
+@dataclass
+class _Aligned:
+    """One plain-text line and, when known, the rawdict line it belongs to."""
+
+    start: int
+    end: int
+    text: str
+    entries: list | None
+    bbox: tuple | None
+    pieces: list | None = None
+
+
+def locate_text_hits(page, hits, textpage=None) -> list[list[tuple[float, float, float, float]]]:
+    """One rectangle list per hit. Empty means that hit is unlocated.
+
+    Hits on this page whose rectangles are the same, or overlap by more than
+    half the smaller box, are all returned empty so each one is counted.
+    """
+    if textpage is None:
+        textpage = page.get_textpage(flags=pymupdf.TEXTFLAGS_TEXT)
+    text = page.get_text("text", textpage=textpage)
+    raw = page.get_text("rawdict", textpage=textpage)
+    aligned = _align_lines(text, raw)
+    groups: list[list[tuple[float, float, float, float]]] = []
+    for hit in hits:
+        rects = _rects_for_hit(hit, aligned)
+        groups.append(
+            [
+                (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+                for rect in rects
+            ]
+        )
+    return _without_shared_rects(groups)
+
+
+def _plain_lines(text: str) -> list[tuple[int, int, str]]:
+    """Lines of ``get_text("text")``. Offsets exclude the newline itself.
+
+    A trailing newline does not add an empty line. A blank line stays, with
+    equal start and end, so later lines keep the offsets ``find_hits`` used.
+    """
+    lines: list[tuple[int, int, str]] = []
+    start = 0
+    for index, ch in enumerate(text):
+        if ch != "\n":
             continue
-        found = page.search_for(piece, textpage=textpage)
+        lines.append((start, index, text[start:index]))
+        start = index + 1
+    if start < len(text):
+        lines.append((start, len(text), text[start:]))
+    elif not lines:
+        lines.append((0, 0, ""))
+    return lines
+
+
+def _raw_lines(raw: dict):
+    """Yield ``(pieces, line_bbox, text)`` for text lines that have glyphs.
+
+    ``line_bbox`` is the rawdict line box, not the union of whatever glyphs
+    remain. A line whose characters were dropped still keeps that box, so a
+    later search can clip to the original line.
+    """
+    for block in raw.get("blocks") or []:
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines") or []:
+            pieces = []
+            for span in line.get("spans") or []:
+                for ch in span.get("chars") or []:
+                    value = ch.get("c") or ""
+                    bbox = ch.get("bbox")
+                    if not value or not bbox or len(bbox) < 4:
+                        continue
+                    pieces.append(
+                        (
+                            value,
+                            (
+                                float(bbox[0]),
+                                float(bbox[1]),
+                                float(bbox[2]),
+                                float(bbox[3]),
+                            ),
+                        )
+                    )
+            if not pieces:
+                continue
+            text = "".join(value for value, _bbox in pieces)
+            raw_box = line.get("bbox")
+            if raw_box and len(raw_box) >= 4:
+                bbox = tuple(float(value) for value in raw_box[:4])
+            else:
+                bbox = (
+                    min(item[1][0] for item in pieces),
+                    min(item[1][1] for item in pieces),
+                    max(item[1][2] for item in pieces),
+                    max(item[1][3] for item in pieces),
+                )
+            yield pieces, bbox, text
+
+
+def _is_subsequence(needle: str, hay: str) -> bool:
+    pos = 0
+    for ch in hay:
+        if ch == needle[pos]:
+            pos += 1
+            if pos == len(needle):
+                return True
+    return False
+
+
+def _line_similarity(plain: str, raw: str) -> int:
+    """How safely ``raw`` can stand in for ``plain``. Zero means do not pair.
+
+    The whole shorter string must be a prefix, a substring, or (when it is at
+    least two characters) a subsequence. A shared one-character prefix is not
+    enough on its own unless one line actually starts with the other.
+    """
+    if not plain or not raw:
+        return 0
+    if plain == raw:
+        return 1000 + len(plain)
+    if plain.startswith(raw) or raw.startswith(plain):
+        return 800 + min(len(plain), len(raw))
+    if plain in raw or raw in plain:
+        return 600 + min(len(plain), len(raw))
+    shorter, longer = (plain, raw) if len(plain) <= len(raw) else (raw, plain)
+    if len(shorter) >= 2 and _is_subsequence(shorter, longer):
+        return 300 + len(shorter)
+    return 0
+
+
+def _best_pairs(plain_lines: list[tuple[int, int, str]], raw_lines: list) -> dict[int, int]:
+    """Pair each plain line with at most one raw line, best score first."""
+    candidates = []
+    for p_index, (_start, _end, plain) in enumerate(plain_lines):
+        for r_index, raw in enumerate(raw_lines):
+            score = _line_similarity(plain, raw[2])
+            if score > 0:
+                candidates.append((score, p_index, r_index))
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    used_plain: set[int] = set()
+    used_raw: set[int] = set()
+    pairing: dict[int, int] = {}
+    for _score, p_index, r_index in candidates:
+        if p_index in used_plain or r_index in used_raw:
+            continue
+        used_plain.add(p_index)
+        used_raw.add(r_index)
+        pairing[p_index] = r_index
+    return pairing
+
+
+def _entries_for_line(line_text: str, pieces, line_id: int, base: int):
+    entries = []
+    pos = 0
+    for value, bbox in pieces:
+        if not line_text.startswith(value, pos):
+            return None
+        entries.append((base + pos, base + pos + len(value), bbox, line_id))
+        pos += len(value)
+    if pos != len(line_text):
+        return None
+    return entries
+
+
+def _align_lines(text: str, raw: dict) -> list[_Aligned]:
+    """Pair plain lines with rawdict lines. A bad line does not move the others.
+
+    Equal lines map character by character. A line that does not match keeps
+    its rawdict box when one can be paired, and has no box otherwise. Nothing
+    is searched across the whole page.
+    """
+    plain = _plain_lines(text)
+    raw_lines = list(_raw_lines(raw))
+    matcher = difflib.SequenceMatcher(
+        a=[item[2] for item in plain],
+        b=[item[2] for item in raw_lines],
+        autojunk=False,
+    )
+    aligned: list[_Aligned] = []
+    line_id = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "insert":
+            continue
+        if tag == "equal":
+            for offset, (start, end, line_text) in enumerate(plain[i1:i2]):
+                pieces, bbox, _raw_text = raw_lines[j1 + offset]
+                entries = _entries_for_line(line_text, pieces, line_id, start)
+                aligned.append(_Aligned(start, end, line_text, entries, bbox, pieces))
+                line_id += 1
+            continue
+        if tag == "delete":
+            for start, end, line_text in plain[i1:i2]:
+                aligned.append(_Aligned(start, end, line_text, None, None))
+                line_id += 1
+            continue
+        plain_slice = plain[i1:i2]
+        raw_slice = raw_lines[j1:j2]
+        pairing = _best_pairs(plain_slice, raw_slice)
+        for offset, (start, end, line_text) in enumerate(plain_slice):
+            raw_index = pairing.get(offset)
+            if raw_index is None:
+                aligned.append(_Aligned(start, end, line_text, None, None))
+            else:
+                pieces, bbox, _raw_text = raw_slice[raw_index]
+                aligned.append(_Aligned(start, end, line_text, None, bbox, pieces))
+            line_id += 1
+    return aligned
+
+
+def _find_spans(haystack: str, needle: str) -> list[int]:
+    """Start offsets of exact, case-sensitive occurrences. Overlaps count."""
+    if not needle:
+        return []
+    spans = []
+    pos = 0
+    while True:
+        found = haystack.find(needle, pos)
+        if found < 0:
+            break
+        spans.append(found)
+        pos = found + 1
+    return spans
+
+
+def _glyph_chars(pieces) -> list[tuple[str, tuple]]:
+    chars = []
+    for value, bbox in pieces or []:
+        for ch in value:
+            chars.append((ch, bbox))
+    return chars
+
+
+def _center_in_line(rect, bbox) -> bool:
+    y0 = min(float(bbox[1]), float(bbox[3]))
+    y1 = max(float(bbox[1]), float(bbox[3]))
+    cy = (float(rect.y0) + float(rect.y1)) / 2.0
+    return y0 <= cy <= y1
+
+
+def _rects_from_glyphs(line: _Aligned, fragment: str, local_s: int) -> list:
+    """Box of the k-th exact fragment in this line's glyphs, or nothing.
+
+    ``k`` and the total are counted with ``_find_spans`` on the plain line and
+    on the glyph string. The hit text is already the original casing, so the
+    comparison stays exact. A different count, a missing k-th occurrence, or a
+    box whose vertical center sits outside this line is not a location.
+    """
+    if line.bbox is None:
+        return []
+    chars = _glyph_chars(line.pieces)
+    if not chars:
+        return []
+    glyph_text = "".join(ch for ch, _bbox in chars)
+    plain_spans = _find_spans(line.text, fragment)
+    glyph_spans = _find_spans(glyph_text, fragment)
+    if len(plain_spans) != len(glyph_spans) or not plain_spans:
+        return []
+    k = sum(1 for start in plain_spans if start < local_s)
+    if k >= len(plain_spans) or k >= len(glyph_spans) or plain_spans[k] != local_s:
+        return []
+    start = glyph_spans[k]
+    end = start + len(fragment)
+    if end > len(chars):
+        return []
+    rect = None
+    for _ch, bbox in chars[start:end]:
+        piece = pymupdf.Rect(bbox)
+        rect = piece if rect is None else rect | piece
+    if rect is None or rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        return []
+    if not _center_in_line(rect, line.bbox):
+        return []
+    return [rect]
+
+
+def _box_tuple(rect) -> tuple[float, float, float, float]:
+    if isinstance(rect, (tuple, list)):
+        return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+    return (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+
+
+def _box_area(box: tuple[float, float, float, float]) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _overlap_over_half(left, right) -> bool:
+    """True when the boxes are the same or the overlap exceeds half the smaller one."""
+    a = _box_tuple(left)
+    b = _box_tuple(right)
+    x0 = max(a[0], b[0])
+    y0 = max(a[1], b[1])
+    x1 = min(a[2], b[2])
+    y1 = min(a[3], b[3])
+    inter = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    smaller = min(_box_area(a), _box_area(b))
+    return smaller > 0 and inter > smaller * 0.5
+
+
+def _without_shared_rects(groups: list[list[tuple[float, float, float, float]]]):
+    bad: set[int] = set()
+    for i in range(len(groups)):
+        if not groups[i]:
+            continue
+        for j in range(i + 1, len(groups)):
+            if not groups[j]:
+                continue
+            if any(_overlap_over_half(a, b) for a in groups[i] for b in groups[j]):
+                bad.add(i)
+                bad.add(j)
+    return [[] if index in bad else group for index, group in enumerate(groups)]
+
+
+def _rects_for_hit(hit: Hit, aligned: list[_Aligned]) -> list:
+    """Rectangles for this hit. Any fragment that cannot be placed drops the hit."""
+    start, end = hit.start, hit.end
+    if end <= start:
+        return []
+    collected = []
+    for line in aligned:
+        if line.end <= start or line.start >= end:
+            continue
+        if line.entries is not None:
+            rects = _rects_covering(line.entries, start, end)
+            if rects:
+                collected.extend(rects)
+                continue
+        local_s = max(0, start - line.start)
+        local_e = min(len(line.text), end - line.start)
+        if local_e <= local_s:
+            continue
+        fragment = line.text[local_s:local_e]
+        if not fragment.strip():
+            continue
+        found = _rects_from_glyphs(line, fragment, local_s)
         if not found:
-            found = page.search_for(piece)
-        rects.extend(found)
-    return rects
+            return []
+        collected.extend(found)
+    return collected
+
+
+def _rects_covering(entries, start: int, end: int) -> list:
+    if end <= start:
+        return []
+    grouped = []
+    current_line = None
+    current = None
+    for cstart, cend, bbox, line_id in entries:
+        if cend <= start or cstart >= end:
+            continue
+        rect = pymupdf.Rect(bbox)
+        rect.normalize()
+        if current is None or current_line != line_id:
+            if current is not None and not current.is_empty:
+                grouped.append(current)
+            current = rect
+            current_line = line_id
+        else:
+            current |= rect
+    if current is not None and not current.is_empty:
+        grouped.append(current)
+    return [rect for rect in grouped if rect.width > 0 and rect.height > 0]
 
 
 def _redact_images(document, engine: RedactionEngine) -> dict[str, int]:

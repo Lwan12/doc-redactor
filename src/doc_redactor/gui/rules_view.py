@@ -21,6 +21,7 @@ from doc_redactor.gui.theme import (
     fit_label,
 )
 from doc_redactor.engine import redaction_label
+from doc_redactor.pdf_redactor import MSG_REPL_HINT
 from doc_redactor.pattern_guess import (
     TEMPLATES,
     TestHit,
@@ -440,6 +441,9 @@ class RulesView:
         repl = tk.StringVar(value=form.get("replacement") or redaction_label(form.get("name") or "规则名"))
         ttk.Entry(repl_cell, textvariable=repl, font=fonts["mono_font"]).pack(fill="x")
         repl.trace_add("write", lambda *_: self._set("replacement", repl.get(), refresh=False))
+        fit_label(repl_cell, MSG_REPL_HINT, bg=BG_PAGE, fg=INK2, font=fonts["small"]).pack(
+            fill="x", anchor="w", pady=(2, 0)
+        )
 
         if ev.duplicate:
             ov = tk.BooleanVar(value=form.get("overwrite", False))
@@ -612,8 +616,12 @@ class RulesView:
             command=lambda: form.__setitem__("case_sensitive", cs.get()),
         ).pack(anchor="w")
         repl_var = tk.StringVar(value=form.get("replacement") or redaction_label(form.get("name") or "规则名"))
-        ttk.Entry(labeled("替换成"), textvariable=repl_var, font=fonts["mono_font"]).pack(fill="x")
+        repl_cell = labeled("替换成")
+        ttk.Entry(repl_cell, textvariable=repl_var, font=fonts["mono_font"]).pack(fill="x")
         repl_var.trace_add("write", lambda *_: form.__setitem__("replacement", repl_var.get()))
+        fit_label(repl_cell, MSG_REPL_HINT, bg=BG_PAGE, fg=INK2, font=fonts["small"]).pack(
+            fill="x", anchor="w", pady=(2, 0)
+        )
         add_cell = labeled("加词")
         is_plan = (form.get("name") == PROTOCOL_LIST_NAME) or form.get("kind") == "plan"
         box = tk.Text(add_cell, height=5, relief="solid", bd=1, wrap="word")

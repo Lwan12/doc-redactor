@@ -171,6 +171,7 @@ def status_style(kind: str) -> tuple[str, str, str]:
         "hit": ("✓", "有命中", OK),
         "written": ("✓", "已写出", OK),
         "nohit": ("—", "无命中", MUTED),
+        "unlocated": ("⚠", "无法定位", WARN),
         "fail": ("✕", "失败", BAD),
         "cancelled": ("⊘", "已取消", WARN),
         "many": ("⚠", "命中偏多", WARN),

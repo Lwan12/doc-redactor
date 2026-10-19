@@ -962,6 +962,8 @@ class App:
         for scan in self.scans:
             if scan.status == "fail" or str(scan.path) in self.write_errors:
                 continue
+            if int(getattr(scan, "unlocated_count", 0) or 0) > 0:
+                continue
             if scan.enabled_count() > 0:
                 total += 1
         return total
@@ -1043,7 +1045,11 @@ class App:
         )
         if not path:
             return
-        payload = hit_list_payload(self.scans)
+        payload = hit_list_payload(
+            self.scans,
+            replacements=self.ruleset.replacements(),
+            category_order=[rule.name for rule in self.ruleset.rules],
+        )
         Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def open_output(self) -> None:

@@ -318,13 +318,45 @@ def merge_kept(kept: list, new_paths: list) -> list:
     return merged
 
 
-def hit_list_payload(scans) -> dict:
-    """File name to category counts. No source text, no locations."""
+def hit_list_payload(scans, *, replacements=None, category_order=None) -> dict:
+    """File name to category counts. No source text, no locations.
+
+    A PDF may also carry ``短码`` and ``留空``. Those are subsets of the
+    category counts, not extra hits, and they are omitted when zero.
+    ``无法定位`` is a count of hits that had no rectangle. The source text
+    of those hits is not included.
+    """
     payload = {}
     for scan in scans:
         if getattr(scan, "status", "") == "fail":
             continue
-        counts = scan.category_counts(enabled_only=True)
-        if counts:
-            payload[scan.path.name] = counts
+        counts = dict(scan.category_counts(enabled_only=True))
+        if getattr(scan, "kind", "") == "pdf":
+            if counts:
+                short_count, blank_count = _pdf_fit_tallies(scan, replacements, category_order)
+                if short_count:
+                    counts["短码"] = short_count
+                if blank_count:
+                    counts["留空"] = blank_count
+            unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+            if unlocated > 0:
+                counts["无法定位"] = unlocated
+        if not counts:
+            continue
+        payload[scan.path.name] = counts
     return payload
+
+
+def _pdf_fit_tallies(scan, replacements, category_order) -> tuple[int, int]:
+    from doc_redactor.engine import redaction_label
+    from doc_redactor.pdf_redactor import pdf_fit_counts
+
+    def label(category: str) -> str:
+        if replacements:
+            custom = replacements.get(category)
+            if isinstance(custom, str) and custom.strip():
+                return custom
+        return redaction_label(category)
+
+    hits = scan.enabled_hits if hasattr(scan, "enabled_hits") else []
+    return pdf_fit_counts(hits, label, category_order)

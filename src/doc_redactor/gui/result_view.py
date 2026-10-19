@@ -36,6 +36,14 @@ from doc_redactor.gui.theme import (
     status_style,
 )
 from doc_redactor.engine import redaction_label
+from doc_redactor.pdf_redactor import (
+    MSG_PDF_WIDTH,
+    ShortPlan,
+    fit_notice,
+    pdf_fit_counts,
+    placeholder_choice,
+    placeholder_rect,
+)
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
 
 # Left is the previous page, right is the next page.
@@ -147,16 +155,18 @@ class ResultView:
         fonts = app.fonts
         scans = app.scans
         all_fail = bool(scans) and all(s.status == "fail" for s in scans)
-        nohit_all = bool(scans) and all(s.status != "fail" and not s.hits for s in scans) and not any(
+        nohit_all = bool(scans) and all(s.status != "fail" and not _has_findings(s) for s in scans) and not any(
             s.status == "fail" for s in scans
         )
-        if scans and not any(s.status == "fail" for s in scans) and all(s.status == "nohit" or not s.hits for s in scans):
+        if scans and not any(s.status == "fail" for s in scans) and all(
+            s.status == "nohit" or not _has_findings(s) for s in scans
+        ):
             nohit_all = True
 
         head = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         head.pack(fill="x")
         row = tk.Frame(head, bg=BG_SURFACE)
-        row.pack(fill="x", padx=12, pady=8)
+        row.pack(fill="x", padx=12, pady=4)
         title = "已写出" if app.written else "结果预览，写出前可以逐处取消"
         tk.Label(row, text=title, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="right")
         StepBar(row, app).frame.pack(side="left", fill="x", expand=True)
@@ -170,7 +180,7 @@ class ResultView:
                 bg=BG_INSET,
                 fg=INK,
                 font=fonts["small"],
-            ).pack(side="left", padx=12, pady=6)
+            ).pack(side="left", padx=12, pady=3)
             hide = tk.BooleanVar(value=app.hide_text)
             ttk.Checkbutton(
                 note,
@@ -266,7 +276,9 @@ class ResultView:
             # column is what remains, wide enough for 「方案号清单」 on one line.
             body.columnconfigure(0, minsize=280, weight=0)
             body.columnconfigure(1, weight=1, minsize=200)
-            body.columnconfigure(2, minsize=340, weight=0)
+            # The hit list's own column widths set this pane. A smaller minimum
+            # leaves the middle column enough width that a PDF page still fits.
+            body.columnconfigure(2, minsize=300, weight=0)
             body.rowconfigure(0, weight=1)
             left = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
             left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
@@ -325,8 +337,8 @@ class ResultView:
                     enabled -= scan.enabled_count()
         total_hits = sum(len(s.hits) for s in scans)
         cancelled_n = total_hits - enabled
-        n_hit = sum(1 for s in scans if s.status != "fail" and s.hits)
-        n_no = sum(1 for s in scans if s.status != "fail" and not s.hits)
+        n_hit = sum(1 for s in scans if s.status != "fail" and _has_findings(s))
+        n_no = sum(1 for s in scans if s.status != "fail" and not _has_findings(s))
         n_fail = sum(1 for s in scans if s.status == "fail")
         tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
         verb = "已替换" if self.app.written else "将替换"
@@ -346,6 +358,21 @@ class ResultView:
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
 
     def _file_list(self, parent, scans, fonts) -> None:
+        # Pack the notice first so the tree keeps the remaining height.
+        # The filename column is too narrow for the full sentence.
+        notices = []
+        for scan in scans:
+            text = _pdf_fit_notice(scan, self.app)
+            if text:
+                notices.append((scan.path.name, text))
+        if notices:
+            box = tk.Frame(parent, bg=BG_INSET)
+            box.pack(side="bottom", fill="x")
+            for name, text in notices:
+                tk.Label(box, text=name, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
+                    anchor="w", padx=8, pady=(2, 0)
+                )
+                _wrap_label(box, text, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=6, pady=(0, 2))
         head = tk.Frame(parent, bg=BG_INSET)
         head.pack(fill="x")
         tk.Label(head, text=f"文件 {len(scans)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
@@ -365,12 +392,16 @@ class ResultView:
         all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=("ok",))
         ids = [all_id]
         for scan in scans:
-            kind, _status_text, tag = _scan_status(scan, self.app)
+            kind, status_text, tag = _scan_status(scan, self.app)
             icon, text, _ = status_style(kind)
+            if kind == "unlocated":
+                text = status_text
             count = "—" if scan.status == "fail" else scan.enabled_count()
             label = f"{icon} {scan.path.name}"
-            if kind in {"many", "nowrite", "skipped"}:
-                label = f"{icon} {scan.path.name}  {text}" if kind == "skipped" else f"{icon} {text}  {scan.path.name}"
+            if kind in {"skipped", "unlocated"}:
+                label = f"{icon} {scan.path.name}  {text}"
+            elif kind in {"many", "nowrite"}:
+                label = f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
         target = ids[0] if self.app.selected == "all" else ids[self.app.selected + 1]
@@ -498,6 +529,9 @@ class ResultView:
             title_row, text=_type_name(scan.kind), bg=BG_INSET, fg=INK2, font=fonts["small"], relief="solid", bd=1
         ).pack(side="left", pady=(4, 0))
         has_prev = scan.status != "fail" and bool(scan.hits)
+        notice = _pdf_fit_notice(scan, self.app) if scan.kind == KIND_PDF else ""
+        if notice:
+            _wrap_label(head, notice, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=8, pady=(1, 0))
         if has_prev:
             controls = tk.Frame(head, bg=BG_INSET)
             controls.pack(fill="x")
@@ -549,6 +583,17 @@ class ResultView:
             return
         if not scan.hits:
             body.pack(fill="both", expand=True)
+            unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+            if unlocated > 0:
+                _empty_state(
+                    body,
+                    "⚠",
+                    f"{unlocated} 处无法定位，未写出",
+                    "文字里找到了，但定不到页面上的位置。这个文件不写出，避免原文留下。",
+                    [],
+                    fonts,
+                )
+                return
             _empty_state(
                 body,
                 "—",
@@ -624,6 +669,7 @@ class ResultView:
         self._hit_ranges = {}
         cats = {cat: i for i, cat in enumerate(self.app.category_order())}
         replacements = self.app.ruleset.replacements()
+        self._short_plan = ShortPlan([rule.name for rule in self.app.ruleset.rules])
 
         def insert_run(block: str, block_hits: list, title: bool = False):
             pos = 0
@@ -731,6 +777,18 @@ class ResultView:
             if scan.kind == KIND_IMAGE:
                 return "█" * max(3, min(len(hit.text), 8)), ("black", "cur" if cur else "")
             label = replacements.get(hit.category) or redaction_label(hit.category)
+            if scan.kind == KIND_PDF and hit.rects:
+                plan = getattr(self, "_short_plan", None) or ShortPlan(
+                    [rule.name for rule in self.app.ruleset.rules]
+                )
+                code, _title = plan.resolve(hit.category)
+                anchor = placeholder_rect(hit.rects, label, code, getattr(hit, "text", "") or "")
+                if anchor is None:
+                    return "", ("redacted", "cur" if cur else "")
+                _kind, shown = placeholder_choice(anchor, label, code)
+                if not shown:
+                    return "", ("redacted", "cur" if cur else "")
+                return shown.replace(" ", "\u00a0"), ("redacted", "cur" if cur else "")
             return label.replace(" ", "\u00a0"), ("redacted", "cur" if cur else "")
         shown = "▇" * min(len(hit.text), 8) if hide else hit.text
         return shown, ("cur" if cur else "hit",)
@@ -876,11 +934,11 @@ class ResultView:
         loc.heading("loc", text="位置")
         loc.heading("cat", text="类")
         loc.heading("text", text="内容")
-        # Room for "第 501 页 · 第 1 行" and "PRJ-2026-017-S02", plus the scrollbar.
+        # Room for "第 501 页 · 第 1 行" (125px) and "PRJ-2026-017-S02" (124px).
         loc.column("on", width=32, minwidth=32, stretch=False, anchor="center")
-        loc.column("loc", width=140, minwidth=132, stretch=False)
+        loc.column("loc", width=128, minwidth=126, stretch=False)
         loc.column("cat", width=28, minwidth=28, stretch=False)
-        loc.column("text", width=132, minwidth=124, stretch=True)
+        loc.column("text", width=126, minwidth=124, stretch=True)
         cat_index = {c: i for i, c in enumerate(cats)}
         for hit in hits:
             mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
@@ -922,13 +980,28 @@ class ResultView:
         inner.pack(fill="x", padx=12, pady=8)
         enabled, _ = session_totals(scans, enabled_only=True)
         app = self.app
-        if app.written:
-            for scan in scans:
-                if str(scan.path) in app.write_errors:
-                    enabled -= scan.enabled_count()
+        for scan in scans:
+            if scan.status == "fail":
+                continue
+            unlocated = int(getattr(scan, "unlocated_count", 0) or 0) > 0
+            failed_write = str(scan.path) in app.write_errors
+            # Blocked files, and files a write already refused, stay out of the
+            # button count. Each file is subtracted once.
+            if unlocated or (app.written and failed_write):
+                enabled -= scan.enabled_count()
         n_files = app.written_file_count()
         failures = app.write_failure_rows()
         path = app.output_label()
+        if any(scan.kind == KIND_PDF for scan in scans):
+            tk.Label(
+                inner,
+                text=MSG_PDF_WIDTH,
+                bg=BG_SURFACE,
+                fg=INK2,
+                font=fonts["small"],
+                anchor="w",
+                justify="left",
+            ).pack(side="bottom", fill="x")
         buttons = tk.Frame(inner, bg=BG_SURFACE)
         buttons.pack(side="right")
         left = tk.Frame(inner, bg=BG_SURFACE)
@@ -993,6 +1066,64 @@ class ResultView:
         ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
 
 
+def _wrap_label(parent, text: str, *, bg: str, fg: str, font) -> tk.Label:
+    """Wrap to the parent width using the font's own line spacing.
+
+    ``tk.Message`` adds extra leading, which pushed the PDF preview's last
+    line out of the 640px window.
+    """
+    label = tk.Label(
+        parent,
+        text=text,
+        bg=bg,
+        fg=fg,
+        font=font,
+        justify="left",
+        anchor="w",
+        wraplength=40,
+    )
+
+    def sync(_event=None) -> None:
+        width = parent.winfo_width()
+        if width <= 20:
+            return
+        target = max(40, width - 8)
+        if int(label.cget("wraplength")) != target:
+            label.configure(wraplength=target)
+
+    parent.bind("<Configure>", sync, add="+")
+    parent.after_idle(sync)
+    return label
+
+
+def _has_findings(scan: FileScan) -> bool:
+    if scan.hits:
+        return True
+    return int(getattr(scan, "unlocated_count", 0) or 0) > 0
+
+
+def _pdf_fit_notice(scan: FileScan, app) -> str:
+    if scan.kind != KIND_PDF or scan.status == "fail":
+        return ""
+    unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+    if not scan.hits and unlocated <= 0:
+        return ""
+    short_count = 0
+    blank_count = 0
+    if scan.hits:
+        replacements = app.ruleset.replacements()
+
+        def label(category: str) -> str:
+            custom = replacements.get(category)
+            if isinstance(custom, str) and custom.strip():
+                return custom
+            return redaction_label(category)
+
+        order = [rule.name for rule in app.ruleset.rules]
+        short_count, blank_count = pdf_fit_counts(scan.enabled_hits, label, order)
+    return fit_notice(short_count, blank_count, unlocated)
+
+
 def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
     if scan.status == "fail":
         return "fail", "失败", "bad"
@@ -1004,6 +1135,9 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
         return "many", "命中偏多", "warn"
     if app.written and scan.enabled_count() > 0:
         return "written", "已写出", "ok"
+    unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+    if unlocated > 0:
+        return "unlocated", f"{unlocated} 处无法定位", "warn"
     if not scan.hits:
         return "nohit", "无命中", "no"
     return "hit", "有命中", "ok"

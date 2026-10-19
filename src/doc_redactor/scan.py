@@ -21,7 +21,16 @@ from doc_redactor.image_redactor import (
     is_raster_suffix,
     paint_image_boxes,
 )
-from doc_redactor.pdf_redactor import clear_pdf_hidden, fill_placeholder, find_hit_rects
+from doc_redactor.pdf_redactor import (
+    MSG_UNLOCATED,
+    RedactionCounts,
+    UnlocatedText,
+    append_legend,
+    clear_pdf_hidden,
+    locate_text_hits,
+    legend_lines,
+    redact_text_placeholders,
+)
 from doc_redactor.tesseract_cmd import require_tesseract
 
 FILE_HIT_WARN = 500
@@ -114,6 +123,9 @@ class FileScan:
     image: Image.Image | None = None
     too_many: bool = False
     size_label: str = ""
+    # Hits found in text whose rectangles could not be placed. The text itself
+    # is not stored. A positive count blocks the write of this file.
+    unlocated_count: int = 0
 
     @property
     def enabled_hits(self) -> list[LocatedHit]:
@@ -136,6 +148,8 @@ class WriteResult:
     skipped: bool = False
     error: str | None = None
     note: str | None = None
+    short_count: int = 0
+    blank_count: int = 0
 
 
 class IdGen:
@@ -269,6 +283,18 @@ def write_scans(
         if scan.status == "fail":
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=scan.error))
             continue
+        if scan.unlocated_count > 0:
+            written.append(
+                WriteResult(
+                    path=scan.path,
+                    dest=None,
+                    report=None,
+                    counts={},
+                    skipped=True,
+                    error=MSG_UNLOCATED.format(n=scan.unlocated_count),
+                )
+            )
+            continue
         enabled = scan.enabled_hits
         if not enabled:
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True))
@@ -306,7 +332,16 @@ def write_scans(
         else:
             report_path = dest.with_name(f"{dest.stem}.report.json")
         write_report(report_path, counts)
-        written.append(WriteResult(path=scan.path, dest=dest, report=report_path, counts=counts))
+        written.append(
+            WriteResult(
+                path=scan.path,
+                dest=dest,
+                report=report_path,
+                counts=counts,
+                short_count=int(getattr(counts, "short_count", 0) or 0),
+                blank_count=int(getattr(counts, "blank_count", 0) or 0),
+            )
+        )
     return written
 
 
@@ -324,6 +359,8 @@ def write_scan(
     replacements: dict[str, str] | None = None,
     engine: RedactionEngine | None = None,
 ) -> dict[str, int]:
+    if scan.unlocated_count > 0:
+        raise UnlocatedText(scan.unlocated_count)
     if Path(dest).resolve() == Path(scan.path).resolve():
         raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
     mapping = replacements or {}
@@ -356,7 +393,7 @@ def session_totals(scans: list[FileScan], *, enabled_only: bool = True) -> tuple
 def _finish(scan: FileScan) -> FileScan:
     if scan.status == "fail":
         return scan
-    if not scan.hits:
+    if not scan.hits and scan.unlocated_count <= 0:
         scan.status = "nohit"
     scan.too_many = too_many_file_hits(len(scan.hits))
     return scan
@@ -431,11 +468,14 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
             text = page.get_text("text", textpage=textpage)
             lines = text.splitlines()
             pages.append(lines)
-            for hit in engine.find_hits(text):
-                line_no = text[: hit.start].count("\n") + 1
-                rects = find_hit_rects(page, hit, textpage)
+            found = list(engine.find_hits(text))
+            located = locate_text_hits(page, found, textpage)
+            for hit, rects in zip(found, located):
                 if not rects:
+                    # Count only. The hit text is not kept on the scan.
+                    scan.unlocated_count += 1
                     continue
+                line_no = text[: hit.start].count("\n") + 1
                 scan.hits.append(
                     LocatedHit(
                         hit_id=ids.next(),
@@ -585,33 +625,19 @@ def _write_docx_media(dest: Path, by_unit: dict[str, list[LocatedHit]]) -> dict[
     return counts
 
 
-def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None) -> dict[str, int]:
+def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None) -> RedactionCounts:
     document = pymupdf.open(scan.path)
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
-        placed = False
-        fills: list[tuple[int, tuple[float, float, float, float], str]] = []
+        order = list(getattr(engine, "category_order", []) or [])
+        items = []
         for hit in scan.enabled_hits:
-            if not hit.rects:
+            # Image hits are black boxes. They have no text rectangle.
+            if not hit.rects or str(hit.unit).startswith("pdfimg:"):
                 continue
-            page = document[hit.page]
-            usable = []
-            for x0, y0, x1, y1 in hit.rects:
-                rect = pymupdf.Rect(x0, y0, x1, y1)
-                if rect.is_empty or rect.width <= 0 or rect.height <= 0:
-                    continue
-                page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
-                usable.append((x0, y0, x1, y1))
-                placed = True
-            if usable:
-                target = max(usable, key=lambda item: (item[2] - item[0]) * (item[3] - item[1]))
-                fills.append((hit.page, target, label(hit.category)))
-        if placed:
-            for page in document:
-                page.apply_redactions(images=0, graphics=0, text=0)
-            for page_index, box, text in fills:
-                fill_placeholder(document[page_index], pymupdf.Rect(*box), text)
+            items.append((hit.page, list(hit.rects), hit.category, hit.text))
+        stats = redact_text_placeholders(document, items, label, order)
         image_units = [hit for hit in scan.enabled_hits if hit.unit.startswith("pdfimg:")]
         if image_units:
             by_xref: dict[int, list[LocatedHit]] = {}
@@ -635,12 +661,18 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                     buf = io.BytesIO()
                     painted.save(buf, format="PNG")
                     page.replace_image(xref, stream=buf.getvalue())
+        if stats.used:
+            append_legend(document, legend_lines(stats.used))
         clear_pdf_hidden(document)
         mkdir_output(dest.parent)
         document.save(dest, garbage=4, clean=True)
     finally:
         document.close()
-    return scan.category_counts(enabled_only=True)
+    return RedactionCounts(
+        scan.category_counts(enabled_only=True),
+        short_count=stats.short_count,
+        blank_count=stats.blank_count,
+    )
 
 
 def _write_image(scan: FileScan, dest: Path) -> dict[str, int]:
