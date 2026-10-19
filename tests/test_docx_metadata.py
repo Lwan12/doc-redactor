@@ -167,3 +167,119 @@ def test_cli_redact_clears_properties(tmp_path: Path):
     dest = tmp_path / "out.docx"
     redact_docx(src, dest, _engine())
     _assert_clean(dest)
+
+
+# --- Read the written file back with parsers, field by field ---------------
+# Covers the Word metadata items of the AI-readability review (W3: core, app
+# incl. Company/Manager/Template/HyperlinkBase/TitlesOfParts, custom.xml,
+# customXml, thumbnail).
+
+THUMB_CT = '<Override PartName="/docProps/thumbnail.png" ContentType="image/png"/>'
+THUMB_REL = (
+    '<Relationship Id="rIdThumb9" '
+    'Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" '
+    'Target="docProps/thumbnail.png"/>'
+)
+_CORE_FIELDS = (
+    "author", "title", "subject", "keywords", "comments", "last_modified_by",
+    "category", "content_status", "identifier", "version", "language",
+)
+
+
+def _thumbnail_png() -> bytes:
+    import pymupdf
+
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 8, 8), False)
+    pix.clear_with(255)
+    return pix.tobytes("png")
+
+
+def _build_full(path: Path) -> None:
+    """The fixture above plus a page-1 thumbnail, as Word saves with "Save Thumbnail"."""
+    base = path.with_suffix(".base.docx")
+    _build(base)
+    with zipfile.ZipFile(base) as src, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "[Content_Types].xml":
+                data = data.replace(b"</Types>", THUMB_CT.encode() + b"</Types>")
+            elif info.filename == "_rels/.rels":
+                data = data.replace(b"</Relationships>", THUMB_REL.encode() + b"</Relationships>")
+            dst.writestr(info, data)
+        dst.writestr("docProps/thumbnail.png", _thumbnail_png())
+    base.unlink()
+
+
+def _parsed(path: Path) -> dict:
+    from lxml import etree
+
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+
+        def xml(name):
+            return etree.fromstring(archive.read(name)) if name in names else None
+
+        return {
+            "names": names,
+            "app": xml("docProps/app.xml"),
+            "custom": xml("docProps/custom.xml"),
+            "item": xml("customXml/item1.xml"),
+            "rels": xml("_rels/.rels"),
+        }
+
+
+def _local(element) -> str:
+    from lxml import etree
+
+    return etree.QName(element).localname
+
+
+def _assert_parsed_clean(path: Path) -> None:
+    doc = Document(str(path))
+    for field in _CORE_FIELDS:
+        assert not getattr(doc.core_properties, field), field
+    body = [p.text for p in doc.paragraphs if p.text]
+    assert len(body) == 1 and body[0].startswith("Project ") and "ABC-2026" not in body[0]
+    package_parts = {str(part.partname) for part in doc.part.package.iter_parts()}
+    assert "/docProps/thumbnail.png" not in package_parts
+
+    got = _parsed(path)
+    assert "docProps/thumbnail.png" not in got["names"]
+    assert not any(r.get("Type", "").endswith("/thumbnail") for r in got["rels"])
+    app = {_local(e): e for e in got["app"]}
+    for tag in ("Company", "Manager", "Template", "HyperlinkBase", "TitlesOfParts", "HeadingPairs"):
+        assert tag not in app, tag
+    assert app["Application"].text == "Microsoft Office Word"
+    assert "".join(got["app"].itertext()).find("Acme") < 0
+    # custom.xml parses and holds no property at all.
+    assert got["custom"] is not None and len(got["custom"]) == 0
+    # customXml item keeps its root element, nothing under it.
+    assert got["item"] is not None and len(got["item"]) == 0 and not (got["item"].text or "").strip()
+
+
+def test_fixture_with_thumbnail_carries_every_field(tmp_path: Path):
+    src = tmp_path / "full.docx"
+    _build_full(src)
+    doc = Document(str(src))
+    assert all(getattr(doc.core_properties, f) for f in ("author", "title", "comments", "version"))
+    got = _parsed(src)
+    assert "docProps/thumbnail.png" in got["names"]
+    app = {_local(e) for e in got["app"]}
+    assert {"Company", "Manager", "Template", "HyperlinkBase", "TitlesOfParts"} <= app
+    assert len(got["custom"]) == 1 and len(got["item"]) == 1
+
+
+def test_gui_write_parsed_back_has_no_metadata(tmp_path: Path):
+    src = tmp_path / "full.docx"
+    _build_full(src)
+    dest = tmp_path / "gui.docx"
+    write_scan(scan_path(src, _engine()), dest)
+    _assert_parsed_clean(dest)
+
+
+def test_cli_write_parsed_back_has_no_metadata(tmp_path: Path):
+    src = tmp_path / "full.docx"
+    _build_full(src)
+    dest = tmp_path / "cli.docx"
+    redact_docx(src, dest, _engine())
+    _assert_parsed_clean(dest)
