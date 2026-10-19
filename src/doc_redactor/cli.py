@@ -121,3 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     for line in blocked:
         print(line, file=sys.stderr)
     return 1 if blocked else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
