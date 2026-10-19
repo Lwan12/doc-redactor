@@ -251,3 +251,60 @@ def test_cli_and_gui_keep_a_file_whose_only_new_hit_is_made_up(tmp_path: Path):
     engine = load_rules(engine_rules)
     [res] = write_scans([scan_path(src, engine)], tmp_path / "gui", engine=engine)
     assert res.error is None and res.dest is not None
+
+
+# --- M34-3：取消勾选按次数放行，不按文字放行 ---------------------------------------
+
+
+def _sponsor_engine():
+    return build_engine([], [WordlistRule(category="SPONSOR", terms=["Acme Pharma"], case_sensitive=False)])
+
+
+def _two_pages_pdf(path: Path, named_destination: bool) -> None:
+    document = pymupdf.open()
+    document.new_page()
+    document.new_page()
+    document[0].insert_text((72, 72), "Reference: Acme Pharma (public paper).", fontsize=12)
+    document[1].insert_text((72, 72), "Sponsor Acme Pharma confidential.", fontsize=12)
+    if named_destination:
+        names = document.get_new_xref()
+        document.update_object(names, "<< /Names [(Acme Pharma section) [%d 0 R /XYZ 72 72 0]] >>" % document[1].xref)
+        holder = document.get_new_xref()
+        document.update_object(holder, "<< /Dests %d 0 R >>" % names)
+        document.xref_set_key(document.pdf_catalog(), "Names", "%d 0 R" % holder)
+    document.save(path)
+    document.close()
+
+
+def _write_with_first_unchecked(source: Path, out: Path):
+    engine = _sponsor_engine()
+    scan = scan_path(source, engine)
+    assert [hit.text for hit in scan.hits] == ["Acme Pharma", "Acme Pharma"]
+    scan.hits[0].enabled = False
+    return write_scans([scan], out, engine=engine)[0]
+
+
+def test_unchecking_one_place_still_blocks_the_same_word_in_a_named_destination(tmp_path: Path):
+    source = tmp_path / "kept-bypass.pdf"
+    _two_pages_pdf(source, named_destination=True)
+    result = _write_with_first_unchecked(source, tmp_path / "out")
+    assert result.dest is None, "命名目标里的原词被一起放行了"
+    assert result.error and "复核" in result.error
+    assert not list((tmp_path / "out").glob("*.pdf"))
+
+
+def test_unchecked_place_alone_is_still_written(tmp_path: Path):
+    source = tmp_path / "kept-only.pdf"
+    _two_pages_pdf(source, named_destination=False)
+    result = _write_with_first_unchecked(source, tmp_path / "out")
+    assert result.error is None and result.dest is not None
+    with pymupdf.open(result.dest) as output:
+        assert "Acme Pharma" in output[0].get_text()
+        assert "Acme Pharma" not in output[1].get_text()
+
+
+def test_gate_and_after_write_check_share_one_allowance_function():
+    from doc_redactor import leak_check, verify_output
+
+    assert leak_check.count_not_allowed is verify_output.count_not_allowed
+    assert leak_check.is_invented is verify_output.is_invented

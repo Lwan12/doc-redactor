@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 # U+00A0 keeps "1 处" on one line when a banner wraps.
 MSG_LEFTOVER_HEAD = "{n}\u00a0处写出后仍可见"
@@ -193,7 +193,7 @@ def leftover_hits_in_unit(
 
     ``known``: hit texts found in the original. When given, a hit whose text
     the original never had is dropped only if it neither contains an original
-    hit text nor is part of one (see ``_invented``): removing a word can join
+    hit text nor is part of one (see ``is_invented``): removing a word can join
     its neighbours into a new hit (PDF text extraction also moves an inserted
     placeholder to the end of the page), but a leftover always overlaps
     original hit text.
@@ -205,7 +205,7 @@ def leftover_hits_in_unit(
     for start, end, text in _raw_hits(unit, engine, target_list):
         if any(s <= start and end <= e for s, e in spans):
             continue
-        if known_set is not None and _invented(_squash(text), known_set):
+        if known_set is not None and is_invented(_squash(text), known_set):
             continue
         kept.append(text)
     return kept
@@ -215,7 +215,7 @@ def _squash(text: str) -> str:
     return "".join(text.split())
 
 
-def _invented(squashed: str, known: set[str]) -> bool:
+def is_invented(squashed: str, known: set[str]) -> bool:
     """True only for a hit the writer's own changes made up.
 
     A hit text the original never had is dropped only when it neither
@@ -273,8 +273,23 @@ def count_leftovers(
             known=known_list,
         ):
             found[text] += 1
-    allowed = Counter(kept)
-    return sum(max(0, n - allowed.get(text, 0)) for text, n in found.items())
+    return count_not_allowed(found, kept)
+
+
+def not_allowed(found: Mapping[str, int], kept: Iterable[str], key: Callable[[str], str] = str) -> Counter:
+    """Per hit text, how many occurrences are left once the unchecked ones are allowed.
+
+    ``kept`` lists the text of every hit the user unchecked, once per hit, so
+    unchecking one place lets exactly one occurrence through; the same word
+    anywhere else still counts. The after-write check here and the
+    other-reader check (``leak_check``) both use this.
+    """
+    allowed = Counter(key(text) for text in kept if text)
+    return Counter({text: n - allowed.get(text, 0) for text, n in found.items() if n - allowed.get(text, 0) > 0})
+
+
+def count_not_allowed(found: Mapping[str, int], kept: Iterable[str], key: Callable[[str], str] = str) -> int:
+    return sum(not_allowed(found, kept, key).values())
 
 
 def discard_output(path: Path) -> bool:
