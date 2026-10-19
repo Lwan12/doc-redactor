@@ -1201,6 +1201,8 @@ class App:
                 "res-hf-auto-ok": "auto",
                 "res-hf-auto-undo": "auto",
                 "res-hf-all-pend": "auto",
+                "res-hf-fixed": "auto",
+                "res-hf-fixed-ok": "auto",
                 "res-hf-mixed": "mixed",
                 "res-hf-mixed-ok": "mixed",
                 "res-hf-none": "none",
@@ -1213,7 +1215,21 @@ class App:
                 self.selected = "all"
             if key == "res-hf-filecancel":
                 self.scans[0].hf_keep = True
-            if key in {"res-hf-auto-ok", "res-hf-mixed-ok"}:
+            if key in {"res-hf-fixed", "res-hf-fixed-ok"}:
+                # #28 r3 m7: two rows of fixed text taken past the outer two.
+                from dataclasses import replace as _replace
+
+                from doc_redactor import header_footer as _hf
+
+                plan = self.scans[1].hf_plan
+                self.scans[1].hf_plan = _replace(
+                    plan,
+                    candidates=tuple(
+                        _replace(c, fixed_rows=2) if c.source == _hf.SOURCE_REPEAT and c.role == _hf.ROLE_HEADER else c
+                        for c in plan.candidates
+                    ),
+                )
+            if key in {"res-hf-auto-ok", "res-hf-mixed-ok", "res-hf-fixed-ok"}:
                 set_file_hf_confirmed(self.scans[1], True)
             if key == "res-hf-auto-undo":
                 # Confirm, then undo: back to 待确认.

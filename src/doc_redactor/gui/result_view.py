@@ -137,6 +137,10 @@ def _line_box(text: tk.Text, index: str):
         return None
 
 
+# Under the preview; ends with 「。」 so a clipped line is easy to spot (#28 r3 m11).
+LOCATE_HINT = "点任一处高亮或右边的位置，可以定位。"
+
+
 class ResultView:
     def __init__(self, app) -> None:
         self.app = app
@@ -673,7 +677,7 @@ class ResultView:
         if cur is not None:
             hint = f"当前：{cur.location} · {self.app.marker(cur.category)} {cur.category}"
         else:
-            hint = "点任一处高亮，或点右边的位置，可以定位"
+            hint = LOCATE_HINT
         fit_label(foot, hint, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(fill="x", padx=8, pady=4)
 
         body.pack(fill="both", expand=True)

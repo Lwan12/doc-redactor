@@ -1220,7 +1220,8 @@ def _inside(widget, outer) -> bool:
 
 
 @pytest.mark.parametrize(
-    "key", ["res-hf-auto", "res-hf-auto-ok", "res-hf-auto-undo", "res-hf-mixed", "res-hf-mixed-ok"]
+    "key",
+    ["res-hf-auto", "res-hf-auto-ok", "res-hf-auto-undo", "res-hf-mixed", "res-hf-mixed-ok", "res-hf-fixed", "res-hf-fixed-ok"],
 )
 def test_confirm_bar_keeps_preview_pager_and_radios_visible_at_960x640(gui, key):
     """#28 r2 M3: at 960×640 the 「待确认」 strip squeezed its text into a column
@@ -1286,3 +1287,50 @@ def test_output_hint_is_not_covered_by_the_buttons_at_960x640(gui):
     assert len(buttons) == 1
     assert hint.winfo_rootx() + hint.winfo_width() <= buttons[0].winfo_rootx()
     assert _inside(hint, app.root)
+
+
+@pytest.mark.parametrize("size", ["960x640", "1100x720"])
+@pytest.mark.parametrize("key", ["res-hf-auto", "res-pdf", "res-word"])
+def test_locate_hint_under_the_preview_is_not_clipped(gui, key, size):
+    """#28 r3 m11: the hint under the preview ended flush with the column's
+    right edge and had no closing 「。」, so it looked cut off. Measured: it was
+    whole. Now it ends with 「。」 and wraps; this guards that it stays whole."""
+    from doc_redactor.gui.result_view import LOCATE_HINT
+
+    app = gui
+    app.root.geometry(f"{size}+0+0")
+    _settle(app)
+    app.current_hit = None
+    app.apply_shoot_state(key)
+    _settle(app)
+    _settle(app)
+    found = [w for w in _walk(app.result_view.frame) if w.winfo_class() == "Message" and w.cget("text") == LOCATE_HINT]
+    assert len(found) == 1, key
+    message = found[0]
+    frame = message.master
+    assert message.winfo_reqwidth() <= frame.winfo_width(), (key, size, message.winfo_reqwidth(), frame.winfo_width())
+    assert message.winfo_rootx() + message.winfo_width() <= frame.winfo_rootx() + frame.winfo_width()
+    assert _inside(message, app.root)
+    # Every character is drawn: the wrapped lines need no more than its height.
+    import tkinter.font as tkfont
+
+    font = tkfont.Font(font=message.cget("font"))
+    lines = -(-font.measure(LOCATE_HINT) // max(1, int(message.cget("width"))))
+    assert message.winfo_height() >= lines * font.metrics("linespace"), (key, size)
+    # One line at 960 and up: no lone 「。」 wrapped onto a second line.
+    assert font.measure(LOCATE_HINT) <= int(message.cget("width")), (key, size)
+    app.root.geometry("960x640+0+0")
+    _settle(app)
+
+
+def test_fixed_rows_hint_is_on_the_confirm_strip(gui):
+    app = gui
+    app.root.geometry("960x640+0+0")
+    _settle(app)
+    app.apply_shoot_state("res-hf-fixed")
+    _settle(app)
+    bars = [w for w in _walk(app.result_view.frame) if getattr(w, "hf_bar", None)]
+    assert len(bars) == 1
+    assert "含 2 行固定文字" in bars[0].logical_text
+    # Wrapped, nothing lost: the shown lines join back to the sentence.
+    assert "".join(bars[0].cget("text").split("\n")).replace(" ", "") == bars[0].logical_text.replace(" ", "")

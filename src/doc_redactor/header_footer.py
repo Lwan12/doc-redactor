@@ -191,6 +191,10 @@ class Candidate:
     part: str = ""
     slots: tuple[str, ...] = ()
     text: str = field(default="", repr=False, compare=False)
+    # Repeats only: text rows taken past MAX_EDGE_ROWS because they are the
+    # same on every page (not bare page numbers), most on one page. Such a
+    # row may be a repeated table head or disclaimer (#28 r3 m7). Count only.
+    fixed_rows: int = 0
 
 
 @dataclass(frozen=True)
@@ -435,7 +439,20 @@ def _band_gap(a: dict, b: dict, lines: float = BAND_GAP_LINES) -> float:
     return max(MAX_BAND_GAP, lines * height)
 
 
-def edge_band(page: PageLayout, zone: str, accepted: set, covered: set, *, audit: bool = False) -> set:
+def _number_row(row) -> bool:
+    """Every text in the row is only a page number."""
+    for element in row["items"]:
+        if element.kind != KIND_TEXT:
+            continue
+        collapsed = _SPACES.sub(" ", element.text).strip()
+        if not (_NUMBER_ONLY.match(collapsed) or _PAGE_PHRASE.fullmatch(collapsed)):
+            return False
+    return True
+
+
+def edge_band(
+    page: PageLayout, zone: str, accepted: set, covered: set, *, audit: bool = False, deep: list | None = None
+) -> set:
     """ids of ``accepted`` elements that form this page's header or footer.
 
     Walks rows from the page edge: every element of a row must repeat (or be
@@ -445,6 +462,9 @@ def edge_band(page: PageLayout, zone: str, accepted: set, covered: set, *, audit
 
     ``audit`` (for :func:`leftover_edge_rows`) drops the row limit and allows
     twice the spacing, to report what removal might have missed.
+
+    ``deep``, when given, gets one set of element ids per fixed text row
+    kept past ``MAX_EDGE_ROWS`` (bare page-number rows not included).
     """
     limit = page.height * ZONE_FRACTION
     items = []
@@ -477,9 +497,12 @@ def edge_band(page: PageLayout, zone: str, accepted: set, covered: set, *, audit
             if last_content is not None and row["bnear"] - last_content["bfar"] > _band_gap(last_content, row, lines):
                 stop = row
                 break
-            if text_rows >= MAX_EDGE_ROWS and not audit and not _fixed_row(row):
-                stop = row
-                break
+            if text_rows >= MAX_EDGE_ROWS and not audit:
+                if not _fixed_row(row):
+                    stop = row
+                    break
+                if not _number_row(row):
+                    row["deep"] = True
             text_rows += 1
             last_content = row
         band.append(row)
@@ -493,6 +516,8 @@ def edge_band(page: PageLayout, zone: str, accepted: set, covered: set, *, audit
             stop = band.pop()
     ids = {id(e) for r in band for e in r["items"] if id(e) in accepted}
     ids_band = {id(e) for r in band for e in r["items"]}
+    if deep is not None:
+        deep.extend({id(e) for e in r["items"] if id(e) in ids} for r in band if r.get("deep"))
     return {i for i in ids if not _is_table_rule(i, page, ids_band)}
 
 
@@ -537,6 +562,7 @@ def find_repeats(
             if item.page in kept:
                 accepted.setdefault(item.page, {})[(item.kind, item.bbox, item.text)] = cluster
     keep_ids: dict[int, set] = {}
+    deep_keys: dict[int, list[set]] = {}
     for index, marks in accepted.items():
         page = by_index[index]
         ids = {id(e) for e in page.items if (e.kind, e.bbox, e.text) in marks}
@@ -544,11 +570,13 @@ def find_repeats(
             id(e) for e in page.items if any(_overlaps(e.bbox, box) for box in exclude.get(index, ()))
         }
         chosen: set = set()
+        deep: list[set] = []
         for zone in (ROLE_HEADER, ROLE_FOOTER):
-            chosen |= edge_band(page, zone, ids, covered, audit=audit)
+            chosen |= edge_band(page, zone, ids, covered, audit=audit, deep=deep)
         keep_ids[index] = {
             (e.kind, e.bbox, e.text) for e in page.items if id(e) in chosen
         }
+        deep_keys[index] = [{(e.kind, e.bbox, e.text) for e in page.items if id(e) in row} for row in deep]
     by_role: dict[str, list[Element]] = {}
     for cluster, kept in first:
         items = [i for i in cluster["items"] if (i.kind, i.bbox, i.text) in keep_ids.get(i.page, set())]
@@ -556,10 +584,17 @@ def find_repeats(
         for element in items:
             if element.page in still:
                 by_role.setdefault(role_for(element, cluster["zone"]), []).append(element)
-    return [
-        _candidate(f"{SOURCE_REPEAT}-{role}", SOURCE_REPEAT, role, items, confirmed=REPEAT_CONFIRMED_BY_DEFAULT)
-        for role, items in sorted(by_role.items())
-    ]
+    out = []
+    for role, items in sorted(by_role.items()):
+        candidate = _candidate(f"{SOURCE_REPEAT}-{role}", SOURCE_REPEAT, role, items, confirmed=REPEAT_CONFIRMED_BY_DEFAULT)
+        mine: dict[int, set] = {}
+        for element in items:
+            mine.setdefault(element.page, set()).add((element.kind, element.bbox, element.text))
+        most = 0
+        for index, keys in mine.items():
+            most = max(most, sum(1 for row in deep_keys.get(index, ()) if row and row <= keys))
+        out.append(replace(candidate, fixed_rows=most) if most else candidate)
+    return out
 
 
 def leftover_edge_rows(document) -> tuple[int, int]:
