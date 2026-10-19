@@ -674,13 +674,25 @@ def redact_text_placeholders(document, items, label, category_order: list[str] |
         page = document[page_index]
         fills: list[tuple] = []
         placed = False
+        glyphs = _GlyphIndex(_page_glyphs(page))
+        # Images and vector paths are not deleted, only covered by the white
+        # fill; a box that meets one keeps its whole height (M1, PR #40).
+        under = [pymupdf.Rect(info["bbox"]) for info in page.get_image_info()]
+        under += [pymupdf.Rect(path["rect"]) for path in page.get_drawings()]
+        trimmed: list[tuple] = []
         for rects, category, text in jobs:
             usable = []
             for rect in rects:
                 box = pymupdf.Rect(rect)
                 if box.is_empty or box.width <= 0 or box.height <= 0:
                     continue
-                page.add_redact_annot(box, fill=(1, 1, 1), cross_out=False)
+                if any(box.intersects(shape) for shape in under):
+                    cut = box
+                else:
+                    cut = _redaction_box(box, glyphs)
+                page.add_redact_annot(cut, fill=(1, 1, 1), cross_out=False)
+                if cut != box:
+                    trimmed.append((box, _hit_glyphs(box, glyphs)))
                 usable.append(box)
                 placed = True
             if not usable:
@@ -693,6 +705,10 @@ def redact_text_placeholders(document, items, label, category_order: list[str] |
             continue
         # images=0 keeps image xobjects intact so a later OCR pass can see them.
         page.apply_redactions(images=0, graphics=0, text=0)
+        if trimmed:
+            # A trimmed box that left a glyph of its own line behind is redone
+            # with the whole box: never keep hit text to save a neighbour.
+            _redo_trimmed(page, trimmed)
         for box, full, code, title in fills:
             kind = _write_choice(page, box, full, code)
             if kind == "short":
@@ -701,6 +717,134 @@ def redact_text_placeholders(document, items, label, category_order: list[str] |
             elif kind == "blank":
                 stats.blank_count += 1
     return stats
+
+
+# MuPDF removes every glyph whose box touches a redaction rectangle. A hit's
+# rectangle is its glyph boxes from rawdict (ascender to descender; the
+# height depends on the font: Helvetica about 1.37 × the font size, Times
+# 1.334, Courier 1.249, the built-in CJK font 1.200), so with lines closer than that it also touched the
+# line above or below and removed it (#38). The redaction box is trimmed
+# vertically to stay clear of other lines' glyphs; the placeholder still
+# uses the whole box.
+_CORE = 0.15  # the trimmed box must keep this inner part of the hit's height
+_MIN_CORE_OVERLAP = 0.3
+
+
+def _page_glyphs(page) -> list[tuple[pymupdf.Rect, int]]:
+    """(glyph box, line number) for every visible character of the page."""
+    out: list[tuple[pymupdf.Rect, int]] = []
+    line_no = 0
+    for block in page.get_text("rawdict").get("blocks", ()):
+        for line in block.get("lines", ()):
+            line_no += 1
+            for span in line.get("spans", ()):
+                for ch in span.get("chars", ()):
+                    if not (ch.get("c") or "").strip():
+                        continue
+                    box = pymupdf.Rect(ch["bbox"])
+                    if box.width > 0 and box.height > 0:
+                        out.append((box, line_no))
+    return out
+
+
+class _GlyphIndex:
+    """The page's glyphs on a coarse grid, so a box only looks at the glyphs
+    near it instead of every glyph of the page (S1, PR #40)."""
+
+    STEP_Y = 4.0
+    STEP_X = 24.0
+
+    def __init__(self, glyphs):
+        self.items = list(glyphs)
+        self.cells: dict[tuple[int, int], list[int]] = {}
+        for index, (glyph, _line) in enumerate(self.items):
+            for cell in self._cells(glyph, 0):
+                self.cells.setdefault(cell, []).append(index)
+
+    def _cells(self, box, pad):
+        for ky in range(int(box.y0 // self.STEP_Y) - pad, int(box.y1 // self.STEP_Y) + pad + 1):
+            for kx in range(int(box.x0 // self.STEP_X) - pad, int(box.x1 // self.STEP_X) + pad + 1):
+                yield ky, kx
+
+    def near(self, box: pymupdf.Rect):
+        """Each glyph that may meet ``box`` (one cell of slack), once."""
+        found: set[int] = set()
+        for cell in self._cells(box, 1):
+            found.update(self.cells.get(cell, ()))
+        return [self.items[index] for index in sorted(found)]
+
+
+def _near(glyphs, box):
+    return glyphs.near(box) if isinstance(glyphs, _GlyphIndex) else glyphs
+
+
+def _centre_in(glyph: pymupdf.Rect, box: pymupdf.Rect) -> bool:
+    cx = (glyph.x0 + glyph.x1) / 2
+    cy = (glyph.y0 + glyph.y1) / 2
+    return box.x0 <= cx <= box.x1 and box.y0 <= cy <= box.y1
+
+
+def _own_line(box: pymupdf.Rect, glyphs) -> int | None:
+    """The rawdict line the hit box was built from: the line of the glyph
+    inside it whose top and bottom match the box best."""
+    best, score = None, None
+    for glyph, line_no in _near(glyphs, box):
+        if not _centre_in(glyph, box):
+            continue
+        diff = abs(glyph.y0 - box.y0) + abs(glyph.y1 - box.y1)
+        if score is None or diff < score:
+            best, score = line_no, diff
+    return best
+
+
+def _redaction_box(box: pymupdf.Rect, glyphs) -> pymupdf.Rect:
+    """``box`` trimmed so it touches no glyph of another line, or ``box``
+    itself when trimming would not leave enough of the hit's height."""
+    own = _own_line(box, glyphs)
+    if own is None:
+        return box
+    y0, y1 = box.y0, box.y1
+    mid = (box.y0 + box.y1) / 2
+    for glyph, line_no in _near(glyphs, box):
+        if line_no == own:
+            continue
+        if min(glyph.x1, box.x1) <= max(glyph.x0, box.x0):
+            continue
+        if min(glyph.y1, y1) <= max(glyph.y0, y0):
+            continue
+        if (glyph.y0 + glyph.y1) / 2 >= mid:
+            y1 = min(y1, glyph.y0)
+        else:
+            y0 = max(y0, glyph.y1)
+    if (y0, y1) == (box.y0, box.y1):
+        return box
+    core0 = box.y0 + _CORE * box.height
+    core1 = box.y1 - _CORE * box.height
+    if min(y1, core1) - max(y0, core0) < _MIN_CORE_OVERLAP:
+        return box
+    return pymupdf.Rect(box.x0, y0, box.x1, y1)
+
+
+def _hit_glyphs(box: pymupdf.Rect, glyphs) -> list[pymupdf.Rect]:
+    """Glyph boxes of the hit itself: its own line, centre inside the box."""
+    own = _own_line(box, glyphs)
+    return [glyph for glyph, line_no in _near(glyphs, box) if line_no == own and _centre_in(glyph, box)]
+
+
+def _same_box(a: pymupdf.Rect, b: pymupdf.Rect, tol: float = 0.25) -> bool:
+    return all(abs(u - v) <= tol for u, v in zip(a, b))
+
+
+def _redo_trimmed(page, trimmed) -> None:
+    again = []
+    remaining = _GlyphIndex(_page_glyphs(page))
+    for box, hit_glyphs in trimmed:
+        if any(_same_box(glyph, mine) for mine in hit_glyphs for glyph, _line in remaining.near(mine)):
+            again.append(box)
+    for box in again:
+        page.add_redact_annot(box, fill=(1, 1, 1), cross_out=False)
+    if again:
+        page.apply_redactions(images=0, graphics=0, text=0)
 
 
 def _write_choice(page, rect, full: str, short: str) -> str:

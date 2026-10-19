@@ -1213,3 +1213,174 @@ def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
     _settle(app)
     hidden = _tree_values(app.root)
     assert "近似" in hidden and "Fictlzumab" not in hidden
+
+
+def _r15_scans():
+    """Three PDFs like the #26 review: one blocked, one refused, one written."""
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    def _hit(hit_id: int, text: str, line: int) -> LocatedHit:
+        return LocatedHit(
+            hit_id=hit_id,
+            category="申办方",
+            text=text,
+            location=f"第 1 页 · 第 {line} 行",
+            unit="page:0",
+            start=0,
+            end=len(text),
+            rects=[(72.0, 80.0, 140.0, 94.0)],
+            page=0,
+        )
+
+    lost = FileScan(
+        path=Path("lost.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(11, "星辰海", 1), _hit(12, "星辰海", 2), _hit(13, "星辰海", 3)],
+        pages=[["星辰海 星辰海 星辰海"]],
+        unlocated_count=2,
+    )
+    swap = FileScan(
+        path=Path("swap.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(21, "Acme", 1), _hit(22, "Acme", 2)],
+        pages=[["Acme Pharma", "Acme Pharma"]],
+    )
+    other = FileScan(
+        path=Path("other.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(31, "Acme", 1), _hit(32, "Acme", 2)],
+        pages=[["Acme Pharma", "Acme Pharma"]],
+    )
+    return lost, swap, other
+
+
+def _show_r15(app, *, written: bool, selected="all"):
+    lost, swap, other = _r15_scans()
+    swap.hits[1].enabled = False
+    app.scans = [lost, swap, other]
+    app.selected = selected
+    app.selected_cat = None
+    app.current_hit = None
+    app.written = written
+    app.write_errors = (
+        {str(lost.path): "2 处无法定位，未写出", str(other.path): "模拟输出文件被占用"} if written else {}
+    )
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    _settle(app)
+    return lost, swap, other
+
+
+def _loc_tree(app):
+    from tkinter import ttk
+
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("on", "loc", "cat", "text"):
+            return node
+    raise AssertionError("no location list")
+
+
+def _loc_header(app) -> str:
+    import tkinter as tk
+
+    for node in _walk(app.root):
+        if isinstance(node, tk.Label) and str(node.cget("text")).startswith("被替换的位置"):
+            return node.cget("text")
+    raise AssertionError("no 被替换的位置 header")
+
+
+def test_location_counts_share_the_top_count():
+    """#26 S1: the header counted every listed hit, written or not."""
+    from doc_redactor.gui.result_view import location_header, unwritten_hit_total, writable_hit_total
+
+    lost, swap, other = _r15_scans()
+    swap.hits[1].enabled = False
+    scans = [lost, swap, other]
+    errors = {str(other.path): "占用"}
+    assert writable_hit_total(scans, written=True, write_errors=errors) == 1
+    assert unwritten_hit_total(scans, written=True, write_errors=errors) == 5
+    assert location_header(scans, written=True, write_errors=errors) == "被替换的位置 1（另 5 处未写出）"
+    # Category filter: the same count, narrowed.
+    assert writable_hit_total(scans, written=True, write_errors=errors, category="药名") == 0
+    assert location_header(scans, written=True, write_errors=errors, category="药名") == "被替换的位置 0"
+    # Nothing left out: no note.
+    assert location_header([swap], written=True, write_errors=errors) == "被替换的位置 1"
+    # One file that was not written.
+    assert location_header([other], written=True, write_errors=errors) == "被替换的位置 0（另 2 处未写出）"
+    # Before a write only the blocked file is left out; stale errors are ignored.
+    assert location_header(scans, written=False, write_errors=errors) == "被替换的位置 3（另 3 处未写出）"
+
+
+@pytest.mark.parametrize("written", [False, True])
+def test_location_header_matches_the_top_summary(gui, written):
+    app = gui
+    _show_r15(app, written=written)
+    verb = "已替换" if written else "将替换"
+    top = _summary_number(app, verb)
+    header = _loc_header(app)
+    assert header.startswith(f"被替换的位置 {top}"), (top, header)
+    if written:
+        assert header == "被替换的位置 1（另 5 处未写出）"
+    else:
+        assert header == "被替换的位置 3（另 3 处未写出）"
+
+
+def _full_rows(tree) -> int:
+    tree.update_idletasks()
+    height = tree.winfo_height()
+    full = 0
+    for item in tree.get_children():
+        box = tree.bbox(item)
+        if box and box[1] >= 0 and box[1] + box[3] <= height:
+            full += 1
+    return full
+
+
+@pytest.mark.parametrize("written", [False, True])
+def test_location_list_shows_three_full_rows_at_960x640(gui, written):
+    """#26 S2: at 960×640 the category table pushed the list down to 1½ rows."""
+    app = gui
+    app.root.geometry("960x640+0+0")
+    _settle(app)
+    _show_r15(app, written=written)
+    assert app.root.winfo_height() == 640
+    assert _full_rows(_loc_tree(app)) >= 3
+
+
+def test_category_table_keeps_all_rows_reachable_when_short(gui):
+    """A shortened category table scrolls; no row is dropped."""
+    from tkinter import ttk
+
+    app = gui
+    app.root.geometry("960x640+0+0")
+    _settle(app)
+    _show_r15(app, written=True)
+    cat_tree = next(
+        n for n in _walk(app.root) if isinstance(n, ttk.Treeview) and tuple(n.cget("columns")) == ("cat", "n")
+    )
+    rows = [tuple(str(v) for v in cat_tree.item(i, "values")) for i in cat_tree.get_children()]
+    assert ("合计", "1") in rows and ("未写出", "5") in rows
+    if int(cat_tree.cget("height")) < len(rows):
+        bars = [n for n in cat_tree.master.winfo_children() if isinstance(n, ttk.Scrollbar)]
+        assert bars and bars[0].winfo_ismapped()
+
+
+def test_category_rows_that_fit_leaves_room_for_the_list():
+    from doc_redactor.gui.result_view import CAT_MIN_ROWS, LOC_MIN_ROWS, category_rows_that_fit
+
+    # Tall pane: every wanted row.
+    assert category_rows_that_fit(1000, row_h=26, overhead=28, wanted=7) == 7
+    # Exactly enough for 5 category rows plus LOC_MIN_ROWS list rows.
+    space = 2 * 28 + (5 + LOC_MIN_ROWS) * 26
+    assert category_rows_that_fit(space, row_h=26, overhead=28, wanted=7) == 5
+    assert category_rows_that_fit(space - 1, row_h=26, overhead=28, wanted=7) == 4
+    # Very short: the table keeps its floor and scrolls.
+    assert category_rows_that_fit(50, row_h=26, overhead=28, wanted=7) == CAT_MIN_ROWS
+    # Never more than wanted, even when wanted is below the floor.
+    assert category_rows_that_fit(50, row_h=26, overhead=28, wanted=2) == 2

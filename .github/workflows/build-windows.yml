@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/tesseract
-          key: tesseract-win-5.5.3-fast-eng-chi_sim-v1
+          key: tesseract-win-5.5.3.20260724-fast-eng-chi_sim-v1
 
       - name: Install and stage Tesseract (with retry)
         if: steps.tess-cache.outputs.cache-hit != 'true'
@@ -38,7 +38,7 @@ jobs:
           $tess = Find-Tess
           for ($i = 1; ($i -le 5) -and (-not $tess); $i++) {
             Write-Host "choco install tesseract: attempt $i"
-            choco install tesseract -y --no-progress
+            choco install tesseract --version 5.5.3.20260724 -y --no-progress
             $tess = Find-Tess
             if (-not $tess) { Start-Sleep -Seconds (15 * $i) }
           }
