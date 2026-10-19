@@ -14,7 +14,12 @@ import pymupdf
 from PIL import Image
 from docx import Document
 
-from doc_redactor.docx_redactor import apply_hits_to_paragraph, iter_document_paragraphs, scrub_docx_properties
+from doc_redactor.docx_redactor import (
+    apply_hits_to_paragraph,
+    finish_document,
+    iter_document_paragraphs,
+    scrub_docx_properties,
+)
 from doc_redactor import header_footer as hf
 from doc_redactor.engine import Hit, RedactionEngine, counts_from_categories, merge_counts, redaction_label
 from doc_redactor.image_redactor import (
@@ -554,16 +559,25 @@ def _scan_docx(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan, 
             roles = _docx_unit_roles(document, {c.part for c in plan.candidates})
         scan.hf_units = dict(roles)
     paragraphs: list[str] = []
-    number = 0
+    # Body and header/footer paragraphs are numbered together; every other
+    # corner (footnotes, alt text, link targets...) counts on its own.
+    numbers: dict[str, int] = {}
     for index, paragraph in enumerate(iter_document_paragraphs(document)):
         text = paragraph.text or ""
         paragraphs.append(text)
         # A tracked deletion comes just before its paragraph and is reported
         # under that paragraph's number.
         deleted = paragraph.is_deletion
-        location = f"第 {number + 1} 段 · 修订删除" if deleted else f"第 {number + 1} 段"
-        if not deleted:
-            number += 1
+        where = paragraph.where
+        number = numbers.get(where, 0)
+        unit_name = "段" if not where or where in ("脚注", "尾注", "批注") else "处"
+        location = f"第 {number + 1} {unit_name}"
+        if where:
+            location = f"{where} {location}"
+        if deleted:
+            location += " · 修订删除"
+        else:
+            numbers[where] = number + 1
         for hit in paragraph.find_hits(engine):
             scan.hits.append(
                 LocatedHit(
@@ -782,6 +796,7 @@ def _write_docx(scan: FileScan, dest: Path, label, engine: RedactionEngine | Non
             Hit(start=hit.start, end=hit.end, category=hit.category, text=hit.text) for hit in unit_hits
         ]
         categories.extend(apply_hits_to_paragraph(paragraph, engine_hits, label))
+    finish_document(document)
     scrub_docx_properties(document)
     mkdir_output(dest.parent)
     document.save(str(dest))
