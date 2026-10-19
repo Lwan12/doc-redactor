@@ -17,6 +17,15 @@ from doc_redactor.pdf_redactor import find_hit_rects, redact_pdf
 from doc_redactor.scan import scan_path, write_scan
 
 
+
+def _is_poppler() -> bool:
+    """Windows CI ships xpdf's pdftotext, which has no CJK maps; only trust poppler."""
+    try:
+        probe = subprocess.run(["pdftotext", "-v"], capture_output=True)
+    except OSError:
+        return False
+    return b"Poppler" in (probe.stdout + probe.stderr)
+
 def _engine(terms: list[str], *, category: str = "申办方", case_sensitive: bool = False):
     return build_engine(
         [],
@@ -198,6 +207,8 @@ def _extract(path: Path) -> tuple[str, str]:
         mupdf_text = "\n".join(page.get_text("text") for page in document)
     finally:
         document.close()
+    if not _is_poppler():
+        return mupdf_text, mupdf_text
     proc = subprocess.run(
         ["pdftotext", "-enc", "UTF-8", "-layout", str(path), "-"],
         check=True,

@@ -36,6 +36,15 @@ from doc_redactor.scan import KIND_PDF, scan_path, write_scan, write_scans
 from helpers import assert_report_has_no_secrets
 
 
+
+def _is_poppler() -> bool:
+    """Windows CI ships xpdf's pdftotext, which has no CJK maps; only trust poppler."""
+    try:
+        probe = subprocess.run(["pdftotext", "-v"], capture_output=True)
+    except OSError:
+        return False
+    return b"Poppler" in (probe.stdout + probe.stderr)
+
 def test_messages_match_the_product_copy():
     assert MIN_PLACEHOLDER_SIZE == 6.0
     assert MSG_REPL_HINT == (
@@ -413,6 +422,8 @@ def _extract(path: Path) -> tuple[str, str]:
         mupdf_text = "\n".join(page.get_text("text") for page in document)
     finally:
         document.close()
+    if not _is_poppler():
+        return mupdf_text, mupdf_text
     proc = subprocess.run(["pdftotext", "-enc", "UTF-8", str(path), "-"], check=True, capture_output=True)
     return mupdf_text, proc.stdout.decode("utf-8", errors="replace")
 
