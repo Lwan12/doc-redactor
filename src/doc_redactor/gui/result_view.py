@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
@@ -21,7 +22,11 @@ from doc_redactor.backpath import (
     unwritten_failure_banner,
     write_allowed,
 )
+from doc_redactor.gui import hf_text
 from doc_redactor.gui.steps import StepBar
+
+HF_GREY = "#e4e6e8"
+HF_INK = "#5d6066"
 from doc_redactor.gui.theme import (
     BG_INSET,
     BG_PAGE,
@@ -33,10 +38,13 @@ from doc_redactor.gui.theme import (
     LINE2,
     MUTED,
     PLACE,
+    WARN,
+    WARN_BG,
     fit_label,
     marker_for,
     status_style,
 )
+from doc_redactor import header_footer as hf
 from doc_redactor.engine import redaction_label
 from doc_redactor.verify_output import is_final_failure
 from doc_redactor.pdf_redactor import (
@@ -210,7 +218,8 @@ class ResultView:
             ok.pack(fill="x")
             tk.Label(
                 ok,
-                text="✓ " + MSG_WRITTEN_TOP.format(n=app.written_file_count()),
+                text="✓ " + MSG_WRITTEN_TOP.format(n=app.written_file_count())
+                + ("已删除 " + str(app.hf_written_count()) + " 个文件的页眉页脚。" if app.hf_written_count() else ""),
                 bg="#e8f5ed",
                 fg="#008035",
                 font=fonts["small"],
@@ -333,7 +342,7 @@ class ResultView:
             ).pack(side="left")
             return
         enabled = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
-        cancelled_n = sum(len(s.hits) - s.enabled_count() for s in scans if s.status != "fail")
+        cancelled_n = sum(len(s.visible_hits) - s.enabled_count() for s in scans if s.status != "fail")
         n_hit = sum(1 for s in scans if s.status != "fail" and _has_findings(s))
         n_no = sum(1 for s in scans if s.status != "fail" and not _has_findings(s))
         # Same count as the bottom bar: scan failures plus files not written.
@@ -354,6 +363,14 @@ class ResultView:
         tk.Label(inner, text=f"    ✓ 有命中 {n_hit}", bg=BG_SURFACE, fg="#008035", font=fonts["small"]).pack(side="left")
         tk.Label(inner, text=f"    — 无命中 {n_no}", bg=BG_SURFACE, fg=MUTED, font=fonts["small"]).pack(side="left")
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
+        for part, tone in hf_text.top_parts(scans, self.app.remove_hf, self.app.written):
+            tk.Label(
+                inner,
+                text=f"    {part}",
+                bg=BG_SURFACE,
+                fg=_tone_fg(tone),
+                font=fonts["small"],
+            ).pack(side="left")
 
     def _file_list(self, parent, scans, fonts) -> None:
         # Pack the notice first so the tree keeps the remaining height.
@@ -362,15 +379,19 @@ class ResultView:
         for scan in scans:
             text = _pdf_fit_notice(scan, self.app)
             if text:
-                notices.append((scan.path.name, text))
+                notices.append((scan.path.name, text, "info"))
+            note, tone = hf_text.file_note_tone(scan, self.app.remove_hf)
+            if note:
+                notices.append((scan.path.name, note, tone))
         if notices:
             box = tk.Frame(parent, bg=BG_INSET)
             box.pack(side="bottom", fill="x")
-            for name, text in notices:
+            for name, text, *tone in notices:
                 tk.Label(box, text=name, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
                     anchor="w", padx=8, pady=(2, 0)
                 )
-                _wrap_label(box, text, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=6, pady=(0, 2))
+                fg = _tone_fg(tone[0]) if tone else INK
+                _wrap_label(box, text, bg=BG_INSET, fg=fg, font=fonts["small"]).pack(fill="x", padx=6, pady=(0, 2))
         head = tk.Frame(parent, bg=BG_INSET)
         head.pack(fill="x")
         tk.Label(head, text=f"文件 {len(scans)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
@@ -389,7 +410,8 @@ class ResultView:
         total = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
         all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=("ok",))
         ids = [all_id]
-        for scan in scans:
+        hf_rows: dict[str, int] = {}
+        for index, scan in enumerate(scans):
             kind, status_text, tag = _scan_status(scan, self.app)
             icon, text, _ = status_style(kind)
             if kind == "unlocated":
@@ -407,6 +429,13 @@ class ResultView:
                 label = f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
+            sub = _hf_file_row(scan, self.app)
+            if sub is not None:
+                # One line under the file: its own 「去掉页眉页脚」 box.
+                row = tree.insert("", "end", values=(sub, ""), tags=("hf_off" if _hf_box_disabled(scan, self.app) else "hf",))
+                hf_rows[row] = index
+        tree.tag_configure("hf", foreground=INK)
+        tree.tag_configure("hf_off", foreground=PLACE)
         target = ids[0] if self.app.selected == "all" else ids[self.app.selected + 1]
         tree.selection_set(target)
         tree.see(target)
@@ -415,6 +444,14 @@ class ResultView:
         def on_sel(_e=None):
             sel = tree.selection()
             if not sel:
+                return
+            if sel[0] in hf_rows:
+                index = hf_rows[sel[0]]
+                scan = scans[index]
+                if not _hf_box_disabled(scan, self.app):
+                    self.app.toggle_file_hf(scan)
+                    return
+                tree.selection_set(ids[index + 1])
                 return
             index = ids.index(sel[0])
             self._select("all" if index == 0 else index - 1)
@@ -551,6 +588,15 @@ class ResultView:
         if notice:
             _wrap_label(head, notice, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=8, pady=(1, 0))
         if has_prev:
+            notes = hf_text.preview_notes(scan, self.app.remove_hf)
+            for i, line in enumerate(notes):
+                _wrap_label(head, line, bg=BG_INSET, fg=INK if i == 0 else INK2, font=fonts["small"]).pack(
+                    fill="x", padx=8, pady=(1 if i == 0 else 0, 1 if i == len(notes) - 1 else 0)
+                )
+            bar = hf_text.confirm_bar(scan, self.app.remove_hf, self.app.written)
+            if bar is not None:
+                self._confirm_bar(head, scan, bar, fonts)
+        if has_prev:
             controls = tk.Frame(head, bg=BG_INSET)
             controls.pack(fill="x")
             mode = tk.StringVar(value=self.app.preview_mode)
@@ -685,6 +731,18 @@ class ResultView:
         text.tag_configure("mark", font=fonts["small"])
         text.tag_configure("page", foreground=MUTED, font=fonts["mono_font"])
         text.tag_configure("title", font=fonts["title"])
+        # 「去掉页眉页脚」 blocks (方案.md 2.11). Text cannot draw a dashed frame,
+        # so the block is grey with strike-through and a framed label.
+        text.tag_configure("hf_del", background=HF_GREY, foreground=HF_INK, overstrike=1)
+        text.tag_configure("hf_label", background="#ffffff", foreground=INK, font=fonts["bold"], relief="solid", borderwidth=1)
+        text.tag_configure("hf_note", background=HF_GREY, foreground=INK2, font=fonts["small"])
+        text.tag_configure("hf_gap", font=fonts["small"])
+        text.tag_configure("hf_bar", foreground=LINE2)
+        text.tag_configure("hf_keep", foreground=INK2, font=fonts["small"], relief="solid", borderwidth=1)
+        # 待确认: light orange, no strike-through (dashed frame cannot be drawn in Text).
+        text.tag_configure("hf_pend", background=WARN_BG)
+        text.tag_lower("hf_pend")
+        text.tag_configure("hf_pend_label", background="#ffffff", foreground=WARN, font=fonts["small"], relief="solid", borderwidth=1)
         self._hit_ranges = {}
         cats = {cat: i for i, cat in enumerate(self.app.category_order())}
         replacements = self.app.ruleset.replacements()
@@ -710,13 +768,85 @@ class ResultView:
                 text.insert("end", block[pos:], ("title",) if title else ())
             text.insert("end", "\n")
 
+        after = self.app.preview_mode == "after"
+        hide = self.app.hide_text
+        state = {"block": None}
+
+        def hf_line(role: str, line: str, line_hits: list, title: bool = False, source: str = "") -> None:
+            """One line of a header/footer. ``state`` keeps the open block.
+
+            Three looks (方案.md 2.11): 将删除 grey + strike-through, above any
+            hit highlight; 待确认 light orange, hits shown and counted; kept, a
+            grey bar and a label.
+            """
+            source = source or (hf.SOURCE_WORD if scan.kind == KIND_WORD else hf.SOURCE_TAG)
+            style = hf_text.block_style(scan, source) if self.app.remove_hf else hf_text.STYLE_KEEP
+            key = (role, source, style)
+            if style == hf_text.STYLE_DELETE:
+                if state["block"] != key:
+                    close_block()
+                    state["block"] = key
+                    if not after:
+                        text.insert("end", hf_text.block_label(role, scan, source), ("hf_label",))
+                        text.insert("end", "\n", ("hf_del",))
+                if after:
+                    text.insert("end", "\n", ("hf_gap",))
+                    return
+                shown = ("▇" * min(len(line.strip()), 12)) if hide else line
+                text.insert("end", shown + "\n", ("hf_del",))
+                return
+            if style == hf_text.STYLE_PENDING:
+                if state["block"] != key:
+                    close_block()
+                    state["block"] = key
+                    text.insert("end", hf_text.block_label(role, scan, source), ("hf_pend_label",))
+                    text.insert("end", "\n", ("hf_pend",))
+                start = text.index("end-1c")
+                insert_run(line, line_hits, title=title)
+                text.tag_add("hf_pend", start, "end-1c")
+                return
+            close_block()
+            text.insert("end", "▏", ("hf_bar",))
+            if self.app.remove_hf:
+                text.insert("end", hf_text.block_label(role, scan, source), ("hf_keep",))
+                text.insert("end", " ")
+            insert_run(line, line_hits, title=title)
+
+        def close_block() -> None:
+            block = state["block"]
+            state["block"] = None
+            if block is None:
+                return
+            role, _source, style = block
+            if style == hf_text.STYLE_PENDING:
+                text.insert("end", "\n", ("hf_gap",))
+                return
+            if after:
+                return
+            if role == hf.ROLE_SIGNATURE:
+                text.insert("end", hf_text.SIGN_NOTE + "\n", ("hf_note",))
+            if role == hf.ROLE_HEADER and scan.kind == KIND_WORD and scan.hf_watermark:
+                mark = "▇▇" if hide else (scan.hf_watermark_text or "")
+                text.insert("end", f"水印「{mark}」在页眉里，一起删除\n", ("hf_note",))
+
         page_starts: list[str] = []
         if scan.kind == KIND_WORD:
             by_unit: dict[str, list] = {}
             for hit in scan.hits:
                 by_unit.setdefault(hit.unit, []).append(hit)
-            for i, para in enumerate(scan.paragraphs):
-                insert_run(para, by_unit.get(f"p:{i}", []), title=(i == 0))
+            roles = scan.hf_units or {}
+            # Word headers go on top of the preview, footers at the bottom.
+            heads = [i for i in range(len(scan.paragraphs)) if roles.get(f"p:{i}") == hf.ROLE_HEADER]
+            foots = [i for i in range(len(scan.paragraphs)) if roles.get(f"p:{i}") == hf.ROLE_FOOTER]
+            body_ids = [i for i in range(len(scan.paragraphs)) if f"p:{i}" not in roles]
+            for i in heads:
+                hf_line(hf.ROLE_HEADER, scan.paragraphs[i], by_unit.get(f"p:{i}", []))
+            close_block()
+            for i in body_ids:
+                insert_run(scan.paragraphs[i], by_unit.get(f"p:{i}", []), title=(i == 0))
+            for i in foots:
+                hf_line(hf.ROLE_FOOTER, scan.paragraphs[i], by_unit.get(f"p:{i}", []))
+            close_block()
         else:
             for pi, page in enumerate(scan.pages):
                 page_starts.append(text.index("end-1c"))
@@ -736,8 +866,15 @@ class ResultView:
                                     }
                                 )
                             )
-                    insert_run(line, line_hits)
+                    role = scan.hf_lines.get((pi, li)) if scan.hf_lines else None
+                    if role:
+                        source = (scan.hf_line_sources or {}).get((pi, li), "")
+                        hf_line(role, line, line_hits, source=source)
+                    else:
+                        close_block()
+                        insert_run(line, line_hits)
                     offset += len(line) + 1
+                close_block()
 
         def on_click(event):
             index = text.index(f"@{event.x},{event.y}")
@@ -884,13 +1021,40 @@ class ResultView:
                     self.refresh()
                     return
 
+    def _confirm_bar(self, head, scan, bar, fonts) -> None:
+        """「⚠ 待确认，不删」 / 「✓ 已确认删除」 strip: status and its button on one
+        row, the explanation under them across the whole column.
+
+        Side by side, the button and the status left the text about three
+        characters wide at 960×640; it grew tall enough to push the radios,
+        the pager and the preview out of the column (#28 r2 M3).
+        """
+        warn = bar["tone"] == hf_text.TONE_WARN
+        bg = WARN_BG if warn else "#e8f5ed"
+        fg = WARN if warn else "#008035"
+        strip = tk.Frame(head, bg=bg)
+        strip.pack(fill="x", padx=0, pady=(1, 0))
+        top = tk.Frame(strip, bg=bg)
+        top.pack(fill="x")
+        ttk.Button(
+            top,
+            text=bar["button"],
+            command=lambda: self.app.toggle_file_hf_confirm(scan),
+            state="normal" if bar["enabled"] else "disabled",
+        ).pack(side="right", padx=8, pady=(3, 0))
+        tk.Label(top, text=bar["status"], bg=bg, fg=fg, font=fonts["small"]).pack(side="left", padx=8, pady=(3, 0))
+        label = _wrap_label(strip, bar["text"], bg=bg, fg=INK, font=fonts["small"])
+        label.pack(fill="x", padx=8, pady=(0, 3))
+        label.hf_bar = bar
+
     def _right_pane(self, parent, scans, fonts) -> None:
         if self.app.selected == "all":
             current = None
-            hits = [h for s in scans if s.status != "fail" for h in s.hits]
+            hits = [h for s in scans if s.status != "fail" for h in s.visible_hits]
         else:
             current = scans[self.app.selected]
-            hits = list(current.hits) if current.status != "fail" else []
+            # Hits inside a block to be deleted are not listed or counted.
+            hits = list(current.visible_hits) if current.status != "fail" else []
         if self.app.selected_cat:
             hits = [h for h in hits if h.category == self.app.selected_cat]
         cats = self.app.category_order()
@@ -933,6 +1097,25 @@ class ResultView:
         tree.configure(yscrollcommand=cat_scroll.set)
         tree.pack(side="left", fill="x", expand=True)
         cat_box.pack(fill="x")
+        # 「去掉页眉页脚」 lines under 合计. They take part in sharing the pane
+        # height (see _fit_right_pane): folded to one line, then hidden, when
+        # the window is short. The same numbers stay in the top summary.
+        hf_rows = []
+        for label_text, value, tone in hf_text.summary_rows(current, self.app.remove_hf, self.app.written, scans):
+            row = tk.Frame(parent, bg=BG_SURFACE)
+            row.pack(fill="x")
+            fg = _tone_fg(tone)
+            name = tk.Label(row, text=label_text, bg=BG_SURFACE, fg=WARN if tone == hf_text.TONE_WARN else INK, font=fonts["small"])
+            name.pack(side="left", anchor="n", padx=(10, 6), pady=3)
+            values = tk.Frame(row, bg=BG_SURFACE)
+            values.pack(side="right", padx=(0, 4), pady=3)
+            extra = []
+            for i, line in enumerate(value.split("\n")):
+                label = tk.Label(values, text=line, bg=BG_SURFACE, fg=fg if i == 0 else INK2, font=fonts["small"])
+                label.pack(anchor="e")
+                if i:
+                    extra.append(label)
+            hf_rows.append(_HfRow(row, name, values, tuple(extra)))
 
         def on_cat(_e=None):
             if getattr(self, "_building", False):
@@ -1018,7 +1201,7 @@ class ResultView:
             loc.selection_set(str(self.app.current_hit))
             loc.see(str(self.app.current_hit))
         loc.pack(fill="both", expand=True)
-        self._fit_right_pane(parent, cat_box, tree, cat_scroll, loc)
+        self._fit_right_pane(parent, cat_box, tree, cat_scroll, loc, hf_rows)
 
         def on_loc_click(event):
             row = loc.identify_row(event.y)
@@ -1035,15 +1218,18 @@ class ResultView:
 
         loc.bind("<Button-1>", on_loc_click)
 
-    def _fit_right_pane(self, parent, cat_box, tree, cat_scroll, loc) -> None:
+    def _fit_right_pane(self, parent, cat_box, tree, cat_scroll, loc, hf_rows=()) -> None:
         """Share the pane height so the location list keeps LOC_MIN_ROWS full rows.
 
         The category table gives up rows first (down to CAT_MIN_ROWS) and
-        then scrolls; no row is dropped. Tall windows keep every row.
+        then scrolls; no row is dropped. If that is not enough, the
+        header/footer lines fold to their first line, then hide (their
+        numbers are also in the top summary). Tall windows keep every row.
         """
         wanted = int(tree.cget("height"))
         total_rows = len(tree.get_children())
-        state = {"busy": False}
+        state = {"busy": False, "hf": HF_FULL}
+        hf_frames = {r.frame for r in hf_rows}
 
         def fit(_event=None) -> None:
             if state["busy"] or not parent.winfo_exists():
@@ -1058,10 +1244,27 @@ class ResultView:
                 # Heading plus borders: what a table needs beyond its rows.
                 overhead = max(0, tree.winfo_reqheight() - shown * row_h)
                 others = sum(
-                    child.winfo_reqheight() for child in parent.pack_slaves() if child not in (cat_box, loc)
+                    child.winfo_reqheight()
+                    for child in parent.pack_slaves()
+                    if child not in (cat_box, loc) and child not in hf_frames
                 )
+                if "heights" not in state:
+                    state["heights"] = [hf_row_heights(r) for r in hf_rows]
+                heights = state["heights"]
+                level = hf_level(
+                    avail - others,
+                    heights,
+                    row_h=row_h,
+                    overhead=overhead,
+                    wanted=wanted,
+                )
+                if level != state["hf"]:
+                    for r in hf_rows:
+                        _show_hf_row(r, level)
+                    state["hf"] = level
+                hf_h = sum(h[level] for h in heights)
                 rows = category_rows_that_fit(
-                    avail - others, row_h=row_h, overhead=overhead, wanted=wanted
+                    avail - others - hf_h, row_h=row_h, overhead=overhead, wanted=wanted
                 )
                 if rows != shown:
                     tree.configure(height=rows)
@@ -1130,16 +1333,9 @@ class ResultView:
                 anchor="w",
             ).pack(fill="x")
         else:
-            tk.Label(
-                left,
-                text=MSG_OUTPUT_HINT,
-                bg=BG_SURFACE,
-                fg=INK2,
-                font=fonts["small"],
-                anchor="w",
-                wraplength=480,
-                justify="left",
-            ).pack(fill="x")
+            # Wrap to the room the buttons leave: a fixed 480px ran under them
+            # at 960px and cut the last character (#28 r2 m5).
+            _wrap_label(left, _output_hint(scans, app), bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(fill="x")
         tk.Label(left, text=path, bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"], anchor="w").pack(fill="x")
         if app.written and failures:
             ttk.Button(buttons, text="打开输出文件夹", style="Primary.TButton", command=app.open_output).pack(side="right")
@@ -1155,7 +1351,7 @@ class ResultView:
             ttk.Button(buttons, text="改规则再出一份", command=app.back_to_rules).pack(side="right", padx=(0, 8))
             ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
             return
-        can_write = write_allowed(has_fresh_scans=bool(scans)) and enabled > 0 and not all_fail
+        can_write = write_allowed(has_fresh_scans=bool(scans)) and (enabled > 0 or n_files > 0) and not all_fail
         ttk.Button(
             buttons,
             text=f"写出 {n_files} 个脱敏文件（替换 {enabled} 处）",
@@ -1228,6 +1424,51 @@ def category_rows_that_fit(space: int, *, row_h: int, overhead: int, wanted: int
     room = space - 2 * overhead - LOC_MIN_ROWS * row_h
     fit = room // row_h
     return max(min(CAT_MIN_ROWS, wanted), min(wanted, fit))
+
+
+# How much of a 「去掉页眉页脚」 line shows in the right pane.
+HF_FULL, HF_FOLDED, HF_HIDDEN = 0, 1, 2
+
+
+@dataclass(frozen=True)
+class _HfRow:
+    frame: object
+    name: object
+    values: object
+    extra: tuple
+
+
+def hf_row_heights(row: _HfRow) -> tuple[int, int, int]:
+    """(full, folded, hidden) heights of one line, measured while it is full."""
+    full = row.frame.winfo_reqheight()
+    return full, full - sum(label.winfo_reqheight() for label in row.extra), 0
+
+
+def hf_level(space: int, heights, *, row_h: int, overhead: int, wanted: int) -> int:
+    """Least folding of the header/footer lines that leaves the location list
+    LOC_MIN_ROWS rows next to a category table of at least CAT_MIN_ROWS."""
+    cat_rows = min(CAT_MIN_ROWS, wanted)
+    need = 2 * overhead + (cat_rows + LOC_MIN_ROWS) * max(1, row_h)
+    for level in (HF_FULL, HF_FOLDED):
+        if space - sum(h[level] for h in heights) >= need:
+            return level
+    return HF_HIDDEN if heights else HF_FULL
+
+
+def _show_hf_row(row: _HfRow, level: int) -> None:
+    for label in row.extra:
+        label.pack_forget()
+    if level == HF_HIDDEN:
+        row.name.pack_forget()
+        row.values.pack_forget()
+        row.frame.configure(height=1)
+        return
+    if not row.name.winfo_ismapped():
+        row.name.pack(side="left", anchor="n", padx=(10, 6), pady=3)
+        row.values.pack(side="right", padx=(0, 4), pady=3)
+    if level == HF_FULL:
+        for label in row.extra:
+            label.pack(anchor="e")
 
 
 def _tree_row_height(tree) -> int:
@@ -1455,3 +1696,25 @@ def _empty_state(parent, icon, title, body, buttons, fonts, bad=False) -> None:
         ttk.Button(row, text=label, style="Primary.TButton" if primary else "TButton", command=cmd).pack(
             side="left", padx=4
         )
+
+
+def _hf_file_row(scan: FileScan, app) -> str | None:
+    if not hf_text.shows_box(scan, app.remove_hf):
+        return None
+    return hf_text.box_label(scan, app.written)
+
+
+def _hf_box_disabled(scan: FileScan, app) -> bool:
+    return hf_text.box_disabled(scan, app.written)
+
+
+def _tone_fg(tone: str) -> str:
+    return {
+        hf_text.TONE_WARN: WARN,
+        hf_text.TONE_OK: "#008035",
+        hf_text.TONE_MUTED: MUTED,
+    }.get(tone, INK)
+
+
+def _output_hint(scans, app) -> str:
+    return hf_text.output_hint(scans, app.remove_hf, MSG_OUTPUT_HINT)

@@ -22,6 +22,10 @@ if _FONTS_CONF.is_file():
 os.environ.setdefault("DOC_REDACTOR_HOME", "/tmp/doc-redactor-shoot-home")
 
 OUT = Path(os.environ.get("DOC_REDACTOR_SHOTS", "screenshots-out"))
+# DOC_REDACTOR_SHOT_SIZE=1100x720 matches the design brief; default 960x640.
+SIZE = tuple(int(v) for v in os.environ.get("DOC_REDACTOR_SHOT_SIZE", "960x640").split("x"))
+# DOC_REDACTOR_SHOT_ONLY=res-hf-,main-hf- shoots only keys with these prefixes.
+ONLY = tuple(p for p in os.environ.get("DOC_REDACTOR_SHOT_ONLY", "").split(",") if p)
 
 STATES = [
     ("01-main-empty", "main-empty"),
@@ -91,6 +95,20 @@ STATES = [
     ("64-main-outmissing", "main-outmissing"),
     ("65-rules-opened", "rules-opened"),
     ("66-res-leftover", "res-leftover"),
+    ("66-res-hf-word", "res-hf-word"),
+    ("67-res-hf-pdf", "res-hf-pdf"),
+    ("68-res-hf-auto", "res-hf-auto"),
+    ("69-res-hf-none", "res-hf-none"),
+    ("70-res-hf-filecancel", "res-hf-filecancel"),
+    ("71-res-hf-after", "res-hf-after"),
+    ("72-res-hf-written", "res-hf-written"),
+    ("73-main-hf-off", "main-hf-off"),
+    ("74-res-hf-auto-ok", "res-hf-auto-ok"),
+    ("75-res-hf-mixed", "res-hf-mixed"),
+    ("76-res-hf-all-pend", "res-hf-all-pend"),
+    ("77-res-hf-auto-undo", "res-hf-auto-undo"),
+    ("78-res-hf-mixed-ok", "res-hf-mixed-ok"),
+    ("79-res-hf-none-plain", "res-hf-none-plain"),
 ]
 
 
@@ -106,14 +124,14 @@ def grab(root, dest: Path) -> None:
     w = root.winfo_width()
     h = root.winfo_height()
     if w < 2 or h < 2:
-        w, h = 960, 640
+        w, h = SIZE
         x, y = 0, 0
     try:
         image = ImageGrab.grab(bbox=(x, y, x + w, y + h))
     except Exception:
         image = ImageGrab.grab()
-    if image.size != (960, 640):
-        image = image.resize((960, 640))
+    if image.size != SIZE:
+        image = image.resize(SIZE)
     dest.parent.mkdir(parents=True, exist_ok=True)
     image.save(dest, format="PNG")
 
@@ -156,7 +174,7 @@ def main() -> int:
 
     root, dnd = create_root()
     app = App(root, dnd, shoot=True)
-    root.geometry("960x640+0+0")
+    root.geometry(f"{SIZE[0]}x{SIZE[1]}+0+0")
     root.update_idletasks()
     root.deiconify()
     root.lift()
@@ -172,9 +190,11 @@ def main() -> int:
         return 1
     errors = []
     for name, key in STATES:
+        if ONLY and not key.startswith(ONLY):
+            continue
         try:
             app.apply_shoot_state(key)
-            dest = OUT / f"{name}-960x640.png"
+            dest = OUT / f"{name}-{SIZE[0]}x{SIZE[1]}.png"
             grab(root, dest)
             print(f"wrote {dest}")
         except Exception as exc:

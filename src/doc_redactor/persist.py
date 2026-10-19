@@ -54,7 +54,7 @@ MSG_OUTPUT_MISSING = (
 )
 MSG_OUTPUT_UNWRITABLE = "✕ 这个文件夹不能写入（没有权限，或磁盘已满）。请点「更改…」换一个，例如桌面。"
 
-ALLOWED_TOP = frozenset({"version", "output_dir", "library_checked", "rules"})
+ALLOWED_TOP = frozenset({"version", "output_dir", "library_checked", "rules", "remove_header_footer"})
 ALLOWED_RULE = frozenset(
     {
         "name",
@@ -79,6 +79,8 @@ class Session:
     first_run: bool = False
     corrupt_name: str | None = None
     save_failed: bool = False
+    # 「去掉页眉页脚」: on by default, remembered with the rules.
+    remove_hf: bool = True
 
 
 @dataclass
@@ -250,13 +252,25 @@ def rule_from_dict(node: object) -> Rule:
     )
 
 
-def session_payload(rules: list[Rule], library_checked: list[bool], output_dir: str) -> dict:
+def session_payload(
+    rules: list[Rule], library_checked: list[bool], output_dir: str, *, remove_hf: bool = True
+) -> dict:
     return {
         "version": SETTINGS_VERSION,
         "output_dir": output_dir,
         "library_checked": library_checked_names(library_checked),
+        "remove_header_footer": bool(remove_hf),
         "rules": [rule_to_dict(rule) for rule in rules],
     }
+
+
+def parse_remove_hf(raw: str) -> bool:
+    """Missing key (older file): on. Anything but true/false: damaged file."""
+    data = json.loads(raw)
+    value = data.get("remove_header_footer", True) if isinstance(data, dict) else True
+    if not isinstance(value, bool):
+        raise ValueError("remove_header_footer")
+    return value
 
 
 def payload_text(payload: dict) -> str:
@@ -309,9 +323,10 @@ def save_session(
     output_dir: str,
     *,
     path: Path | None = None,
+    remove_hf: bool = True,
 ) -> bool:
     target = path if path is not None else settings_path()
-    payload = session_payload(rules, library_checked, output_dir)
+    payload = session_payload(rules, library_checked, output_dir, remove_hf=remove_hf)
     try:
         atomic_write(target, payload_text(payload))
         return True
@@ -350,7 +365,8 @@ def load_session(
         return session
     try:
         rules, checked, output_dir = parse_payload(raw)
-        return Session(rules=rules, library_checked=checked, output_dir=output_dir)
+        remove_hf = parse_remove_hf(raw)
+        return Session(rules=rules, library_checked=checked, output_dir=output_dir, remove_hf=remove_hf)
     except (OSError, ValueError, json.JSONDecodeError, TypeError):
         backup = unique_backup_path(target.parent, now)
         renamed = None
