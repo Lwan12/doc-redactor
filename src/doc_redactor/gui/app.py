@@ -1403,6 +1403,15 @@ class App:
             self.root.update_idletasks()
             self.rules_view.post_more_menu()
             return
+        if key == "rules-more-closed":
+            self.show_rules_page("list")
+            self.root.update_idletasks()
+            self.rules_view.post_more_menu()
+            self.root.update()
+            self.rules_view._more_menu.unpost()
+            self.rules_view._close_menu_gap()
+            self.root.update()
+            return
         if key == "rules-reset":
             self.ruleset.add(
                 Rule(name="内部编号", kind=KIND_PATTERN, pattern=r"ZX-\d+", examples=["ZX-001"], enabled=True)

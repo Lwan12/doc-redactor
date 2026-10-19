@@ -82,6 +82,7 @@ STATES = [
     ("56-main-rules-changed", "main-rules-changed"),
     ("57-main-first", "main-first"),
     ("58-rules-more", "rules-more"),
+    ("58b-rules-more-closed", "rules-more-closed"),
     ("59-rules-reset", "rules-reset"),
     ("60-rules-reset-same", "rules-reset-same"),
     ("61-rules-reset-done", "rules-reset-done"),

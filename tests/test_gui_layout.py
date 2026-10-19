@@ -425,3 +425,71 @@ def test_retry_existing_file_is_skipped_as_written(gui, tmp_path: Path):
     assert color == OK
     assert tag != "bad"
     assert app.write_failure_rows() == []
+
+
+def _walk(widget):
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk(child)
+
+
+def test_skipped_row_puts_the_file_name_before_the_note(gui):
+    from tkinter import ttk
+
+    from doc_redactor.scan import MSG_ALREADY_WRITTEN
+
+    app = gui
+    app.apply_shoot_state("res-skipped")
+    _settle(app)
+    labels = []
+    for w in _walk(app.root):
+        if isinstance(w, ttk.Treeview) and tuple(w.cget("columns")) == ("name", "n"):
+            labels += [w.item(i, "values")[0] for i in w.get_children()]
+    row = next(x for x in labels if MSG_ALREADY_WRITTEN in x)
+    assert row.index(app.scans[0].path.name) < row.index(MSG_ALREADY_WRITTEN)
+
+
+def _table_top(app) -> int:
+    app.root.update_idletasks()
+    app.root.update()
+    return app.rules_view._rules_tree.winfo_rooty()
+
+
+def _open_menu(app):
+    rv = app.rules_view
+    rv.post_more_menu()
+    app.root.update()
+    return rv
+
+
+@pytest.mark.parametrize("how", ["unpost", "escape", "item", "close_gap"])
+def test_more_menu_open_then_close_restores_table_top(gui, how):
+    app = gui
+    app.show_rules_page("list")
+    _settle(app)
+    base = _table_top(app)
+    rv = _open_menu(app)
+    assert _table_top(app) > base
+    menu = rv._more_menu
+    if how == "unpost":
+        menu.unpost()
+        menu.event_generate("<Unmap>")
+    elif how == "escape":
+        menu.event_generate("<Escape>")
+        menu.unpost()
+        menu.event_generate("<Unmap>")
+    elif how == "item":
+        called = []
+        app.ask_restore_defaults = lambda: called.append(1)
+        menu.unpost()
+        menu.event_generate("<Unmap>")
+    else:
+        rv._close_menu_gap()
+    app.root.update()
+    assert _table_top(app) == base
+    assert not rv._menu_gap.winfo_manager()
+    # and it can open again after closing
+    _open_menu(app)
+    assert _table_top(app) > base
+    rv._close_menu_gap()
+    assert _table_top(app) == base

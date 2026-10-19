@@ -129,6 +129,7 @@ class RulesView:
         self._more_btn = None
         self._rules_tree = None
         self._menu_gap = None
+        self._menu_pane = None
         self._placing_menu = False
 
     def present(self) -> None:
@@ -228,12 +229,12 @@ class RulesView:
         )
 
         self._rules_tree = None
-        gap = tk.Frame(body, bg=BG_PAGE, height=0)
+        gap = tk.Frame(body, bg=BG_PAGE, height=1)
         gap.pack_propagate(False)
-        gap.pack(fill="x")
-        self._menu_gap = gap
+        self._menu_gap = gap  # not packed until the menu opens
         pane = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         pane.pack(fill="both", expand=True)
+        self._menu_pane = pane
         if not self.app.ruleset.rules:
             wrap = tk.Frame(pane, bg=BG_SURFACE)
             wrap.place(relx=0.5, rely=0.5, anchor="center")
@@ -1067,7 +1068,9 @@ class RulesView:
         try:
             if not gap.winfo_exists():
                 return
-            gap.configure(height=max(int(height), 0))
+            gap.configure(height=max(int(height), 1))
+            if not gap.winfo_manager():
+                gap.pack(fill="x", before=self._menu_pane)
             gap.update_idletasks()
         except tk.TclError:
             return
@@ -1078,7 +1081,9 @@ class RulesView:
             return
         try:
             if gap.winfo_exists():
-                gap.configure(height=0)
+                gap.pack_forget()
+                gap.configure(height=1)
+                gap.update_idletasks()
         except tk.TclError:
             return
 

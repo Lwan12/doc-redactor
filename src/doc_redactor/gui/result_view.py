@@ -370,7 +370,7 @@ class ResultView:
             count = "—" if scan.status == "fail" else scan.enabled_count()
             label = f"{icon} {scan.path.name}"
             if kind in {"many", "nowrite", "skipped"}:
-                label = f"{icon} {text}  {scan.path.name}"
+                label = f"{icon} {scan.path.name}  {text}" if kind == "skipped" else f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
         target = ids[0] if self.app.selected == "all" else ids[self.app.selected + 1]
