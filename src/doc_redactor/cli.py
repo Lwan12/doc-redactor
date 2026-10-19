@@ -12,6 +12,7 @@ from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
+from doc_redactor.verify_output import MSG_LEFTOVER, count_leftovers
 
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 
@@ -58,6 +59,12 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
         counts = redact_image_file(src, redacted, engine)
     else:
         raise ValueError(f"不支持的文件类型: {src.name}")
+    if suffix in (".docx", ".pdf"):
+        labels = {engine.label(category) for category in counts}
+        leftover = count_leftovers(redacted, engine=engine, labels=labels)
+        if leftover:
+            redacted.unlink(missing_ok=True)
+            raise RuntimeError(f"{src.name}: " + MSG_LEFTOVER.format(n=leftover))
     report.write_text(
         json.dumps(counts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

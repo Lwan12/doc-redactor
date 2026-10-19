@@ -32,6 +32,7 @@ from doc_redactor.pdf_redactor import (
     redact_text_placeholders,
 )
 from doc_redactor.tesseract_cmd import require_tesseract
+from doc_redactor.verify_output import MSG_LEFTOVER, count_leftovers
 
 FILE_HIT_WARN = 500
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
@@ -327,6 +328,16 @@ def write_scans(
                 pass
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
             continue
+        leftover = _leftovers_after_write(scan, dest, mapping, engine)
+        if leftover:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            written.append(
+                WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=MSG_LEFTOVER.format(n=leftover))
+            )
+            continue
         if dest.stem == f"{scan.path.stem}.redacted":
             report_path = destination / f"{scan.path.stem}.report.json"
         else:
@@ -343,6 +354,21 @@ def write_scans(
             )
         )
     return written
+
+
+def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], engine) -> int:
+    if scan.kind not in (KIND_WORD, KIND_PDF):
+        return 0
+    labels = set(mapping.values()) | {redaction_label(hit.category) for hit in scan.hits}
+    if engine is not None:
+        labels |= {engine.label(hit.category) for hit in scan.hits}
+    return count_leftovers(
+        dest,
+        engine=engine,
+        targets=[hit.text for hit in scan.enabled_hits],
+        kept=[hit.text for hit in scan.hits if not hit.enabled],
+        labels=labels,
+    )
 
 
 def write_report(path: Path, counts: dict[str, int]) -> None:

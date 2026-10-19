@@ -1294,6 +1294,12 @@ class App:
                 self.selected = 2
                 self.written = True
                 self.write_errors[str(self.scans[2].path)] = "输出文件夹里这个文件正被别的程序占用"
+            elif key == "res-leftover":
+                from doc_redactor.verify_output import MSG_LEFTOVER
+
+                self.selected = 1
+                self.written = True
+                self.write_errors[str(self.scans[1].path)] = MSG_LEFTOVER.format(n=2)
             elif key == "res-many":
                 self.selected = 1
             elif key == "res-skipped":
