@@ -74,15 +74,12 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
         # Unlocated hits never reach here: redact_pdf raises before saving.
         labels = {engine.label(category) for category in counts}
         short = int(getattr(counts, "short_count", 0) or 0) > 0
+        known = original_hit_texts(src, engine)
+        check = dict(engine=engine, labels=labels, short_codes=short, known=known)
         problem = check_written(
             redacted,
-            lambda: count_leftovers(
-                redacted,
-                engine=engine,
-                labels=labels,
-                short_codes=short,
-                known=original_hit_texts(src, engine),
-            ),
+            lambda: count_leftovers(redacted, **check),
+            tagged=lambda: suffix == ".pdf" and count_leftovers(redacted, ignore_tagged=True, **check) == 0,
         )
         if problem is not None:
             raise LeftoverText(*problem)

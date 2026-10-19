@@ -994,227 +994,6 @@ def test_unwritten_file_is_not_ticked_after_write(gui):
 
 
 
-def _plain_hit(hit_id: int, text: str, unit: str):
-    from doc_redactor.scan import LocatedHit
-
-    return LocatedHit(
-        hit_id=hit_id,
-        category="申办方",
-        text=text,
-        location="第 1 段",
-        unit=unit,
-        start=0,
-        end=len(text),
-        rects=[(72.0, 80.0, 140.0, 94.0)],
-        page=0,
-    )
-
-
-def test_blocked_file_warns_and_write_button_skips_it(gui):
-    """A file with an image the tool cannot check is warned and not counted."""
-    from tkinter import ttk
-
-    from doc_redactor.gui.result_view import _scan_status
-    from doc_redactor.image_redactor import MSG_NO_OCR
-    from doc_redactor.scan import KIND_PDF, KIND_WORD, FileScan
-
-    reason = MSG_NO_OCR.format(n=1)
-    kept = FileScan(
-        path=Path("kept.pdf"), kind=KIND_PDF, status="ok", hits=[_plain_hit(1, "Acme", "page:0")], pages=[["Acme"]]
-    )
-    blocked = FileScan(
-        path=Path("blocked.docx"),
-        kind=KIND_WORD,
-        status="ok",
-        hits=[_plain_hit(2, "星辰海", "para:0")],
-        paragraphs=["星辰海"],
-        blocked_reason=reason,
-    )
-    app = gui
-    app.scans = [kept, blocked]
-    app.selected = 1
-    app.written = False
-    app.write_errors = {}
-    app.write_notes = {}
-    app.preview_mode = "orig"
-    app.hide_text = False
-    app.show("result")
-    _settle(app)
-
-    kind, _text, tag = _scan_status(blocked, app)
-    assert (kind, tag) == ("blocked", "warn")
-    labels = []
-    for node in _walk(app.root):
-        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
-            labels += [node.item(item, "values") for item in node.get_children()]
-    row = next(values for values in labels if "blocked.docx" in values[0])
-    assert row[0].startswith("⚠")
-    assert str(row[1]) == "—"
-    copy = _visible_copy(app.root)
-    assert reason in copy
-    assert "正则" not in copy
-    buttons = [node.cget("text") for node in _walk(app.root) if isinstance(node, ttk.Button)]
-    write_label = next(label for label in buttons if label.startswith("写出 "))
-    assert write_label.startswith("写出 1 个脱敏文件")
-    assert "替换 1 处" in write_label
-
-
-def test_word_comment_notice_before_and_after_write(gui):
-    from doc_redactor.scan import KIND_WORD, FileScan
-
-    scan = FileScan(
-        path=Path("notes.docx"),
-        kind=KIND_WORD,
-        status="ok",
-        hits=[_plain_hit(1, "星辰海", "para:0")],
-        paragraphs=["星辰海"],
-        comment_count=2,
-    )
-    app = gui
-    app.scans = [scan]
-    app.selected = 0
-    app.written = False
-    app.write_errors = {}
-    app.write_notes = {}
-    app.preview_mode = "orig"
-    app.hide_text = False
-    app.show("result")
-    _settle(app)
-    assert "写出时会删除 2 条批注" in _visible_copy(app.root)
-
-    app.written = True
-    app.show("result")
-    _settle(app)
-    copy = _visible_copy(app.root)
-    assert "已删除 2 条批注" in copy
-    assert "写出时会删除" not in copy
-
-
-def test_blocked_no_tesseract_says_why_and_what_to_do(gui):
-    """没装 Tesseract：空状态写清为什么不写出、怎么办，不叫用户把图换成普通图片（文案待前端定）。"""
-    from doc_redactor.image_redactor import MSG_NO_OCR
-    from doc_redactor.scan import KIND_WORD, FileScan
-
-    blocked = FileScan(
-        path=Path("needs-ocr.docx"),
-        kind=KIND_WORD,
-        status="ok",
-        hits=[_plain_hit(2, "星辰海", "para:0")],
-        paragraphs=["星辰海"],
-        blocked_reason=MSG_NO_OCR.format(n=2),
-    )
-    app = gui
-    app.scans = [blocked]
-    app.selected = 0
-    app.written = False
-    app.write_errors = {}
-    app.write_notes = {}
-    app.preview_mode = "orig"
-    app.hide_text = False
-    app.show("result")
-    _settle(app)
-    copy = _visible_copy(app.root)
-    assert "图里的字" in copy
-    assert "装好 Tesseract" in copy and "TESSERACT_CMD" in copy
-    assert "换成普通图片" not in copy
-
-
-def _m34_hit(hit_id: int, text: str, unit: str):
-    from doc_redactor.scan import LocatedHit
-
-    return LocatedHit(
-        hit_id=hit_id, category="申办方", text=text, location="第 1 页", unit=unit,
-        start=0, end=len(text), rects=[(72.0, 80.0, 140.0, 94.0)], page=0,
-    )
-
-
-def test_no_hit_file_after_write_is_not_shown_as_written(gui):
-    """M34-1：0 命中的文件写出后，列表里不能是绿色「✓ 已写出，已跳过」（文案待前端定）。"""
-    from tkinter import ttk
-
-    from doc_redactor.gui.result_view import _scan_status
-    from doc_redactor.leak_check import MSG_NO_HITS
-    from doc_redactor.scan import KIND_PDF, FileScan
-
-    line = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
-    written = FileScan(
-        path=Path("kept.pdf"), kind=KIND_PDF, status="ok", hits=[_m34_hit(1, "Acme", "page:0")], pages=[["Acme"]]
-    )
-    clean = FileScan(path=Path("appendix.pdf"), kind=KIND_PDF, status="nohit", hits=[], pages=[["nothing"]])
-    app = gui
-    app.scans = [written, clean]
-    app.selected = 1
-    app.written = True
-    app.write_errors = {}
-    app.write_notes = {str(clean.path): MSG_NO_HITS}
-    app.preview_mode = "orig"
-    app.hide_text = False
-    app.show("result")
-    _settle(app)
-
-    kind, _text, tag = _scan_status(clean, app)
-    assert kind != "skipped" and tag != "ok"
-    rows = []
-    for node in _walk(app.root):
-        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
-            rows += [(node.item(item, "values"), node.item(item, "tags")) for item in node.get_children()]
-    values, tags = next((v, t) for v, t in rows if "appendix.pdf" in v[0])
-    assert not values[0].startswith("✓"), values
-    assert "已写出" not in values[0] and "已跳过" not in values[0]
-    assert "ok" not in tags
-    copy = _visible_copy(app.root)
-    assert line in copy
-    assert "之前已写出" not in copy
-
-
-def _tree_values(root) -> str:
-    from tkinter import ttk
-
-    out = []
-    for node in _walk(root):
-        if isinstance(node, ttk.Treeview):
-            out += [" | ".join(str(v) for v in node.item(item, "values")) for item in node.get_children()]
-    return "\n".join(out)
-
-
-def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
-    """M34-2：近似命中标「近似」并显示 OCR 读出的字；这几个字不进命中清单（文案待前端定）。"""
-    import json
-
-    from doc_redactor.backpath import hit_list_payload
-    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
-
-    hit = LocatedHit(
-        hit_id=1, category="DRUG", text="Fictlzumab", location="第 1 页图 1 · 图内 第 1 行",
-        unit="pdfimg:5", boxes=[(10, 10, 100, 20)], page=0, approx=True,
-    )
-    exact = LocatedHit(
-        hit_id=2, category="DRUG", text="Fictizumab", location="第 1 页图 1 · 图内 第 2 行",
-        unit="pdfimg:5", boxes=[(10, 40, 100, 20)], page=0,
-    )
-    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit, exact], pages=[[""]])
-    app = gui
-    app.scans = [scan]
-    app.selected = 0
-    app.written = False
-    app.write_errors = {}
-    app.write_notes = {}
-    app.preview_mode = "orig"
-    app.hide_text = False
-    app.show("result")
-    _settle(app)
-    copy = _tree_values(app.root)
-    assert "近似 Fictlzumab" in copy
-    assert copy.count("近似") == 1
-    payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
-    assert "Fictlzumab" not in payload and "近似" not in payload
-    app.hide_text = True
-    app.show("result")
-    _settle(app)
-    hidden = _tree_values(app.root)
-    assert "近似" in hidden and "Fictlzumab" not in hidden
-
-
 def _r15_scans():
     """Three PDFs like the #26 review: one blocked, one refused, one written."""
     from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
@@ -1384,3 +1163,224 @@ def test_category_rows_that_fit_leaves_room_for_the_list():
     assert category_rows_that_fit(50, row_h=26, overhead=28, wanted=7) == CAT_MIN_ROWS
     # Never more than wanted, even when wanted is below the floor.
     assert category_rows_that_fit(50, row_h=26, overhead=28, wanted=2) == 2
+
+
+def _m34_hit(hit_id: int, text: str, unit: str):
+    from doc_redactor.scan import LocatedHit
+
+    return LocatedHit(
+        hit_id=hit_id, category="申办方", text=text, location="第 1 页", unit=unit,
+        start=0, end=len(text), rects=[(72.0, 80.0, 140.0, 94.0)], page=0,
+    )
+
+
+def test_no_hit_file_after_write_is_not_shown_as_written(gui):
+    """M34-1：0 命中的文件写出后，列表里不能是绿色「✓ 已写出，已跳过」（文案待前端定）。"""
+    from tkinter import ttk
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.leak_check import MSG_NO_HITS
+    from doc_redactor.scan import KIND_PDF, FileScan
+
+    line = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
+    written = FileScan(
+        path=Path("kept.pdf"), kind=KIND_PDF, status="ok", hits=[_m34_hit(1, "Acme", "page:0")], pages=[["Acme"]]
+    )
+    clean = FileScan(path=Path("appendix.pdf"), kind=KIND_PDF, status="nohit", hits=[], pages=[["nothing"]])
+    app = gui
+    app.scans = [written, clean]
+    app.selected = 1
+    app.written = True
+    app.write_errors = {}
+    app.write_notes = {str(clean.path): MSG_NO_HITS}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, _text, tag = _scan_status(clean, app)
+    assert kind != "skipped" and tag != "ok"
+    rows = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            rows += [(node.item(item, "values"), node.item(item, "tags")) for item in node.get_children()]
+    values, tags = next((v, t) for v, t in rows if "appendix.pdf" in v[0])
+    assert not values[0].startswith("✓"), values
+    assert "已写出" not in values[0] and "已跳过" not in values[0]
+    assert "ok" not in tags
+    copy = _visible_copy(app.root)
+    assert line in copy
+    assert "之前已写出" not in copy
+
+
+def _tree_values(root) -> str:
+    from tkinter import ttk
+
+    out = []
+    for node in _walk(root):
+        if isinstance(node, ttk.Treeview):
+            out += [" | ".join(str(v) for v in node.item(item, "values")) for item in node.get_children()]
+    return "\n".join(out)
+
+
+def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
+    """M34-2：近似命中标「近似」并显示 OCR 读出的字；这几个字不进命中清单（文案待前端定）。"""
+    import json
+
+    from doc_redactor.backpath import hit_list_payload
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    hit = LocatedHit(
+        hit_id=1, category="DRUG", text="Fictlzumab", location="第 1 页图 1 · 图内 第 1 行",
+        unit="pdfimg:5", boxes=[(10, 10, 100, 20)], page=0, approx=True,
+    )
+    exact = LocatedHit(
+        hit_id=2, category="DRUG", text="Fictizumab", location="第 1 页图 1 · 图内 第 2 行",
+        unit="pdfimg:5", boxes=[(10, 40, 100, 20)], page=0,
+    )
+    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit, exact], pages=[[""]])
+    app = gui
+    app.scans = [scan]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    copy = _tree_values(app.root)
+    assert "近似 Fictlzumab" in copy
+    assert copy.count("近似") == 1
+    payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
+    assert "Fictlzumab" not in payload and "近似" not in payload
+    app.hide_text = True
+    app.show("result")
+    _settle(app)
+    hidden = _tree_values(app.root)
+    assert "近似" in hidden and "Fictlzumab" not in hidden
+
+
+def _plain_hit(hit_id: int, text: str, unit: str):
+    from doc_redactor.scan import LocatedHit
+
+    return LocatedHit(
+        hit_id=hit_id,
+        category="申办方",
+        text=text,
+        location="第 1 段",
+        unit=unit,
+        start=0,
+        end=len(text),
+        rects=[(72.0, 80.0, 140.0, 94.0)],
+        page=0,
+    )
+
+
+def test_blocked_file_warns_and_write_button_skips_it(gui):
+    """A file with an image the tool cannot check is warned and not counted."""
+    from tkinter import ttk
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_PDF, KIND_WORD, FileScan
+
+    reason = MSG_NO_OCR.format(n=1)
+    kept = FileScan(
+        path=Path("kept.pdf"), kind=KIND_PDF, status="ok", hits=[_plain_hit(1, "Acme", "page:0")], pages=[["Acme"]]
+    )
+    blocked = FileScan(
+        path=Path("blocked.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(2, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        blocked_reason=reason,
+    )
+    app = gui
+    app.scans = [kept, blocked]
+    app.selected = 1
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, _text, tag = _scan_status(blocked, app)
+    assert (kind, tag) == ("blocked", "warn")
+    labels = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            labels += [node.item(item, "values") for item in node.get_children()]
+    row = next(values for values in labels if "blocked.docx" in values[0])
+    assert row[0].startswith("⚠")
+    assert str(row[1]) == "—"
+    copy = _visible_copy(app.root)
+    assert reason in copy
+    assert "正则" not in copy
+    buttons = [node.cget("text") for node in _walk(app.root) if isinstance(node, ttk.Button)]
+    write_label = next(label for label in buttons if label.startswith("写出 "))
+    assert write_label.startswith("写出 1 个脱敏文件")
+    assert "替换 1 处" in write_label
+
+
+def test_word_comment_notice_before_and_after_write(gui):
+    from doc_redactor.scan import KIND_WORD, FileScan
+
+    scan = FileScan(
+        path=Path("notes.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(1, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        comment_count=2,
+    )
+    app = gui
+    app.scans = [scan]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    assert "写出时会删除 2 条批注" in _visible_copy(app.root)
+
+    app.written = True
+    app.show("result")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert "已删除 2 条批注" in copy
+    assert "写出时会删除" not in copy
+
+
+def test_blocked_no_tesseract_says_why_and_what_to_do(gui):
+    """没装 Tesseract：空状态写清为什么不写出、怎么办，不叫用户把图换成普通图片（文案待前端定）。"""
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_WORD, FileScan
+
+    blocked = FileScan(
+        path=Path("needs-ocr.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(2, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        blocked_reason=MSG_NO_OCR.format(n=2),
+    )
+    app = gui
+    app.scans = [blocked]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert "图里的字" in copy
+    assert "装好 Tesseract" in copy and "TESSERACT_CMD" in copy
+    assert "换成普通图片" not in copy
