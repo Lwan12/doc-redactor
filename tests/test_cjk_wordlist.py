@@ -75,6 +75,32 @@ def test_cjk_term_matches_across_whitespace_and_newline():
     assert [hit.text for hit in spaced] == ["星 辰海"]
 
 
+def test_cjk_gap_stops_at_a_blank_line():
+    engine = _engine(["星辰海"])
+    assert engine.find_hits("星\n\n辰海") == []
+    assert engine.find_hits("星辰\n\n海") == []
+    broken = engine.find_hits("星\n辰海")
+    assert len(broken) == 1 and broken[0].text == "星\n辰海"
+    two_breaks = engine.find_hits("星\n辰\n海")
+    assert len(two_breaks) == 1 and two_breaks[0].text == "星\n辰\n海"
+    windows = engine.find_hits("星\r\n辰海")
+    assert len(windows) == 1 and windows[0].text == "星\r\n辰海"
+
+
+def test_ascii_boundary_treats_underscore_as_a_word_character():
+    engine = _engine(["ABC"], category="SPONSOR", case_sensitive=True)
+    assert engine.find_hits("ABC_2026") == []
+    assert engine.find_hits("_ABC") == []
+    assert engine.find_hits("abc_2026") == []
+    assert [hit.text for hit in engine.find_hits("ABC")] == ["ABC"]
+    assert [hit.text for hit in engine.find_hits("ABC-2026")] == ["ABC"]
+    assert [hit.text for hit in engine.find_hits("见ABC")] == ["ABC"]
+    assert [hit.text for hit in engine.find_hits("ABC星")] == ["ABC"]
+    folded = _engine(["ABC"], category="SPONSOR", case_sensitive=False)
+    assert folded.find_hits("abc_2026") == []
+    assert [hit.text for hit in folded.find_hits("abc")] == ["abc"]
+
+
 def test_english_wordlist_still_requires_ascii_boundaries():
     engine = _engine(["Acme"], category="SPONSOR", case_sensitive=False)
     assert [hit.text for hit in engine.find_hits("Acme Pharma Ltd")] == ["Acme"]
@@ -500,6 +526,80 @@ def _assert_single_placeholder(path: Path, source_rect: pymupdf.Rect) -> None:
         assert _contains(source_rect, boxes[0])
     finally:
         document.close()
+
+
+def test_one_character_first_segment_writes_on_the_widest_segment(tmp_path: Path):
+    source = tmp_path / "one.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    _cjk(page, (72, 120), "见星", 14)
+    _cjk(page, (72, 180), "辰海公司", 22)
+    document.save(source)
+    document.close()
+
+    engine = _engine(["星辰海"])
+    scan = scan_path(source, engine)
+    wrapped = [hit for hit in scan.hits if "\n" in hit.text]
+    assert len(wrapped) == 1
+    assert wrapped[0].text.split("\n", 1)[0] == "星"
+    assert len(wrapped[0].rects) == 2
+    narrow = pymupdf.Rect(min(wrapped[0].rects, key=lambda item: item[2] - item[0]))
+    wide = pymupdf.Rect(max(wrapped[0].rects, key=lambda item: item[2] - item[0]))
+    assert wide.width > narrow.width * 2
+
+    dest = tmp_path / "one.redacted.pdf"
+    counts = redact_pdf(source, dest, engine)
+    assert counts.short_count == 0
+    assert counts.blank_count == 0
+    opened = pymupdf.open(dest)
+    try:
+        assert opened.page_count == 1
+        words = opened[0].get_text("words")
+
+        def blob(outer) -> str:
+            return "".join(word[4] for word in words if _contains(outer, pymupdf.Rect(word[:4])))
+
+        assert "SPONSOR" in blob(wide)
+        assert "SPONSOR" not in blob(narrow)
+        assert "[" not in blob(narrow)
+    finally:
+        opened.close()
+
+
+def test_narrow_first_segment_writes_on_the_widest_segment(tmp_path: Path):
+    source = tmp_path / "narrow.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    _cjk(page, (72, 140), "星辰", 5)
+    _cjk(page, (72, 220), "海公司宽行", 28)
+    document.save(source)
+    document.close()
+
+    engine = _engine(["星辰海"])
+    scan = scan_path(source, engine)
+    wrapped = [hit for hit in scan.hits if "\n" in hit.text]
+    assert len(wrapped) == 1
+    assert len(wrapped[0].text.split("\n", 1)[0]) > 1
+    narrow = pymupdf.Rect(min(wrapped[0].rects, key=lambda item: item[2] - item[0]))
+    wide = pymupdf.Rect(max(wrapped[0].rects, key=lambda item: item[2] - item[0]))
+    assert wide.width > narrow.width
+
+    dest = tmp_path / "narrow.redacted.pdf"
+    counts = redact_pdf(source, dest, engine)
+    assert counts.short_count == 1
+    assert counts.blank_count == 0
+    opened = pymupdf.open(dest)
+    try:
+        words = opened[0].get_text("words")
+
+        def blob(outer) -> str:
+            return _compact("".join(word[4] for word in words if _overlaps(outer, pymupdf.Rect(word[:4]))))
+
+        assert blob(wide) == "[SP]"
+        assert "[" not in blob(narrow)
+        assert "星辰海" not in opened[0].get_text()
+    finally:
+        opened.close()
 
 
 def test_pdf_placeholder_respects_cropbox_offset(tmp_path: Path):

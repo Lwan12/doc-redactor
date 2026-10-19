@@ -11,7 +11,7 @@ from doc_redactor.config import load_rules
 from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
-from doc_redactor.pdf_redactor import redact_pdf
+from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
 
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 
@@ -20,16 +20,26 @@ def redact_paths(
     inputs: list[str | Path],
     rules_path: str | Path,
     outdir: str | Path,
-) -> list[tuple[str, dict[str, int]]]:
+) -> tuple[list[tuple[str, dict[str, int]]], list[str]]:
+    """Redact each file. A file with unlocatable text is skipped, not written.
+
+    Other errors still propagate. The second list is ``name: reason`` lines
+    for files that were not written because glyphs could not be placed.
+    """
     engine = load_rules(rules_path)
     destination = Path(outdir)
     destination.mkdir(parents=True, exist_ok=True)
     summaries: list[tuple[str, dict[str, int]]] = []
+    blocked: list[str] = []
     for raw in inputs:
         src = Path(raw)
-        counts = redact_path(src, destination, engine)
+        try:
+            counts = redact_path(src, destination, engine)
+        except UnlocatedText as exc:
+            blocked.append(f"{src.name}: {exc}")
+            continue
         summaries.append((src.name, counts))
-    return summaries
+    return summaries, blocked
 
 
 def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, int]:
@@ -75,10 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", required=True, help="输出目录")
     args = parser.parse_args(argv)
     try:
-        summaries = redact_paths(args.inputs, args.rules, args.output)
+        summaries, blocked = redact_paths(args.inputs, args.rules, args.output)
     except Exception as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1
     for name, counts in summaries:
         print(format_summary(name, counts))
-    return 0
+    for line in blocked:
+        print(line, file=sys.stderr)
+    return 1 if blocked else 0

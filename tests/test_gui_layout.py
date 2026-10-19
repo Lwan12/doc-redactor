@@ -445,6 +445,87 @@ def _visible_copy(widget) -> str:
     return "\n".join(chunks)
 
 
+def test_blank_only_result_notice_and_column_wrap(gui):
+    import tkinter as tk
+
+    from doc_redactor.pdf_redactor import MSG_FIT_BLANK
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    app = gui
+    blank = FileScan(
+        path=Path("blank_only.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[
+            LocatedHit(
+                hit_id=1,
+                category="申办方",
+                text="I",
+                location="第 1 页 · 第 1 行",
+                unit="page:0",
+                start=0,
+                end=1,
+                rects=[(72.0, 80.0, 82.0, 88.0)],
+                page=0,
+            )
+        ],
+        pages=[["I"]],
+    )
+    lost = FileScan(
+        path=Path("lost.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[
+            LocatedHit(
+                hit_id=2,
+                category="申办方",
+                text="Acme",
+                location="第 1 页 · 第 1 行",
+                unit="page:0",
+                start=0,
+                end=4,
+                rects=[(72.0, 80.0, 280.0, 110.0)],
+                page=0,
+            )
+        ],
+        pages=[["Acme"]],
+        unlocated_count=2,
+    )
+    app.scans = [blank, lost]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    app.root.update_idletasks()
+    app.root.update()
+
+    notices = []
+    for node in _walk(app.root):
+        if not isinstance(node, tk.Label):
+            continue
+        try:
+            text = node.cget("text")
+        except tk.TclError:
+            continue
+        if "只留了空白" in text or "无法定位" in text:
+            notices.append(node)
+    assert notices
+    assert MSG_FIT_BLANK.format(m=1) in _visible_copy(app.root)
+    assert "2 处无法定位，未写出" in _visible_copy(app.root)
+    assert "换成短码" not in _visible_copy(app.root)
+    for node in notices:
+        text = node.cget("text")
+        assert "\n" not in text
+        parent_w = node.master.winfo_width()
+        wrap = int(node.cget("wraplength"))
+        assert parent_w > 80
+        assert abs(wrap - (parent_w - 8)) <= 4
+
+
 def test_pdf_fit_notices_use_the_product_copy(gui):
     from doc_redactor.pdf_redactor import MSG_FIT_BLANK, MSG_FIT_SHORT, MSG_PDF_WIDTH, MSG_REPL_HINT
 

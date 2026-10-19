@@ -144,18 +144,26 @@ def _is_cjk(ch: str) -> bool:
     )
 
 
+# ASCII word edge. Underscore counts; a hyphen does not. Do not use ``\w``:
+# Unicode ``\w`` includes Han, so ``ABC`` would stop matching ``ABC星``.
+_ASCII_EDGE = "0-9A-Za-z_"
+# At most a few spaces and one line break. A blank line (two breaks) does not match.
+_CJK_GAP = r"[ \t\u3000]{0,3}(?:\r?\n[ \t\u3000]{0,3})?"
+
+
 def _term_regex(term: str) -> str:
     """Match ``term`` with ASCII whole-word edges and optional breaks inside CJK.
 
     A side whose first or last character is an ASCII letter or digit must not
-    sit against another ASCII letter or digit (``Acme`` does not match
-    ``Acmes``). A CJK or other non-ASCII edge has no boundary, so ``星辰海``
-    matches inside ``星辰海医药有限公司``.
+    sit against another ASCII letter, digit, or underscore (``Acme`` does not
+    match ``Acmes`` or ``ABC_2026``). A hyphen is not a word character.
+    A CJK or other non-ASCII edge has no boundary, so ``星辰海`` matches
+    inside ``星辰海医药有限公司``.
 
-    ``\\s*`` is inserted only between adjacent characters that include CJK, so
-    ``星\\n辰海`` matches and the hit text keeps the original break. A space
-    that is part of the term (an English phrase) matches any whitespace,
-    including a newline.
+    Between adjacent characters that include CJK, at most three spaces and one
+    newline are allowed, so ``星\\n辰海`` matches and ``星\\n\\n辰海`` does not.
+    The hit text keeps the original break. A space that is part of the term
+    (an English phrase) matches any whitespace, including a newline.
     """
     tokens: list[tuple[str, str | None]] = []
     index = 0
@@ -175,11 +183,11 @@ def _term_regex(term: str) -> str:
         if position > 0 and tokens[position - 1][0] == "ch":
             previous = tokens[position - 1][1] or ""
             if _is_cjk(previous) or _is_cjk(ch or ""):
-                parts.append(r"\s*")
+                parts.append(_CJK_GAP)
         parts.append(re.escape(ch or ""))
     body = "".join(parts)
-    prefix = r"(?<![0-9A-Za-z])" if term and _is_ascii_alnum(term[0]) else ""
-    suffix = r"(?![0-9A-Za-z])" if term and _is_ascii_alnum(term[-1]) else ""
+    prefix = rf"(?<![{_ASCII_EDGE}])" if term and _is_ascii_alnum(term[0]) else ""
+    suffix = rf"(?![{_ASCII_EDGE}])" if term and _is_ascii_alnum(term[-1]) else ""
     return prefix + body + suffix
 
 

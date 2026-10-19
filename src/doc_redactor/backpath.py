@@ -323,20 +323,26 @@ def hit_list_payload(scans, *, replacements=None, category_order=None) -> dict:
 
     A PDF may also carry ``短码`` and ``留空``. Those are subsets of the
     category counts, not extra hits, and they are omitted when zero.
+    ``无法定位`` is a count of hits that had no rectangle. The source text
+    of those hits is not included.
     """
     payload = {}
     for scan in scans:
         if getattr(scan, "status", "") == "fail":
             continue
         counts = dict(scan.category_counts(enabled_only=True))
+        if getattr(scan, "kind", "") == "pdf":
+            if counts:
+                short_count, blank_count = _pdf_fit_tallies(scan, replacements, category_order)
+                if short_count:
+                    counts["短码"] = short_count
+                if blank_count:
+                    counts["留空"] = blank_count
+            unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+            if unlocated > 0:
+                counts["无法定位"] = unlocated
         if not counts:
             continue
-        if getattr(scan, "kind", "") == "pdf":
-            short_count, blank_count = _pdf_fit_tallies(scan, replacements, category_order)
-            if short_count:
-                counts["短码"] = short_count
-            if blank_count:
-                counts["留空"] = blank_count
         payload[scan.path.name] = counts
     return payload
 

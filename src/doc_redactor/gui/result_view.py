@@ -42,6 +42,7 @@ from doc_redactor.pdf_redactor import (
     fit_notice,
     pdf_fit_counts,
     placeholder_choice,
+    placeholder_rect,
 )
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
 
@@ -154,10 +155,12 @@ class ResultView:
         fonts = app.fonts
         scans = app.scans
         all_fail = bool(scans) and all(s.status == "fail" for s in scans)
-        nohit_all = bool(scans) and all(s.status != "fail" and not s.hits for s in scans) and not any(
+        nohit_all = bool(scans) and all(s.status != "fail" and not _has_findings(s) for s in scans) and not any(
             s.status == "fail" for s in scans
         )
-        if scans and not any(s.status == "fail" for s in scans) and all(s.status == "nohit" or not s.hits for s in scans):
+        if scans and not any(s.status == "fail" for s in scans) and all(
+            s.status == "nohit" or not _has_findings(s) for s in scans
+        ):
             nohit_all = True
 
         head = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
@@ -334,8 +337,8 @@ class ResultView:
                     enabled -= scan.enabled_count()
         total_hits = sum(len(s.hits) for s in scans)
         cancelled_n = total_hits - enabled
-        n_hit = sum(1 for s in scans if s.status != "fail" and s.hits)
-        n_no = sum(1 for s in scans if s.status != "fail" and not s.hits)
+        n_hit = sum(1 for s in scans if s.status != "fail" and _has_findings(s))
+        n_no = sum(1 for s in scans if s.status != "fail" and not _has_findings(s))
         n_fail = sum(1 for s in scans if s.status == "fail")
         tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
         verb = "已替换" if self.app.written else "将替换"
@@ -389,11 +392,13 @@ class ResultView:
         all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=("ok",))
         ids = [all_id]
         for scan in scans:
-            kind, _status_text, tag = _scan_status(scan, self.app)
+            kind, status_text, tag = _scan_status(scan, self.app)
             icon, text, _ = status_style(kind)
+            if kind == "unlocated":
+                text = status_text
             count = "—" if scan.status == "fail" else scan.enabled_count()
             label = f"{icon} {scan.path.name}"
-            if kind in {"many", "nowrite", "skipped"}:
+            if kind in {"many", "nowrite", "skipped", "unlocated"}:
                 label = f"{icon} {scan.path.name}  {text}" if kind == "skipped" else f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
@@ -523,7 +528,7 @@ class ResultView:
         ).pack(side="left", pady=(4, 0))
         has_prev = scan.status != "fail" and bool(scan.hits)
         notice = _pdf_fit_notice(scan, self.app) if scan.kind == KIND_PDF else ""
-        if notice and has_prev:
+        if notice:
             _wrap_label(head, notice, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=8, pady=(1, 0))
         if has_prev:
             controls = tk.Frame(head, bg=BG_INSET)
@@ -576,6 +581,17 @@ class ResultView:
             return
         if not scan.hits:
             body.pack(fill="both", expand=True)
+            unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+            if unlocated > 0:
+                _empty_state(
+                    body,
+                    "⚠",
+                    f"{unlocated} 处无法定位，未写出",
+                    "文字里找到了，但定不到页面上的位置。这个文件不写出，避免原文留下。",
+                    [],
+                    fonts,
+                )
+                return
             _empty_state(
                 body,
                 "—",
@@ -764,7 +780,10 @@ class ResultView:
                     [rule.name for rule in self.app.ruleset.rules]
                 )
                 code, _title = plan.resolve(hit.category)
-                _kind, shown = placeholder_choice(hit.rects[0], label, code)
+                anchor = placeholder_rect(hit.rects, label, code, getattr(hit, "text", "") or "")
+                if anchor is None:
+                    return "", ("redacted", "cur" if cur else "")
+                _kind, shown = placeholder_choice(anchor, label, code)
                 if not shown:
                     return "", ("redacted", "cur" if cur else "")
                 return shown.replace(" ", "\u00a0"), ("redacted", "cur" if cur else "")
@@ -1070,20 +1089,32 @@ def _wrap_label(parent, text: str, *, bg: str, fg: str, font) -> tk.Label:
     return label
 
 
+def _has_findings(scan: FileScan) -> bool:
+    if scan.hits:
+        return True
+    return int(getattr(scan, "unlocated_count", 0) or 0) > 0
+
+
 def _pdf_fit_notice(scan: FileScan, app) -> str:
-    if scan.kind != KIND_PDF or scan.status == "fail" or not scan.hits:
+    if scan.kind != KIND_PDF or scan.status == "fail":
         return ""
-    replacements = app.ruleset.replacements()
+    unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+    if not scan.hits and unlocated <= 0:
+        return ""
+    short_count = 0
+    blank_count = 0
+    if scan.hits:
+        replacements = app.ruleset.replacements()
 
-    def label(category: str) -> str:
-        custom = replacements.get(category)
-        if isinstance(custom, str) and custom.strip():
-            return custom
-        return redaction_label(category)
+        def label(category: str) -> str:
+            custom = replacements.get(category)
+            if isinstance(custom, str) and custom.strip():
+                return custom
+            return redaction_label(category)
 
-    order = [rule.name for rule in app.ruleset.rules]
-    short_count, blank_count = pdf_fit_counts(scan.enabled_hits, label, order)
-    return fit_notice(short_count, blank_count)
+        order = [rule.name for rule in app.ruleset.rules]
+        short_count, blank_count = pdf_fit_counts(scan.enabled_hits, label, order)
+    return fit_notice(short_count, blank_count, unlocated)
 
 
 def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
@@ -1097,6 +1128,9 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
         return "many", "命中偏多", "warn"
     if app.written and scan.enabled_count() > 0:
         return "written", "已写出", "ok"
+    unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+    if unlocated > 0 and not scan.hits:
+        return "unlocated", f"{unlocated} 处无法定位", "warn"
     if not scan.hits:
         return "nohit", "无命中", "no"
     return "hit", "有命中", "ok"

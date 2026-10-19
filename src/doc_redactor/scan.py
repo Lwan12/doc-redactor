@@ -22,7 +22,9 @@ from doc_redactor.image_redactor import (
     paint_image_boxes,
 )
 from doc_redactor.pdf_redactor import (
+    MSG_UNLOCATED,
     RedactionCounts,
+    UnlocatedText,
     append_legend,
     clear_pdf_hidden,
     find_hit_rects,
@@ -121,6 +123,9 @@ class FileScan:
     image: Image.Image | None = None
     too_many: bool = False
     size_label: str = ""
+    # Hits found in text whose rectangles could not be placed. The text itself
+    # is not stored. A positive count blocks the write of this file.
+    unlocated_count: int = 0
 
     @property
     def enabled_hits(self) -> list[LocatedHit]:
@@ -278,6 +283,18 @@ def write_scans(
         if scan.status == "fail":
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=scan.error))
             continue
+        if scan.unlocated_count > 0:
+            written.append(
+                WriteResult(
+                    path=scan.path,
+                    dest=None,
+                    report=None,
+                    counts={},
+                    skipped=True,
+                    error=MSG_UNLOCATED.format(n=scan.unlocated_count),
+                )
+            )
+            continue
         enabled = scan.enabled_hits
         if not enabled:
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True))
@@ -342,6 +359,8 @@ def write_scan(
     replacements: dict[str, str] | None = None,
     engine: RedactionEngine | None = None,
 ) -> dict[str, int]:
+    if scan.unlocated_count > 0:
+        raise UnlocatedText(scan.unlocated_count)
     if Path(dest).resolve() == Path(scan.path).resolve():
         raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
     mapping = replacements or {}
@@ -374,7 +393,7 @@ def session_totals(scans: list[FileScan], *, enabled_only: bool = True) -> tuple
 def _finish(scan: FileScan) -> FileScan:
     if scan.status == "fail":
         return scan
-    if not scan.hits:
+    if not scan.hits and scan.unlocated_count <= 0:
         scan.status = "nohit"
     scan.too_many = too_many_file_hits(len(scan.hits))
     return scan
@@ -453,6 +472,8 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
                 line_no = text[: hit.start].count("\n") + 1
                 rects = find_hit_rects(page, hit, textpage)
                 if not rects:
+                    # Count only. The hit text is not kept on the scan.
+                    scan.unlocated_count += 1
                     continue
                 scan.hits.append(
                     LocatedHit(
@@ -614,7 +635,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
             # Image hits are black boxes. They have no text rectangle.
             if not hit.rects or str(hit.unit).startswith("pdfimg:"):
                 continue
-            items.append((hit.page, list(hit.rects), hit.category))
+            items.append((hit.page, list(hit.rects), hit.category, hit.text))
         stats = redact_text_placeholders(document, items, label, order)
         image_units = [hit for hit in scan.enabled_hits if hit.unit.startswith("pdfimg:")]
         if image_units:

@@ -56,9 +56,16 @@ def test_messages_match_the_product_copy():
     assert LEGEND_TITLE == "替换说明"
     assert LEGEND_FOOTER == "本页由 doc-redactor 生成，只说明替换文字的意思，不含任何原文。"
     assert fit_notice(2, 0) == MSG_FIT_SHORT.format(n=2)
-    assert fit_notice(2, 1) == MSG_FIT_SHORT.format(n=2) + "\n" + MSG_FIT_BLANK.format(m=1)
-    assert fit_notice(0, 3) == ""
-    assert "正则" not in MSG_REPL_HINT + MSG_FIT_SHORT + MSG_FIT_BLANK + MSG_PDF_WIDTH
+    assert fit_notice(2, 1) == MSG_FIT_SHORT.format(n=2) + " " + MSG_FIT_BLANK.format(m=1)
+    assert fit_notice(0, 3) == MSG_FIT_BLANK.format(m=3)
+    assert fit_notice(0, 0) == ""
+    assert fit_notice(0, 0, 4) == "4 处无法定位，未写出"
+    joined = fit_notice(2, 1, 4)
+    assert "\n" not in joined
+    assert MSG_FIT_SHORT.format(n=2) in joined
+    assert MSG_FIT_BLANK.format(m=1) in joined
+    assert "4 处无法定位，未写出" in joined
+    assert "正则" not in MSG_REPL_HINT + MSG_FIT_SHORT + MSG_FIT_BLANK + MSG_PDF_WIDTH + joined
 
 
 def test_builtin_short_codes_and_custom_numbers_follow_creation_order():
@@ -355,9 +362,10 @@ def test_demo_pdf_notice_counts():
     short_count, blank_count = pdf_fit_counts(pdf.enabled_hits, label, ["项目号", "申办方", "药名"])
     assert (short_count, blank_count) == (2, 1)
     assert fit_notice(short_count, blank_count) == (
-        "ⓘ 这个 PDF 有 2 处位置太窄，已换成短码，最后一页有对照说明。\n"
+        "ⓘ 这个 PDF 有 2 处位置太窄，已换成短码，最后一页有对照说明。 "
         "⚠ 另有 1 处太窄，连短码也放不下，只留了空白，原文已删除。"
     )
+    assert "\n" not in fit_notice(short_count, blank_count)
 
 
 def _tier_engine():
