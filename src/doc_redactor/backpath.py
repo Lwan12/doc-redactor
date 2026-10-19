@@ -300,14 +300,18 @@ def unwritten_failure_banner(failures: list[tuple[str, str]]) -> str:
 def partial_banner(failures: list[tuple[str, str]]) -> str:
     if not failures:
         return ""
+    from doc_redactor.verify_output import MSG_FINAL_ADVICE, is_final_failure
+
+    final = all(is_final_failure(reason) for _name, reason in failures)
     if len(failures) == 1:
         name, reason = failures[0]
-        return (
-            f"✕ {name} 没写出：{reason}。其他文件已正常写出，已写出的不会删除。"
-            "点「重试失败的」只重做这一个。"
-        )
+        head = f"✕ {name} 没写出：{reason}。其他文件已正常写出，已写出的不会删除。"
+        return head + (MSG_FINAL_ADVICE if final else "点「重试失败的」只重做这一个。")
     names = "、".join(name for name, _reason in failures)
-    return f"✕ {names} 没写出。其他文件已正常写出，已写出的不会删除。点「重试失败的」只重做这些。"
+    head = f"✕ {names} 没写出。其他文件已正常写出，已写出的不会删除。"
+    if final:
+        return head + MSG_FINAL_ADVICE
+    return head + "点「重试失败的」只重做这些。"
 
 
 def merge_kept(kept: list, new_paths: list) -> list:

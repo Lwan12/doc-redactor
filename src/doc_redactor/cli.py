@@ -12,6 +12,7 @@ from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
+from doc_redactor.verify_output import LeftoverText, check_written, count_leftovers, original_hit_texts
 
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 
@@ -23,8 +24,9 @@ def redact_paths(
 ) -> tuple[list[tuple[str, dict[str, int]]], list[str]]:
     """Redact each file. A file with unlocatable text is skipped, not written.
 
-    Other errors still propagate. The second list is ``name: reason`` lines
-    for files that were not written because glyphs could not be placed.
+    A file whose output still shows a hit after writing is deleted and skipped
+    the same way. Other errors still propagate. The second list is
+    ``name: reason`` lines for files that were not written.
     """
     engine = load_rules(rules_path)
     destination = Path(outdir)
@@ -35,7 +37,7 @@ def redact_paths(
         src = Path(raw)
         try:
             counts = redact_path(src, destination, engine)
-        except UnlocatedText as exc:
+        except (UnlocatedText, LeftoverText) as exc:
             blocked.append(f"{src.name}: {exc}")
             continue
         summaries.append((src.name, counts))
@@ -58,6 +60,22 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
         counts = redact_image_file(src, redacted, engine)
     else:
         raise ValueError(f"不支持的文件类型: {src.name}")
+    if suffix in (".docx", ".pdf"):
+        # Unlocated hits never reach here: redact_pdf raises before saving.
+        labels = {engine.label(category) for category in counts}
+        short = int(getattr(counts, "short_count", 0) or 0) > 0
+        problem = check_written(
+            redacted,
+            lambda: count_leftovers(
+                redacted,
+                engine=engine,
+                labels=labels,
+                short_codes=short,
+                known=original_hit_texts(src, engine),
+            ),
+        )
+        if problem is not None:
+            raise LeftoverText(*problem)
     report.write_text(
         json.dumps(counts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
