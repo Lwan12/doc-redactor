@@ -1712,6 +1712,7 @@ def test_blocked_file_is_not_said_to_lose_header_footer(gui, tmp_path):
         assert "· 将删除" not in copy and "· 已删除" not in copy, copy
         assert "页眉页脚将删除" not in copy and "页眉页脚已删除" not in copy
         assert "未写出" in copy
+        assert "只删页眉页脚" not in copy
 
 
 def test_blocked_zero_hit_file_is_not_counted_as_hit(gui, tmp_path):
@@ -1722,7 +1723,7 @@ def test_blocked_zero_hit_file_is_not_counted_as_hit(gui, tmp_path):
     scan.blocked_reason = MSG_NO_OCR.format(n=1)
     _show_one(gui, [scan], False)
     copy = _visible_copy(gui.root)
-    assert "有命中 0" in copy and "无命中 1" in copy, copy
+    assert "有命中 0" in copy and "无命中 0" in copy and "没法检查 1" in copy, copy
 
 
 def test_inline_image_near_match_shows_approx_in_hit_table(gui, tmp_path, monkeypatch):

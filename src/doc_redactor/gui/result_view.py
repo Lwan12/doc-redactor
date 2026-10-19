@@ -351,9 +351,11 @@ class ResultView:
             return
         enabled = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
         cancelled_n = sum(len(s.visible_hits) - s.enabled_count() for s in scans if s.status != "fail")
-        # A blocked file with no hit is not 「有命中」; it is counted under 失败 (merge-r5 S2).
+        # A blocked file with no hit is neither 「有命中」 nor 「无命中」: its
+        # images were not checked, so it gets its own count (merge-r5 S2).
         n_hit = sum(1 for s in scans if s.status != "fail" and _has_rule_hits(s))
-        n_no = sum(1 for s in scans if s.status != "fail" and not _has_rule_hits(s))
+        n_unchecked = sum(1 for s in scans if s.status != "fail" and not _has_rule_hits(s) and _blocked_reason(s))
+        n_no = sum(1 for s in scans if s.status != "fail" and not _has_rule_hits(s) and not _blocked_reason(s))
         n_hf_only = sum(1 for s in scans if _hf_only_write(s, self.app))
         # Same count as the bottom bar: scan failures plus files not written.
         n_fail = failed_file_count(scans, self.app.write_errors)
@@ -381,6 +383,10 @@ class ResultView:
                 fg=MUTED,
                 font=fonts["small"],
             ).pack(side="left")
+        if n_unchecked:
+            tk.Label(inner, text=f"    ⚠ 没法检查 {n_unchecked}", bg=BG_SURFACE, fg="#c04700", font=fonts["small"]).pack(
+                side="left"
+            )
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
         for part, tone in hf_text.top_parts(scans, self.app.remove_hf, self.app.written):
             tk.Label(
