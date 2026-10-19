@@ -92,14 +92,15 @@ def _units(path: Path, ignore_tagged: bool = False) -> list:
     if suffix == ".pdf":
         import pymupdf
 
+        from doc_redactor.pdf_redactor import page_textpage, prepare_pdf
+
         document = pymupdf.open(path)
         try:
-            # Same flags as the scanner (scan.py), so both read the same text.
-            # ignore_tagged reads the drawn glyphs only, not the tagged text.
-            flags = pymupdf.TEXTFLAGS_TEXT
-            if ignore_tagged:
-                flags |= pymupdf.TEXT_IGNORE_ACTUALTEXT
-            return [page.get_text("text", flags=flags) for page in document]
+            # Same reading as the scanner (scan.py): tags and ActualText
+            # dropped, whole page including text outside the page and CropBox.
+            # With the tags dropped, ignore_tagged reads the same text.
+            prepare_pdf(document)
+            return [page.get_text("text", textpage=page_textpage(page)) for page in document]
         finally:
             document.close()
     if suffix == ".docx":
@@ -152,7 +153,13 @@ def placeholder_spans(
 def _raw_hits(unit, engine, targets: list[str]) -> list[tuple[int, int, str]]:
     text = _unit_text(unit)
     if engine is not None:
-        hits = engine.find_hits(text) if isinstance(unit, str) else unit.find_hits(engine)
+        if isinstance(unit, str):
+            from doc_redactor.pdf_redactor import find_page_hits
+
+            # A PDF page: also joins words broken by a hyphen at a line end.
+            hits = find_page_hits(engine, text)
+        else:
+            hits = unit.find_hits(engine)
         return [(hit.start, hit.end, hit.text) for hit in hits]
     found = []
     for target in targets:

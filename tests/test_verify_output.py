@@ -610,9 +610,10 @@ def test_original_bracket_code_is_not_taken_for_a_short_code(tmp_path: Path):
     assert count_leftovers(path, engine=engine, labels=["[申办方]"], short_codes=True) == 1
 
 
-def test_replacement_text_left_in_actual_text_is_a_leftover(tmp_path: Path):
-    # Glyphs are removed but the tagged text ("ActualText") still holds the
-    # original. Text extraction reads it, so it is a real leftover.
+def test_actual_text_is_dropped_so_the_check_passes(tmp_path: Path):
+    # The tagged text ("ActualText") held the original. The writer now drops
+    # tags and ActualText before redacting, so the file is written and the
+    # check reads nothing left (the PDF leak fix supersedes the old block).
     src = tmp_path / "at.pdf"
     d = pymupdf.open()
     page = d.new_page()
@@ -626,8 +627,11 @@ def test_replacement_text_left_in_actual_text_is_a_leftover(tmp_path: Path):
     scan = scan_path(src, engine)
     assert [h.text for h in scan.hits] == ["Acme Pharma"]
     [res] = write_scans([scan], tmp_path / "out", engine=engine)
-    assert res.error and "已删除这个输出文件" in res.error  # still blocked; wording: see tagged tests
-    assert not any((tmp_path / "out").glob("*.pdf"))
+    assert res.error is None and res.dest is not None
+    out = pymupdf.open(res.dest)
+    text = "".join(page.get_text() for page in out)
+    out.close()
+    assert "Acme Pharma" not in text
 
 
 # --- Partial overlap: a leftover that only shares part of an original hit ---
@@ -702,36 +706,6 @@ def _tagged_pdf(path: Path) -> None:
     d.update_stream(xref, b"/Span <</ActualText (Sponsor Acme Pharma visit)>> BDC\n" + body + b"\nEMC\n")
     d.save(str(path))
     d.close()
-
-
-def test_tagged_text_only_leftover_gets_its_own_message(tmp_path: Path):
-    from doc_redactor.backpath import partial_banner
-    from doc_redactor.verify_output import is_final_failure
-
-    src = tmp_path / "tagged.pdf"
-    _tagged_pdf(src)
-    engine = _engine()
-    scan = scan_path(src, engine)
-    [res] = write_scans([scan], tmp_path / "out", engine=engine)
-    assert res.error and "隐藏" in res.error and "写出后仍可见" not in res.error
-    assert "已删除这个输出文件" in res.error
-    assert not any((tmp_path / "out").glob("*.pdf"))
-    assert is_final_failure(res.error)
-    banner = partial_banner([("tagged.pdf", res.error)])
-    from doc_redactor.verify_output import MSG_FINAL_ADVICE, MSG_TAGGED_ADVICE
-
-    assert MSG_FINAL_ADVICE not in banner and "返回修改" not in banner and "重试失败的" not in banner
-    assert MSG_TAGGED_ADVICE in banner
-
-
-def test_cli_tagged_text_only_leftover_message(tmp_path: Path, capsys):
-    src = tmp_path / "tagged.pdf"
-    _tagged_pdf(src)
-    out = tmp_path / "out"
-    assert main([str(src), "-r", str(RULES), "-o", str(out)]) != 0
-    err = capsys.readouterr().err
-    assert "隐藏" in err
-    assert not any(out.glob("*.pdf"))
 
 
 def test_visible_leftover_in_tagged_pdf_keeps_plain_message(tmp_path: Path):
