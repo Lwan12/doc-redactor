@@ -1,0 +1,27 @@
+# 出厂门禁用的规则。全部虚构。受试者号故意用 \b 写法，验证编号紧挨中文时也能命中。
+regex:
+  - name: PROJECT_ID
+    pattern: '(?<![A-Za-z0-9])ABC-\d{4}-\d{3}(?![A-Za-z0-9])'
+    flags: ""
+    replacement: "[PROTOCOL]"
+  - name: SUBJECT_ID
+    pattern: '\bSUBJ-\d{4}-\d{3}\b'
+    flags: ""
+    replacement: "[SUBJECT]"
+  - name: CONTRACT_NO
+    pattern: '(?<![A-Za-z0-9])HT-\d{4}-\d{4}(?![A-Za-z0-9])'
+    flags: ""
+    replacement: "[CONTRACT]"
+wordlists:
+  - path: sponsors.txt
+    case_sensitive: false
+    category: SPONSOR
+    replacement: "[SPONSOR]"
+  - path: drugs.txt
+    case_sensitive: false
+    category: DRUG
+    replacement: "[STUDY DRUG]"
+  - path: persons.txt
+    case_sensitive: false
+    category: PERSON
+    replacement: "[PERSON]"

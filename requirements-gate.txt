@@ -1,0 +1,6 @@
+# 只给 CI 的 ai-read-gate 作业用：AI 程序最常用的 PDF 读法 pymupdf4llm，以及它看扫描图用的 RapidOCR。
+# 软件本身不依赖这些，打包也不带。pdftotext 由系统的 poppler-utils 提供；pandoc 随 requirements.txt 的 pypandoc-binary。
+# RapidOCR 第一次运行时会下载识别模型。
+pymupdf4llm==1.28.2
+rapidocr==3.10.0
+onnxruntime==1.31.0
