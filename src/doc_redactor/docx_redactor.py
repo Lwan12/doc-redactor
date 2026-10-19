@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import zipfile
 from pathlib import Path
 
@@ -21,6 +22,7 @@ def redact_docx(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int
     for section in document.sections:
         for header_footer in _owned_headers_footers(section):
             _redact_container(header_footer, engine, counts)
+    scrub_docx_properties(document)
     dest.parent.mkdir(parents=True, exist_ok=True)
     document.save(str(dest))
     merge_counts(counts, _redact_media(dest, engine))
@@ -42,6 +44,100 @@ def iter_table_cells(table: Table):
     for tr in table._tbl.tr_lst:
         for tc in tr.tc_lst:
             yield _Cell(tc, table)
+
+
+_CORE_TEXT_FIELDS = (
+    "author",
+    "title",
+    "subject",
+    "keywords",
+    "comments",
+    "last_modified_by",
+    "category",
+    "content_status",
+    "identifier",
+    "language",
+    "version",
+)
+# app.xml fields that can carry names; Application, page/word counts stay.
+# Word copies the title into TitlesOfParts; HeadingPairs counts its entries,
+# so both go together (each is optional, the pair stays consistent).
+_APP_TEXT_TAGS = ("Company", "Manager", "HyperlinkBase", "Template", "HeadingPairs", "TitlesOfParts")
+_ATTACHED_TEMPLATE_REL = "/attachedTemplate"
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_CUSTOM_XML_ITEM = re.compile(r"^/customXml/item\d+\.xml$")
+_CLEARED_ITEM = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<cleared/>'
+_EMPTY_CUSTOM = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    b'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" '
+    b'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"/>'
+)
+
+
+def scrub_docx_properties(document) -> None:
+    """Blank properties that can carry names or titles.
+
+    Core text properties, name fields and TitlesOfParts in app.xml, every
+    custom property, the thumbnail, the attached template path (it carries
+    the user name), and the data inside customXml items.
+    """
+    core = document.core_properties
+    for field in _CORE_TEXT_FIELDS:
+        setattr(core, field, "")
+    from lxml import etree
+
+    package = document.part.package
+    # A saved thumbnail is a picture of page 1, original text included.
+    for rid, rel in list(package.rels.items()):
+        if rel.reltype.endswith("/thumbnail"):
+            del package.rels[rid]
+    _drop_attached_template(document)
+    for part in package.iter_parts():
+        name = str(part.partname)
+        if name == "/docProps/app.xml":
+            root = etree.fromstring(part.blob)
+            for element in list(root):
+                if etree.QName(element).localname in _APP_TEXT_TAGS:
+                    root.remove(element)
+            part._blob = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+        elif name == "/docProps/custom.xml":
+            part._blob = _EMPTY_CUSTOM
+        elif _CUSTOM_XML_ITEM.match(name):
+            part._blob = _cleared_custom_item(part.blob)
+
+
+def _drop_attached_template(document) -> None:
+    """Remove <w:attachedTemplate> and its external link from settings."""
+    settings_part = None
+    for rel in document.part.rels.values():
+        if not rel.is_external and rel.reltype.endswith("/settings"):
+            settings_part = rel.target_part
+            break
+    if settings_part is None:
+        return
+    element = getattr(settings_part, "element", None)
+    if element is None:
+        return
+    for node in element.findall(f"{{{_W_NS}}}attachedTemplate"):
+        element.remove(node)
+    for rid, rel in list(settings_part.rels.items()):
+        if rel.reltype.endswith(_ATTACHED_TEMPLATE_REL):
+            del settings_part.rels[rid]
+
+
+def _cleared_custom_item(blob: bytes) -> bytes:
+    """Keep the root element (so itemProps and bindings still resolve), drop the data."""
+    from lxml import etree
+
+    try:
+        root = etree.fromstring(blob)
+    except (etree.XMLSyntaxError, ValueError):
+        return _CLEARED_ITEM
+    for child in list(root):
+        root.remove(child)
+    root.text = None
+    root.attrib.clear()
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
 def _owned_headers_footers(section):
