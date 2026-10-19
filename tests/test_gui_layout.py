@@ -926,3 +926,69 @@ def test_wrap_lines_fits_the_width_when_it_can():
         for line in wrap_lines(_S3_TEXT, width, len):
             # A glued unit (count + 处, or a char plus its comma) may hang by 1.
             assert len(line) <= width + 1
+
+
+@pytest.mark.parametrize("padx", [6, 8])
+@pytest.mark.parametrize("width", [180, 233, 260, 297, 320, 341])
+def test_wrap_label_fits_inside_its_pack_padding(gui, padx, width):
+    """The middle column packs the notice with padx; no glyph may be clipped."""
+    import tkinter as tk
+
+    from doc_redactor.gui.result_view import _wrap_label
+    from doc_redactor.pdf_redactor import MSG_FIT_BLANK, MSG_FIT_SHORT
+
+    app = gui
+    host = tk.Toplevel(app.root)
+    try:
+        frame = tk.Frame(host, width=width, height=200)
+        frame.pack_propagate(False)
+        frame.pack()
+        text = MSG_FIT_SHORT.format(n=3) + " " + MSG_FIT_BLANK.format(m=2)
+        label = _wrap_label(frame, text, bg="white", fg="black", font=app.fonts["small"])
+        label.pack(fill="x", padx=padx)
+        for _ in range(3):
+            host.update_idletasks()
+            host.update()
+        assert frame.winfo_width() == width
+        # Everything Tk wants to draw fits in the space the pack padding leaves.
+        assert label.winfo_reqwidth() <= width - 2 * padx, (label.cget("text"), label.winfo_reqwidth())
+    finally:
+        host.destroy()
+
+
+def test_unwritten_file_is_not_ticked_after_write(gui):
+    """After a write, hits of a file that was not written say 未写出, not ✓."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    kept, lost = _s2_scans()
+    app = gui
+    app.scans = [kept, lost]
+    app.selected = "all"
+    app.selected_cat = None
+    app.written = True
+    app.write_errors = {str(lost.path): "2 处无法定位，未写出"}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    marks = {}
+    cat_rows = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("on", "loc", "cat", "text"):
+            for item in node.get_children():
+                marks[int(item)] = str(node.item(item, "values")[0])
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("cat", "n"):
+            cat_rows += [tuple(str(v) for v in node.item(item, "values")) for item in node.get_children()]
+    lost_ids = {hit.hit_id for hit in lost.hits}
+    assert marks and all(marks[i] == "未写出" for i in lost_ids), marks
+    assert all(marks[h.hit_id] == "✓" for h in kept.hits), marks
+    # The category total matches 已替换; the unwritten hits are listed apart.
+    assert ("合计", "3") in cat_rows, cat_rows
+    assert ("未写出", "3") in cat_rows, cat_rows
+    # The middle matrix names the file that was not written and leaves it out.
+    copy = [getattr(n, "logical_text", n.cget("text")) for n in _walk(app.root) if isinstance(n, tk.Label)]
+    assert "lost.pdf 未写出，不计入合计" in copy
+
