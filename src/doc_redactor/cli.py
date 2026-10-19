@@ -12,7 +12,7 @@ from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
-from doc_redactor.verify_output import LeftoverText, count_leftovers
+from doc_redactor.verify_output import LeftoverText, check_written, count_leftovers, original_hit_texts
 
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 
@@ -64,10 +64,18 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
         # Unlocated hits never reach here: redact_pdf raises before saving.
         labels = {engine.label(category) for category in counts}
         short = int(getattr(counts, "short_count", 0) or 0) > 0
-        leftover = count_leftovers(redacted, engine=engine, labels=labels, short_codes=short)
-        if leftover:
-            redacted.unlink(missing_ok=True)
-            raise LeftoverText(leftover)
+        problem = check_written(
+            redacted,
+            lambda: count_leftovers(
+                redacted,
+                engine=engine,
+                labels=labels,
+                short_codes=short,
+                known=original_hit_texts(src, engine),
+            ),
+        )
+        if problem is not None:
+            raise LeftoverText(*problem)
     report.write_text(
         json.dumps(counts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

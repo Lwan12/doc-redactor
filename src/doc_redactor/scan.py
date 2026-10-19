@@ -32,7 +32,7 @@ from doc_redactor.pdf_redactor import (
     redact_text_placeholders,
 )
 from doc_redactor.tesseract_cmd import require_tesseract
-from doc_redactor.verify_output import MSG_LEFTOVER, count_leftovers
+from doc_redactor.verify_output import check_written, count_leftovers
 
 FILE_HIT_WARN = 500
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
@@ -329,15 +329,13 @@ def write_scans(
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=str(exc)))
             continue
         # Unlocated files were skipped above, so a leftover here is never one
-        # of those hits counted twice.
-        leftover = _leftovers_after_write(scan, dest, mapping, engine, counts)
-        if leftover:
-            try:
-                dest.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # of those hits counted twice. Any error inside the check blocks only
+        # this file; the output is deleted, or the message names it for the
+        # user to delete by hand.
+        problem = check_written(dest, lambda: _leftovers_after_write(scan, dest, mapping, engine, counts))
+        if problem is not None:
             written.append(
-                WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=MSG_LEFTOVER.format(n=leftover))
+                WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=problem[1])
             )
             continue
         if dest.stem == f"{scan.path.stem}.redacted":
@@ -371,6 +369,7 @@ def _leftovers_after_write(scan: FileScan, dest: Path, mapping: dict[str, str], 
         kept=[hit.text for hit in scan.hits if not hit.enabled],
         labels=labels,
         short_codes=int(getattr(counts, "short_count", 0) or 0) > 0,
+        known=[hit.text for hit in scan.hits],
     )
 
 

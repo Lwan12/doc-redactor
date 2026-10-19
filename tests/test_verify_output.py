@@ -68,7 +68,7 @@ def test_docx_leak_is_reported_and_deleted(tmp_path: Path, monkeypatch):
     scan = scan_path(src, engine)
     _skip_first_paragraph_hit(monkeypatch)
     [res] = write_scans([scan], tmp_path / "out", engine=engine)
-    assert res.error and "2 处写出后仍可见" in res.error
+    assert res.error and "2\u00a0处写出后仍可见" in res.error
     assert res.dest is None
     assert not any((tmp_path / "out").glob("*.docx"))
     assert not any((tmp_path / "out").glob("*.report.json"))
@@ -83,7 +83,7 @@ def test_pdf_leak_is_reported_and_deleted(tmp_path: Path, monkeypatch):
         if hit.text == "ABC-2026-002":
             hit.rects = []  # writer has nowhere to redact
     [res] = write_scans([scan], tmp_path / "out", engine=engine)
-    assert res.error and "1 处写出后仍可见" in res.error
+    assert res.error and "1\u00a0处写出后仍可见" in res.error
     assert not any((tmp_path / "out").glob("*.pdf"))
 
 
@@ -176,7 +176,7 @@ def test_cli_leak_blocks_only_that_file(tmp_path: Path, monkeypatch, capsys):
     code = main([str(leak), str(ok), "-r", str(RULES), "-o", str(outdir)])
     assert code == 1
     err = capsys.readouterr().err
-    assert "leak.docx: 1 处写出后仍可见" in err
+    assert "leak.docx: 1\u00a0处写出后仍可见" in err
     assert "错误" not in err
     assert not (outdir / "leak.redacted.docx").exists()
     assert (outdir / "ok.redacted.pdf").is_file()
@@ -209,3 +209,229 @@ def test_cli_unlocated_reports_only_unlocated(tmp_path: Path, monkeypatch, capsy
     assert code == 1
     assert "无法定位" in err and "写出后仍可见" not in err
     assert not (outdir / "in.redacted.pdf").exists()
+
+
+# --- Round 2: the check itself must fail closed. -----------------------------
+
+
+def _ok_pdf(path: Path) -> None:
+    _pdf(path)
+
+
+def test_verify_error_is_treated_as_leftover(tmp_path: Path, monkeypatch):
+    src = tmp_path / "a.docx"
+    _docx(src)
+    engine = _engine()
+    scan = scan_path(src, engine)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("checker broke")
+
+    monkeypatch.setattr(scan_mod, "count_leftovers", boom)
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.dest is None and res.error
+    assert "核对出错" in res.error
+    assert not any((tmp_path / "out").glob("*.docx"))
+    assert not any((tmp_path / "out").glob("*.report.json"))
+
+
+def test_verify_oserror_blocks_only_that_file(tmp_path: Path, monkeypatch):
+    a = tmp_path / "a.docx"
+    _docx(a)
+    b = tmp_path / "b.pdf"
+    _ok_pdf(b)
+    engine = _engine()
+    scans = [scan_path(a, engine), scan_path(b, engine)]
+    real = scan_mod.count_leftovers
+
+    def flaky(path, **kwargs):
+        if Path(path).suffix == ".docx":
+            raise PermissionError("locked")
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(scan_mod, "count_leftovers", flaky)
+    res_a, res_b = write_scans(scans, tmp_path / "out", engine=engine)
+    assert res_a.dest is None and "核对出错" in res_a.error
+    assert "输出文件夹不能写入" not in res_a.error
+    assert res_b.error is None and res_b.dest.is_file()
+    assert not (tmp_path / "out" / "a.redacted.docx").exists()
+
+
+def _block_unlink(monkeypatch, suffix: str):
+    real = Path.unlink
+
+    def stubborn(self, *args, **kwargs):
+        if self.name.endswith(suffix):
+            raise PermissionError("in use")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", stubborn)
+
+
+def test_delete_failure_says_delete_by_hand(tmp_path: Path, monkeypatch):
+    src = tmp_path / "a.docx"
+    _docx(src)
+    engine = _engine()
+    scan = scan_path(src, engine)
+    _skip_first_paragraph_hit(monkeypatch)
+    _block_unlink(monkeypatch, ".redacted.docx")
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.dest is None and res.error
+    assert "删除失败" in res.error and "手动删除" in res.error
+    assert "a.redacted.docx" in res.error
+    assert "没有留下含原文的文件" not in res.error
+
+
+def test_cli_verify_error_exits_nonzero_and_deletes(tmp_path: Path, monkeypatch, capsys):
+    import doc_redactor.cli as cli_mod
+
+    src = tmp_path / "in.docx"
+    doc = Document()
+    doc.add_paragraph("Project ABC-2026-001")
+    doc.save(str(src))
+
+    def boom(*_a, **_k):
+        raise OSError("checker broke")
+
+    monkeypatch.setattr(cli_mod, "count_leftovers", boom)
+    outdir = tmp_path / "out"
+    code = main([str(src), "-r", str(RULES), "-o", str(outdir)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "核对出错" in err
+    assert not (outdir / "in.redacted.docx").exists()
+    assert not (outdir / "in.report.json").exists()
+
+
+def test_cli_delete_failure_names_the_file(tmp_path: Path, monkeypatch, capsys):
+    src = tmp_path / "in.docx"
+    doc = Document()
+    doc.add_paragraph("Project ABC-2026-001")
+    doc.save(str(src))
+    monkeypatch.setattr(
+        docx_redactor, "_redact_paragraph", lambda p, e: [h.category for h in e.find_hits(p.text)]
+    )
+    _block_unlink(monkeypatch, ".redacted.docx")
+    outdir = tmp_path / "out"
+    code = main([str(src), "-r", str(RULES), "-o", str(outdir)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "删除失败" in err and "in.redacted.docx" in err
+    assert "没有留下含原文的文件" not in err
+
+
+# --- Round 2: rescan the real output, drop only hits inside a placeholder. ---
+
+
+def test_replacement_inside_sensitive_term_is_still_caught(tmp_path: Path, monkeypatch):
+    src = tmp_path / "h.docx"
+    doc = Document()
+    doc.add_paragraph("第一处 星辰海医院")
+    doc.add_paragraph("第二处 星辰海医院")
+    doc.save(str(src))
+    engine = build_engine([], [WordlistRule(category="SITE", terms=["星辰海医院"], case_sensitive=True)])
+    scan = scan_path(src, engine)
+    _skip_first_paragraph_hit(monkeypatch)
+    [res] = write_scans([scan], tmp_path / "out", replacements={"SITE": "医院"}, engine=engine)
+    assert res.error and "写出后仍可见" in res.error
+    assert not any((tmp_path / "out").glob("*.docx"))
+
+
+def _subject_engine():
+    return build_engine(
+        [RegexRule(name="SUBJECT", pattern=r"Subject\s+\d{3}", flags=0)],
+        [WordlistRule(category="SPONSOR", terms=["Acme Pharma"], case_sensitive=True)],
+    )
+
+
+def test_placeholder_does_not_invent_a_hit_docx(tmp_path: Path):
+    src = tmp_path / "s.docx"
+    doc = Document()
+    doc.add_paragraph("Subject Acme Pharma 001")
+    doc.save(str(src))
+    engine = _subject_engine()
+    scan = scan_path(src, engine)
+    assert [h.text for h in scan.hits] == ["Acme Pharma"]
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error is None and res.dest is not None and res.dest.is_file()
+
+
+def test_placeholder_does_not_invent_a_hit_pdf(tmp_path: Path):
+    src = tmp_path / "s.pdf"
+    d = pymupdf.open()
+    d.new_page().insert_text((72, 72), "Subject Acme Pharma 001")
+    d.save(str(src))
+    d.close()
+    engine = _subject_engine()
+    scan = scan_path(src, engine)
+    [res] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert res.error is None and res.dest is not None and res.dest.is_file()
+
+
+def test_hit_partly_inside_placeholder_counts():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = build_engine([], [WordlistRule(category="SITE", terms=["星辰海医院"], case_sensitive=True)])
+    assert leftover_hits_in_unit("甲 星辰海医院 乙", engine=engine, labels=["医院"]) == ["星辰海医院"]
+    assert leftover_hits_in_unit("甲 医院 乙", engine=engine, labels=["医院"]) == []
+
+
+def test_short_code_span_only_when_writer_used_short_codes():
+    from doc_redactor.verify_output import leftover_hits_in_unit
+
+    engine = _short_code_engine()
+    assert leftover_hits_in_unit("Sponsor [SP] x", engine=engine, short_codes=True) == []
+    assert leftover_hits_in_unit("Sponsor [SP] x", engine=engine, short_codes=False) == ["SP"]
+    # Outside any code it still counts.
+    assert leftover_hits_in_unit("Sponsor SP [SP]", engine=engine, short_codes=True) == ["SP"]
+
+
+def test_legend_page_is_handled_by_spans_not_dropped(tmp_path: Path):
+    from doc_redactor.pdf_redactor import append_legend
+    from doc_redactor.verify_output import count_leftovers
+
+    path = tmp_path / "l.pdf"
+    d = pymupdf.open()
+    d.new_page().insert_text((72, 72), "Body text")
+    append_legend(d, ["[SP] = 申办方（[申办方]）"])
+    # A leftover that somehow sits on the legend page is still seen.
+    d[-1].insert_text((72, 300), "Acme Pharma")
+    d.save(str(path))
+    d.close()
+    engine = build_engine([], [WordlistRule(category="SPONSOR", terms=["Acme Pharma", "SP"], case_sensitive=True)])
+    assert count_leftovers(path, engine=engine, labels=["[申办方]"], short_codes=True) == 1
+
+
+def test_leftover_message_keeps_count_with_unit():
+    from doc_redactor.verify_output import MSG_LEFTOVER
+
+    assert "{n}\u00a0处" in MSG_LEFTOVER
+
+
+def test_leftover_banner_does_not_suggest_retry():
+    from doc_redactor.backpath import partial_banner
+    from doc_redactor.verify_output import MSG_LEFTOVER
+
+    text = partial_banner([("a.docx", MSG_LEFTOVER.format(n=1))])
+    assert "重试失败的" not in text
+    assert "返回修改" in text
+    # An ordinary failure still offers retry.
+    assert "重试失败的" in partial_banner([("b.docx", "输出文件夹里这个文件正被别的程序占用")])
+
+
+def test_cli_placeholder_does_not_invent_a_hit(tmp_path: Path):
+    from doc_redactor.pdf_redactor import redact_pdf
+    from doc_redactor.verify_output import count_leftovers, original_hit_texts
+
+    src = tmp_path / "s.pdf"
+    d = pymupdf.open()
+    d.new_page().insert_text((72, 72), "Subject Acme Pharma 001")
+    d.save(str(src))
+    d.close()
+    engine = _subject_engine()
+    out = tmp_path / "s.redacted.pdf"
+    redact_pdf(src, out, engine)
+    known = original_hit_texts(src, engine)
+    assert count_leftovers(out, engine=engine, labels=["[SPONSOR]"], known=known) == 0
+    # The same check still sees the original when nothing was removed.
+    assert count_leftovers(src, engine=engine, labels=["[SPONSOR]"], known=known) == 1
