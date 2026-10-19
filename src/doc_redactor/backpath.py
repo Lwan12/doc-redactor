@@ -297,20 +297,32 @@ def unwritten_failure_banner(failures: list[tuple[str, str]]) -> str:
     return f"✕ 没写出。{parts}"
 
 
+def failed_file_count(scans, write_errors: dict) -> int:
+    """Files that failed: the scan failed, or writing it failed. Each file once.
+
+    The top summary and the bottom bar both use this, so they always agree.
+    """
+    return sum(1 for scan in scans if scan.status == "fail" or write_errors.get(str(scan.path)))
+
+
 def partial_banner(failures: list[tuple[str, str]]) -> str:
     if not failures:
         return ""
-    from doc_redactor.verify_output import MSG_FINAL_ADVICE, is_final_failure
+    from doc_redactor.verify_output import MSG_FINAL_ADVICE, MSG_TAGGED_ADVICE, is_final_failure, is_tagged_failure
 
     final = all(is_final_failure(reason) for _name, reason in failures)
+    # Adding rules cannot help a tagged PDF; do not tell the user to.
+    tagged = all(is_tagged_failure(reason) for _name, reason in failures)
+    advice = MSG_TAGGED_ADVICE if tagged else MSG_FINAL_ADVICE
     if len(failures) == 1:
         name, reason = failures[0]
-        head = f"✕ {name} 没写出：{reason}。其他文件已正常写出，已写出的不会删除。"
-        return head + (MSG_FINAL_ADVICE if final else "点「重试失败的」只重做这一个。")
+        # U+00A0 keeps the file name on the first line when the reason is long.
+        head = f"✕\u00a0{name}\u00a0没写出：{reason}。其他文件已正常写出，已写出的不会删除。"
+        return head + (advice if final else "点「重试失败的」只重做这一个。")
     names = "、".join(name for name, _reason in failures)
     head = f"✕ {names} 没写出。其他文件已正常写出，已写出的不会删除。"
     if final:
-        return head + MSG_FINAL_ADVICE
+        return head + advice
     return head + "点「重试失败的」只重做这些。"
 
 
