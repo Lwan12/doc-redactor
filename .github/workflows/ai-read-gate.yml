@@ -56,4 +56,6 @@ jobs:
         env:
           PYTHONPATH: src
           AI_GATE_STRICT: "1"
+          # Tests that need Tesseract fail instead of skipping when it is missing (tests/helpers.py).
+          REQUIRE_TESSERACT: "1"
         run: python -m pytest -q tests/test_ai_read_gate.py tests/test_ocr_misread.py tests/test_leak_gate.py

@@ -46,6 +46,7 @@ from doc_redactor.gui.theme import (
 )
 from doc_redactor import header_footer as hf
 from doc_redactor.engine import redaction_label
+from doc_redactor.image_redactor import blocked_advice
 from doc_redactor.verify_output import is_final_failure
 from doc_redactor.pdf_redactor import (
     MSG_PDF_WIDTH,
@@ -384,7 +385,7 @@ class ResultView:
         # The filename column is too narrow for the full sentence.
         notices = []
         for scan in scans:
-            text = _pdf_fit_notice(scan, self.app)
+            text = _file_notice(scan, self.app)
             if text:
                 notices.append((scan.path.name, text, "info"))
             note, tone = hf_text.file_note_tone(scan, self.app.remove_hf)
@@ -430,7 +431,7 @@ class ResultView:
             else:
                 count = "—"
             label = f"{icon} {scan.path.name}"
-            if kind in {"skipped", "unlocated"}:
+            if kind in {"skipped", "unlocated", "blocked"}:
                 label = f"{icon} {scan.path.name}  {text}"
             elif kind in {"many", "nowrite", "nohit_unwritten"}:
                 label = f"{icon} {text}  {scan.path.name}"
@@ -589,8 +590,9 @@ class ResultView:
         tk.Label(
             title_row, text=_type_name(scan.kind), bg=BG_INSET, fg=INK2, font=fonts["small"], relief="solid", bd=1
         ).pack(side="left", pady=(4, 0))
-        has_prev = scan.status != "fail" and bool(scan.hits)
-        notice = _pdf_fit_notice(scan, self.app) if scan.kind == KIND_PDF else ""
+        blocked = _blocked_reason(scan)
+        has_prev = scan.status != "fail" and bool(scan.hits) and not blocked
+        notice = "" if blocked else _file_notice(scan, self.app)
         if notice:
             _wrap_label(head, notice, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=8, pady=(1, 0))
         if has_prev:
@@ -649,6 +651,17 @@ class ResultView:
                 [("从列表移除", lambda: self.app.remove_scan(scan), False)],
                 fonts,
                 bad=True,
+            )
+            return
+        if blocked:
+            body.pack(fill="both", expand=True)
+            _empty_state(
+                body,
+                "⚠",
+                MSG_BLOCKED_TITLE,
+                f"{blocked}。{blocked_advice(blocked)}。",
+                [],
+                fonts,
             )
             return
         if not scan.hits:
@@ -1500,10 +1513,13 @@ def counts_toward_write(scan, *, written: bool, write_errors: dict) -> bool:
         return False
     if int(getattr(scan, "unlocated_count", 0) or 0) > 0:
         return False
+    if _blocked_reason(scan):
+        return False
     return not (written and str(scan.path) in write_errors)
 
 
 MSG_UNWRITTEN = "未写出"
+MSG_BLOCKED_TITLE = "有图片没法检查，未写出"
 MSG_LOC_HEADER = "被替换的位置 {n}"
 MSG_LOC_HEADER_UNWRITTEN = "被替换的位置 {n}（另 {m} 处未写出）"
 MSG_MATRIX_UNWRITTEN = "{names} 未写出，不计入合计"
@@ -1640,8 +1656,37 @@ def _horizontal_chrome(label: tk.Label) -> int:
     return total
 
 
+def _blocked_reason(scan) -> str:
+    return str(getattr(scan, "blocked_reason", None) or "")
+
+
+def _comment_notice(scan: FileScan, app) -> str:
+    """Word comments are deleted on write; say so."""
+    count = int(getattr(scan, "comment_count", 0) or 0)
+    if scan.kind != KIND_WORD or count <= 0 or scan.status == "fail" or _blocked_reason(scan):
+        return ""
+    if str(scan.path) in app.write_errors or str(scan.path) in app.write_notes:
+        return ""
+    if app.written:
+        return f"已删除 {count} 条批注" if scan.enabled_count() > 0 else ""
+    if not scan.hits:
+        return ""
+    return f"写出时会删除 {count} 条批注"
+
+
+def _file_notice(scan: FileScan, app) -> str:
+    blocked = _blocked_reason(scan)
+    if blocked and scan.status != "fail":
+        return blocked
+    if scan.kind == KIND_WORD:
+        return _comment_notice(scan, app)
+    if scan.kind == KIND_PDF:
+        return _pdf_fit_notice(scan, app)
+    return ""
+
+
 def _has_findings(scan: FileScan) -> bool:
-    if scan.hits:
+    if scan.hits or _blocked_reason(scan):
         return True
     return int(getattr(scan, "unlocated_count", 0) or 0) > 0
 
@@ -1669,7 +1714,10 @@ def _pdf_fit_notice(scan: FileScan, app) -> str:
 
 
 def _hf_only_write(scan: FileScan, app) -> bool:
-    """No hit to replace, but 「去掉页眉页脚」 still writes this file (#34 r3 M1)."""
+    """No hit to replace, but 「去掉页眉页脚」 still writes this file (#34 r3 M1).
+    A blocked file is never written (merge-r5 M1)."""
+    if _blocked_reason(scan):
+        return False
     if scan.status == "fail" or scan.enabled_hits or not scan.hf_active:
         return False
     key = str(scan.path)
@@ -1693,6 +1741,8 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
         return ("hf_written" if app.written else "hf_only"), _hf_only_line(app), "ok"
     if scan.too_many:
         return "many", "命中偏多", "warn"
+    if _blocked_reason(scan):
+        return "blocked", "没法检查", "warn"
     if app.written and scan.enabled_count() > 0:
         return "written", "已写出", "ok"
     unlocated = int(getattr(scan, "unlocated_count", 0) or 0)

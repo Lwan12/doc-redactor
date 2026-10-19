@@ -13,10 +13,13 @@ from PIL import Image
 
 from doc_redactor.ruleset import load_ruleset
 from doc_redactor.scan import scan_path, write_report, write_scan
-from doc_redactor.tesseract_cmd import TESSERACT_HINT, find_tesseract
-from helpers import ROOT, RULES, SECRETS, load_make_samples
+from doc_redactor.tesseract_cmd import TESSERACT_HINT
+from helpers import ROOT, RULES, SECRETS, check_tesseract, load_make_samples
 
-pytestmark = pytest.mark.skipif(find_tesseract() is None, reason=TESSERACT_HINT)
+@pytest.fixture(autouse=True)
+def _tesseract():
+    # 本机没装跳过；CI 设了 REQUIRE_TESSERACT=1 时找不到就失败（tests/helpers.py）。
+    check_tesseract(TESSERACT_HINT)
 
 SAMPLES = ROOT / "samples"
 

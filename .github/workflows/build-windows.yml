@@ -78,6 +78,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $env:PYTHONPATH = "src"
+          # Tests that need Tesseract fail instead of skipping when it is missing (tests/helpers.py).
+          $env:REQUIRE_TESSERACT = "1"
           $env:TESSERACT_CMD = (Resolve-Path "build\tesseract\tesseract.exe").Path
           $env:TESSDATA_PREFIX = (Resolve-Path "build\tesseract\tessdata").Path
           python -m pytest -rs

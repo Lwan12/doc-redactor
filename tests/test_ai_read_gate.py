@@ -17,6 +17,11 @@ import pytest
 from doc_redactor.cli import redact_paths
 from doc_redactor.config import load_rules
 from doc_redactor.scan import scan_path, write_scans
+from helpers import needs_tesseract
+
+# Pictures need Tesseract now: without it the write is refused, not done with the images skipped.
+# 本机没装跳过；CI 设了 REQUIRE_TESSERACT=1 时找不到就失败（tests/helpers.py）。
+needs_ocr = needs_tesseract
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "tools" / "ai_gate"
@@ -80,6 +85,7 @@ def _assert_clean(outputs: list[Path]) -> None:
     assert problems == []
 
 
+@needs_ocr
 def test_cli_outputs_pass_the_gate(inputs, tmp_path: Path):
     summaries, blocked = redact_paths(inputs, GATE / "rules.yaml", tmp_path)
     assert blocked == []
@@ -88,6 +94,7 @@ def test_cli_outputs_pass_the_gate(inputs, tmp_path: Path):
     _assert_clean(outputs)
 
 
+@needs_ocr
 def test_gui_outputs_pass_the_gate(inputs, tmp_path: Path):
     engine = load_rules(GATE / "rules.yaml")
     scans = [scan_path(path, engine) for path in inputs]

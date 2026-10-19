@@ -22,6 +22,11 @@ from lxml import etree
 from doc_redactor.docx_redactor import iter_document_paragraphs, redact_docx
 from doc_redactor.engine import RegexRule, WordlistRule, build_engine
 from doc_redactor.scan import scan_path, write_scans
+from helpers import needs_tesseract
+
+# Pictures need Tesseract now: without it the write is refused, not done with the images skipped.
+# 本机没装跳过；CI 设了 REQUIRE_TESSERACT=1 时找不到就失败（tests/helpers.py）。
+needs_ocr = needs_tesseract
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -219,6 +224,7 @@ def _alt_docx(path: Path) -> None:
     _rewrite(path, edit)
 
 
+@needs_ocr
 def test_image_alt_text_is_redacted(tmp_path: Path):
     source = tmp_path / "alt.docx"
     _alt_docx(source)
@@ -317,6 +323,7 @@ def _embed_docx(path: Path) -> None:
     _rewrite(path, edit)
 
 
+@needs_ocr
 def test_embedded_objects_are_dropped_and_preview_kept(tmp_path: Path):
     source = tmp_path / "embed.docx"
     _embed_docx(source)

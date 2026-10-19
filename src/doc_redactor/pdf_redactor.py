@@ -17,7 +17,15 @@ import pymupdf
 from PIL import Image
 
 from doc_redactor.engine import Hit, RedactionEngine, merge_counts
-from doc_redactor.image_redactor import redact_image
+from doc_redactor.image_redactor import (
+    MSG_BAD_IMAGE,
+    MSG_INLINE_FAILED,
+    MSG_NO_OCR,
+    WriteBlocked,
+    analyze_image_entities,
+    redact_image,
+)
+from doc_redactor import tesseract_cmd
 
 MIN_PLACEHOLDER_SIZE = 6.0
 MSG_REPL_HINT = (
@@ -564,6 +572,9 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCount
                 counts[hit.category] = counts.get(hit.category, 0) + 1
         if unlocated:
             raise UnlocatedText(unlocated)
+        reason = pdf_image_block_reason(document)
+        if reason:
+            raise WriteBlocked(reason)
         order = list(getattr(engine, "category_order", []) or [])
         stats = redact_text_placeholders(document, items, engine.label, order)
         merge_counts(counts, _redact_images(document, engine))
@@ -602,6 +613,9 @@ def clear_pdf_hidden(document) -> None:
         # by pypdf and get_links().
         for link in page.get_links():
             page.delete_link(link)
+        # A page thumbnail is a small picture of the page as it was.
+        document.xref_set_key(page.xref, "Thumb", "null")
+        document.xref_set_key(page.xref, "PieceInfo", "null")
     for name in list(document.embfile_names() or []):
         document.embfile_del(name)
     document.set_toc([])
@@ -611,6 +625,8 @@ def clear_pdf_hidden(document) -> None:
     # Custom Info keys (/Sponsor, /ContractNo...) stay after set_metadata.
     if document.xref_get_key(-1, "Info")[0] != "null":
         document.xref_set_key(-1, "Info", "null")
+    # Application private data (Illustrator and others) can hold a copy of the page.
+    document.xref_set_key(document.pdf_catalog(), "PieceInfo", "null")
     _drop_catalog_attachments(document)
     _rename_layers(document)
     # MuPDF keeps the first /ID string of the original on save; anything could
@@ -1333,27 +1349,193 @@ def _redact_images(document, engine: RedactionEngine) -> dict[str, int]:
             if not xref or xref in seen or xref in masks:
                 continue
             seen.add(xref)
-            try:
-                image = _pixmap_image(document, xref)
-            except (ValueError, RuntimeError):
-                continue
+            image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
             redacted, image_counts = redact_image(image, engine)
-            stream = _png_bytes(redacted)
-            page.replace_image(xref, stream=stream)
+            if not image_counts:
+                continue
+            page.replace_image(xref, stream=_png_bytes(redacted))
             merge_counts(counts, image_counts)
+    for page in document:
+        jobs = []
+        for info, image in inline_images(page):
+            entities = analyze_image_entities(image, engine)
+            if not entities:
+                continue
+            boxes = [box for entity in entities for box in entity["boxes"]]
+            jobs.append((info, image.size, boxes))
+            for entity in entities:
+                counts[entity["category"]] = counts.get(entity["category"], 0) + 1
+        paint_inline_images(page, jobs)
     return counts
 
 
-def _pixmap_image(document, xref: int) -> Image.Image:
-    pixmap = pymupdf.Pixmap(document, xref)
-    if pixmap.colorspace is not None and pixmap.n - pixmap.alpha not in (1, 3):
-        pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
-    if pixmap.alpha:
-        pixmap = pymupdf.Pixmap(pixmap, 0)
-    data = pixmap.tobytes("png")
-    image = Image.open(io.BytesIO(data))
-    image.load()
+def pdf_xref_image(document, xref: int, smask: int = 0) -> Image.Image:
+    """The picture as it shows on the page: a soft mask is applied, not dropped.
+
+    Glyphs drawn only in the mask (black text on a transparent ground) are
+    invisible in the colour data alone. The mask becomes alpha, and OCR and
+    painting composite it onto white. A picture that cannot be decoded
+    raises WriteBlocked instead of going out unchecked.
+    """
+    try:
+        pixmap = pymupdf.Pixmap(document, xref)
+        if pixmap.colorspace is not None and pixmap.n - pixmap.alpha not in (1, 3):
+            pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
+        if pixmap.alpha:
+            pixmap = pymupdf.Pixmap(pixmap, 0)
+        if smask:
+            mask = pymupdf.Pixmap(document, smask)
+            if mask.alpha:
+                mask = pymupdf.Pixmap(mask, 0)
+            if mask.n != 1:
+                mask = pymupdf.Pixmap(pymupdf.csGRAY, mask)
+            if pixmap.n == 1:
+                pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
+            # The PDF scales both onto the same box, so a mask need not match
+            # the colour data (a 2×2 indexed fill under a wide text mask is
+            # common, and so is a small mask over a detailed picture). Work at
+            # the larger width and height: only ever stretch, never shrink, so
+            # neither the glyphs in the mask nor those in the colour data lose
+            # resolution before OCR.
+            width = max(pixmap.width, mask.width)
+            height = max(pixmap.height, mask.height)
+            if (pixmap.width, pixmap.height) != (width, height):
+                pixmap = pymupdf.Pixmap(pixmap, width, height, None)
+            if (mask.width, mask.height) != (width, height):
+                mask = pymupdf.Pixmap(mask, width, height, None)
+            if not any(mask.samples):
+                # Fully transparent: nothing shows on the page, but the colour
+                # data can still be pulled out of the file. Check (and paint)
+                # the colour data itself.
+                mask = None
+            else:
+                pixmap = pymupdf.Pixmap(pixmap, mask)
+        data = pixmap.tobytes("png")
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception as exc:
+        raise WriteBlocked(MSG_BAD_IMAGE.format(n=1)) from exc
     return image
+
+
+def _inline_key(info: dict) -> tuple:
+    return (tuple(pymupdf.Rect(info["bbox"])), info.get("_stack", 0))
+
+
+def inline_images(page) -> list[tuple[dict, Image.Image]]:
+    """Inline images (BI … ID … EI) on the page, with their decoded pixels.
+
+    ``get_images`` does not list them. ``get_text("dict")`` gives the pixels
+    of every image block; the ones whose box matches an inline entry of
+    ``get_image_info`` are inline.
+    """
+    infos = [info for info in page.get_image_info(xrefs=True) if not info.get("xref")]
+    if not infos:
+        return []
+    blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type") == 1]
+    # Several inline images can sit in the same box (one stacked on another).
+    # Pair them in drawing order and use each block once, so every one is read.
+    found = []
+    used: set[int] = set()
+    for info in infos:
+        box = pymupdf.Rect(info["bbox"])
+        index = next(
+            (i for i, b in enumerate(blocks) if i not in used and pymupdf.Rect(b["bbox"]) == box and b.get("image")),
+            None,
+        )
+        match = None if index is None else blocks[index]
+        if index is not None:
+            used.add(index)
+        try:
+            if match is None:
+                raise ValueError("no pixels")
+            image = Image.open(io.BytesIO(match["image"]))
+            image.load()
+        except Exception as exc:
+            raise WriteBlocked(MSG_BAD_IMAGE.format(n=1)) from exc
+        info["_stack"] = sum(1 for prev, _img in found if pymupdf.Rect(prev["bbox"]) == box)
+        found.append((info, image))
+    return found
+
+
+def inline_boxes_to_rects(info: dict, size: tuple[int, int], boxes) -> list[tuple[float, float, float, float]]:
+    """Map pixel boxes of an upright inline image onto the page.
+
+    A rotated, skewed or mirrored image cannot be mapped box by box; that
+    raises WriteBlocked.
+    """
+    a, b, c, d, _e, _f = info.get("transform", (1, 0, 0, 1, 0, 0))
+    if abs(b) > 1e-6 or abs(c) > 1e-6 or a <= 0 or d <= 0:
+        raise WriteBlocked(MSG_INLINE_FAILED.format(n=1))
+    area = pymupdf.Rect(info["bbox"])
+    width, height = size
+    sx = area.width / max(1, width)
+    sy = area.height / max(1, height)
+    pad = 2
+    rects = []
+    for left, top, w, h in boxes:
+        rects.append(
+            (
+                area.x0 + (left - pad) * sx,
+                area.y0 + (top - pad) * sy,
+                area.x0 + (left + w + pad) * sx,
+                area.y0 + (top + h + pad) * sy,
+            )
+        )
+    return rects
+
+
+def paint_inline_images(page, jobs) -> None:
+    """Burn boxes into inline images and check the pixels really changed.
+
+    ``jobs`` is (image info, pixel size, pixel boxes). MuPDF blanks the
+    image samples under each redaction box (PDF_REDACT_IMAGE_PIXELS) and the
+    box is filled black. Text and vector art are left alone. Afterwards the
+    inline images are decoded again: a box whose pixels are not uniform
+    means the burn failed, and the file is not written.
+    """
+    if not jobs:
+        return
+    placed = []
+    for info, size, boxes in jobs:
+        rects = inline_boxes_to_rects(info, size, boxes)
+        for rect in rects:
+            page.add_redact_annot(pymupdf.Rect(rect), fill=(0, 0, 0), cross_out=False)
+        placed.append((_inline_key(info), size, boxes))
+    page.apply_redactions(
+        images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
+        graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+        text=pymupdf.PDF_REDACT_TEXT_NONE,
+    )
+    after = {_inline_key(info): image for info, image in inline_images(page)}
+    failed = 0
+    for area, size, boxes in placed:
+        image = after.get(tuple(area))
+        if image is None:
+            continue
+        gray = image.convert("L")
+        if gray.size != size:
+            failed += 1
+            continue
+        for left, top, w, h in boxes:
+            low, high = gray.crop((left, top, left + w, top + h)).getextrema()
+            if high - low > 8:
+                failed += 1
+                break
+    if failed:
+        raise WriteBlocked(MSG_INLINE_FAILED.format(n=failed))
+
+
+def pdf_image_block_reason(document) -> str | None:
+    """Images need OCR; without Tesseract the file is not written."""
+    if tesseract_cmd.find_tesseract() is not None:
+        return None
+    count = 0
+    for page in document:
+        count += sum(1 for info in page.get_image_info(xrefs=True))
+    if count:
+        return MSG_NO_OCR.format(n=count)
+    return None
 
 
 def _png_bytes(image: Image.Image) -> bytes:

@@ -993,6 +993,8 @@ class App:
                 continue
             if int(getattr(scan, "unlocated_count", 0) or 0) > 0:
                 continue
+            if getattr(scan, "blocked_reason", None):
+                continue
             if scan.will_write():
                 total += 1
         return total

@@ -10,10 +10,13 @@ from PIL import Image
 
 from doc_redactor.cli import redact_path
 from doc_redactor.config import load_rules
-from doc_redactor.tesseract_cmd import TESSERACT_HINT, configure_tesseract, find_tesseract
-from helpers import RULES, assert_report_has_no_secrets, load_make_samples
+from doc_redactor.tesseract_cmd import TESSERACT_HINT, configure_tesseract
+from helpers import RULES, assert_report_has_no_secrets, check_tesseract, load_make_samples
 
-pytestmark = pytest.mark.skipif(find_tesseract() is None, reason=TESSERACT_HINT)
+@pytest.fixture(autouse=True)
+def _tesseract():
+    # 本机没装跳过；CI 设了 REQUIRE_TESSERACT=1 时找不到就失败（tests/helpers.py）。
+    check_tesseract(TESSERACT_HINT)
 
 
 def _ocr(image: Image.Image) -> str:

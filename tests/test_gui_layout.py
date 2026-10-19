@@ -1468,3 +1468,169 @@ def test_fixed_rows_hint_is_on_the_confirm_strip(gui):
     assert "含 2 行固定文字" in bars[0].logical_text
     # Wrapped, nothing lost: the shown lines join back to the sentence.
     assert "".join(bars[0].cget("text").split("\n")).replace(" ", "") == bars[0].logical_text.replace(" ", "")
+
+
+def _plain_hit(hit_id: int, text: str, unit: str):
+    from doc_redactor.scan import LocatedHit
+
+    return LocatedHit(
+        hit_id=hit_id,
+        category="申办方",
+        text=text,
+        location="第 1 段",
+        unit=unit,
+        start=0,
+        end=len(text),
+        rects=[(72.0, 80.0, 140.0, 94.0)],
+        page=0,
+    )
+
+
+def test_blocked_file_warns_and_write_button_skips_it(gui):
+    """A file with an image the tool cannot check is warned and not counted."""
+    from tkinter import ttk
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_PDF, KIND_WORD, FileScan
+
+    reason = MSG_NO_OCR.format(n=1)
+    kept = FileScan(
+        path=Path("kept.pdf"), kind=KIND_PDF, status="ok", hits=[_plain_hit(1, "Acme", "page:0")], pages=[["Acme"]]
+    )
+    blocked = FileScan(
+        path=Path("blocked.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(2, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        blocked_reason=reason,
+    )
+    app = gui
+    app.scans = [kept, blocked]
+    app.selected = 1
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, _text, tag = _scan_status(blocked, app)
+    assert (kind, tag) == ("blocked", "warn")
+    labels = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            labels += [node.item(item, "values") for item in node.get_children()]
+    row = next(values for values in labels if "blocked.docx" in values[0])
+    assert row[0].startswith("⚠")
+    assert str(row[1]) == "—"
+    copy = _visible_copy(app.root)
+    assert reason in copy
+    assert "正则" not in copy
+    buttons = [node.cget("text") for node in _walk(app.root) if isinstance(node, ttk.Button)]
+    write_label = next(label for label in buttons if label.startswith("写出 "))
+    assert write_label.startswith("写出 1 个脱敏文件")
+    assert "替换 1 处" in write_label
+
+
+def test_word_comment_notice_before_and_after_write(gui):
+    from doc_redactor.scan import KIND_WORD, FileScan
+
+    scan = FileScan(
+        path=Path("notes.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(1, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        comment_count=2,
+    )
+    app = gui
+    app.scans = [scan]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    assert "写出时会删除 2 条批注" in _visible_copy(app.root)
+
+    app.written = True
+    app.show("result")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert "已删除 2 条批注" in copy
+    assert "写出时会删除" not in copy
+
+
+def test_blocked_no_tesseract_says_why_and_what_to_do(gui):
+    """没装 Tesseract：空状态写清为什么不写出、怎么办，不叫用户把图换成普通图片。"""
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_WORD, FileScan
+
+    blocked = FileScan(
+        path=Path("needs-ocr.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(2, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        blocked_reason=MSG_NO_OCR.format(n=2),
+    )
+    app = gui
+    app.scans = [blocked]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert "图里的字" in copy
+    assert "装好 Tesseract" in copy and "TESSERACT_CMD" in copy
+    assert "换成普通图片" not in copy
+
+
+def test_blocked_zero_hit_header_footer_file_is_not_shown_as_will_write(gui, tmp_path):
+    """merge-r5 M1：被拦下、0 命中、有页眉页脚的文件，写出前不能显示绿 ✓「将删除页眉页脚并写出」。"""
+    from tkinter import ttk
+
+    from doc_redactor.engine import WordlistRule, build_engine
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import scan_path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_header_footer import _tagged_pdf
+
+    src = tmp_path / "blocked-zero-hf.pdf"
+    src.write_bytes(_tagged_pdf())
+    engine = build_engine([], [WordlistRule("药名", ["Nothingmab"], True)])
+    scan = scan_path(src, engine, remove_hf=True)
+    assert not scan.hits and scan.hf_active
+    scan.blocked_reason = MSG_NO_OCR.format(n=1)
+
+    app = gui
+    app.scans = [scan]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, text, tag = _scan_status(scan, app)
+    assert kind == "blocked" and tag != "ok", (kind, text, tag)
+    rows = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            rows += [node.item(item, "values") for item in node.get_children()]
+    row = next(v for v in rows if src.name in v[0])
+    assert not row[0].startswith("✓"), row
+    assert "将删除页眉页脚并写出" not in _visible_copy(app.root)

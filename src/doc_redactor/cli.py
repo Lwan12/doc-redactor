@@ -11,6 +11,7 @@ from doc_redactor.config import load_rules
 from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
+from doc_redactor.image_redactor import MSG_NO_OCR_FIX, WriteBlocked, blocked_advice
 from doc_redactor.leak_check import LeakedText, NoHits, gate_output
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
 from doc_redactor.verify_output import LeftoverText, check_written, count_leftovers, original_hit_texts
@@ -39,8 +40,11 @@ def redact_paths(
         src = Path(raw)
         try:
             counts = redact_path(src, destination, engine)
-        except (UnlocatedText, LeftoverText, LeakedText, NoHits) as exc:
-            blocked.append(f"{src.name}: {exc}")
+        except (UnlocatedText, LeftoverText, LeakedText, NoHits, WriteBlocked) as exc:
+            line = f"{src.name}: {exc}"
+            if isinstance(exc, WriteBlocked) and blocked_advice(str(exc)) == MSG_NO_OCR_FIX:
+                line += f"。{MSG_NO_OCR_FIX}"
+            blocked.append(line)
             continue
         summaries.append((src.name, counts))
     return summaries, blocked

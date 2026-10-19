@@ -8,6 +8,7 @@ Language is chi_sim+eng. Hits are painted black.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -189,13 +190,22 @@ def _save_image(image: Image.Image, dest: Path) -> None:
         image.save(dest, format=fmt)
 
 
+_FORMATS = {
+    ".jpg": "JPEG",
+    ".jpeg": "JPEG",
+    ".png": "PNG",
+    ".gif": "GIF",
+    ".bmp": "BMP",
+    ".tif": "TIFF",
+    ".tiff": "TIFF",
+}
+
+
 def _format_for_suffix(suffix: str) -> str:
-    lowered = suffix.lower()
-    if lowered in {".jpg", ".jpeg"}:
-        return "JPEG"
-    if lowered == ".png":
-        return "PNG"
-    raise ValueError(f"不支持的图片类型: {suffix}")
+    fmt = _FORMATS.get(suffix.lower())
+    if fmt is None:
+        raise ValueError(f"不支持的图片类型: {suffix}")
+    return fmt
 
 
 def _refuse_same_path(src: Path, dest: Path) -> None:
@@ -205,3 +215,35 @@ def _refuse_same_path(src: Path, dest: Path) -> None:
 
 def is_raster_suffix(suffix: str) -> bool:
     return suffix.lower() in {".png", ".jpg", ".jpeg"}
+
+
+# Pictures inside a Word file that are read with OCR and painted in place.
+# Animated GIF and multi-page TIFF keep only the first frame.
+EMBEDDED_RASTER_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"})
+
+
+def is_embedded_raster_suffix(suffix: str) -> bool:
+    return suffix.lower() in EMBEDDED_RASTER_SUFFIXES
+
+
+class WriteBlocked(ValueError):
+    """The file holds something that cannot be checked, so it is not written.
+
+    The message names the reason and counts only; it never carries source text.
+    """
+
+
+# 没装 Tesseract：说清为什么不写出（图里的字查不了），和怎么办（MSG_NO_OCR_FIX）。
+MSG_NO_OCR = "有 {n} 张图片没法检查：没找到 Tesseract（识别图片文字的程序），查不了图里的字有没有敏感词，所以未写出"
+MSG_NO_OCR_FIX = "装好 Tesseract（带中文 chi_sim 和英文 eng 语言数据）后重新扫描；已经装了的，把环境变量 TESSERACT_CMD 设成 tesseract 程序的路径"
+MSG_IMAGE_FIX = "可以先把这张图删掉或换成普通图片，再拖进来"
+MSG_BAD_IMAGE = "有 {n} 张图片打不开，没法检查，未写出"
+MSG_VECTOR = "有 {n} 张矢量图（EMF、WMF 等），没法检查其中文字，未写出"
+MSG_INLINE_FAILED = "有 {n} 张内嵌图没能涂黑，未写出"
+
+_NO_OCR_PATTERN = re.compile(re.escape(MSG_NO_OCR).replace(re.escape("{n}"), r"\d+"))
+
+
+def blocked_advice(reason: str) -> str:
+    """What the user can do about a file that was not written for ``reason``."""
+    return MSG_NO_OCR_FIX if _NO_OCR_PATTERN.fullmatch(reason or "") else MSG_IMAGE_FIX
