@@ -96,6 +96,20 @@ def test_gui_write_marks_a_file_without_hits(tmp_path: Path):
     assert not (tmp_path / "out" / "clean.redacted.docx").exists()
 
 
+# M34-1：0 命中的口径（文案待前端定）：命令行和界面同一句。
+NO_HIT_LINE = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
+
+
+def test_cli_no_hit_message_says_not_written_and_not_redacted(tmp_path: Path, capsys):
+    source = tmp_path / "clean.docx"
+    _plain_docx(source)
+    code = main([str(source), "-r", str(RULES), "-o", str(tmp_path / "out")])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert NO_HIT_LINE in err, err
+    assert "已写出" not in err and "已跳过" not in err
+
+
 # --- 出厂门禁 -------------------------------------------------------------------
 
 

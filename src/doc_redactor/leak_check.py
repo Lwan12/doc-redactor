@@ -24,7 +24,9 @@ from doc_redactor.engine import RedactionEngine
 MSG_LEAKED_HEAD = "写出后复核：换一种读法仍能读出\u00a0{n}\u00a0处"
 MSG_LEAKED = MSG_LEAKED_HEAD + "，已删除这个输出文件，没有写出"
 MSG_LEAKED_UNDELETED = MSG_LEAKED_HEAD + "，删除输出失败，请手动删除「{name}」"
-MSG_NO_HITS = "整份文件没有找到要遮的内容，没有写出。原件没有处理过，不要当成脱敏件交出去；如果里面有敏感内容，请先补规则。"
+# 文案待前端定。命令行和界面用同一句（M34-1）。
+MSG_NO_HITS_LINE = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
+MSG_NO_HITS = MSG_NO_HITS_LINE + "。如果里面有敏感内容，请先补规则。"
 
 _RASTER = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")
 _W_P = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"

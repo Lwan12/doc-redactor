@@ -177,6 +177,8 @@ def status_style(kind: str) -> tuple[str, str, str]:
         "many": ("⚠", "命中偏多", WARN),
         "nowrite": ("✕", "没写出", BAD),
         "skipped": ("✓", "这个文件之前已写出，已跳过", OK),
+        # 0 命中：写出时没写，原件也不是脱敏件，不能用「已写出」的绿色（M34-1）。
+        "nohit_unwritten": ("⚠", "无命中，未写出", WARN),
     }
     return mapping.get(kind, ("○", kind, INK2))
 

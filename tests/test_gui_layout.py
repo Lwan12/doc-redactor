@@ -992,3 +992,51 @@ def test_unwritten_file_is_not_ticked_after_write(gui):
     copy = [getattr(n, "logical_text", n.cget("text")) for n in _walk(app.root) if isinstance(n, tk.Label)]
     assert "lost.pdf 未写出，不计入合计" in copy
 
+
+
+def _m34_hit(hit_id: int, text: str, unit: str):
+    from doc_redactor.scan import LocatedHit
+
+    return LocatedHit(
+        hit_id=hit_id, category="申办方", text=text, location="第 1 页", unit=unit,
+        start=0, end=len(text), rects=[(72.0, 80.0, 140.0, 94.0)], page=0,
+    )
+
+
+def test_no_hit_file_after_write_is_not_shown_as_written(gui):
+    """M34-1：0 命中的文件写出后，列表里不能是绿色「✓ 已写出，已跳过」（文案待前端定）。"""
+    from tkinter import ttk
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.leak_check import MSG_NO_HITS
+    from doc_redactor.scan import KIND_PDF, FileScan
+
+    line = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
+    written = FileScan(
+        path=Path("kept.pdf"), kind=KIND_PDF, status="ok", hits=[_m34_hit(1, "Acme", "page:0")], pages=[["Acme"]]
+    )
+    clean = FileScan(path=Path("appendix.pdf"), kind=KIND_PDF, status="nohit", hits=[], pages=[["nothing"]])
+    app = gui
+    app.scans = [written, clean]
+    app.selected = 1
+    app.written = True
+    app.write_errors = {}
+    app.write_notes = {str(clean.path): MSG_NO_HITS}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, _text, tag = _scan_status(clean, app)
+    assert kind != "skipped" and tag != "ok"
+    rows = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            rows += [(node.item(item, "values"), node.item(item, "tags")) for item in node.get_children()]
+    values, tags = next((v, t) for v, t in rows if "appendix.pdf" in v[0])
+    assert not values[0].startswith("✓"), values
+    assert "已写出" not in values[0] and "已跳过" not in values[0]
+    assert "ok" not in tags
+    copy = _visible_copy(app.root)
+    assert line in copy
+    assert "之前已写出" not in copy
