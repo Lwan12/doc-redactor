@@ -1634,3 +1634,111 @@ def test_blocked_zero_hit_header_footer_file_is_not_shown_as_will_write(gui, tmp
     row = next(v for v in rows if src.name in v[0])
     assert not row[0].startswith("✓"), row
     assert "将删除页眉页脚并写出" not in _visible_copy(app.root)
+
+
+# ------------------------------------------------------------- 收尾小 PR
+
+def _file_tree(root):
+    from tkinter import ttk
+
+    return next(
+        node for node in _walk(root)
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n")
+    )
+
+
+def _show_one(app, scans, written):
+    app.scans = scans
+    app.selected = 0
+    app.written = written
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+
+def _hf_zero_scan(tmp_path, name="zero-hf.pdf"):
+    from doc_redactor.engine import WordlistRule, build_engine
+    from doc_redactor.scan import scan_path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_header_footer import _tagged_pdf
+
+    src = tmp_path / name
+    src.write_bytes(_tagged_pdf())
+    scan = scan_path(src, build_engine([], [WordlistRule("药名", ["Nothingmab"], True)]), remove_hf=True)
+    assert not scan.hits and scan.hf_active
+    return scan
+
+
+def test_selected_file_row_keeps_its_status_colour(gui, tmp_path):
+    """#34 次项：选中的「只删页眉页脚」那行 ✓ 不再变黑，和其他 ✓ 行同为绿色。"""
+    from tkinter import ttk
+
+    scan = _hf_zero_scan(tmp_path)
+    _show_one(gui, [scan], True)
+    tree = _file_tree(gui.root)
+    [row] = [i for i in tree.get_children() if scan.path.name in tree.item(i, "values")[0]]
+    assert tree.item(row, "values")[0].startswith("✓")
+    assert "ok" in tree.item(row, "tags")
+    assert row in tree.selection()
+    style = tree.cget("style") or "Treeview"
+    forced = [state for *state, _colour in ttk.Style().map(style, "foreground") if "selected" in state]
+    assert forced == [], f"selected rows lose their tag colour: {forced}"
+
+
+def test_top_bar_names_header_footer_only_files(gui, tmp_path):
+    """#34 次项：顶部「无命中」旁写明其中几份只删页眉页脚。"""
+    scan = _hf_zero_scan(tmp_path)
+    _show_one(gui, [scan], True)
+    copy = _visible_copy(gui.root)
+    assert "无命中 1" in copy
+    assert "其中 1 份只删页眉页脚已写出" in copy
+    _show_one(gui, [scan], False)
+    assert "其中 1 份只删页眉页脚将写出" in _visible_copy(gui.root)
+
+
+def test_blocked_file_is_not_said_to_lose_header_footer(gui, tmp_path):
+    """merge-r5b S3：被拦下的文件不写出，右侧汇总栏不能写「页眉页脚 N 页 · 将删除」。"""
+    from doc_redactor.image_redactor import MSG_NO_OCR
+
+    scan = _hf_zero_scan(tmp_path, "blocked-hf.pdf")
+    scan.blocked_reason = MSG_NO_OCR.format(n=1)
+    for written in (False, True):
+        _show_one(gui, [scan], written)
+        copy = _visible_copy(gui.root)
+        assert "· 将删除" not in copy and "· 已删除" not in copy, copy
+        assert "页眉页脚将删除" not in copy and "页眉页脚已删除" not in copy
+        assert "未写出" in copy
+
+
+def test_blocked_zero_hit_file_is_not_counted_as_hit(gui, tmp_path):
+    """merge-r5 S2：被拦下且 0 命中的文件，顶栏不算进「有命中」。"""
+    from doc_redactor.image_redactor import MSG_NO_OCR
+
+    scan = _hf_zero_scan(tmp_path, "blocked-zero.pdf")
+    scan.blocked_reason = MSG_NO_OCR.format(n=1)
+    _show_one(gui, [scan], False)
+    copy = _visible_copy(gui.root)
+    assert "有命中 0" in copy and "无命中 1" in copy, copy
+
+
+def test_inline_image_near_match_shows_approx_in_hit_table(gui, tmp_path, monkeypatch):
+    """merge-r5 S1 / r5b S1-t：内联图 OCR 近似命中，界面命中表里标「近似」。编造数据。"""
+    import doc_redactor.scan as scan_mod
+    from doc_redactor.engine import WordlistRule, build_engine
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_image_metadata import _inline_pdf
+
+    def fake_entities(image, engine):
+        return [{"category": "药名", "text": "Fictlzumab", "boxes": [(10, 10, 100, 20)], "approx": True}]
+
+    monkeypatch.setattr(scan_mod, "analyze_image_entities", fake_entities)
+    monkeypatch.setattr(scan_mod, "require_tesseract", lambda *a, **k: None)
+    scan = scan_mod.scan_path(_inline_pdf(tmp_path), build_engine([], [WordlistRule("药名", ["Fictizumab"], True)]))
+    assert any(h.unit.startswith("pdfinline:") for h in scan.hits)
+    _show_one(gui, [scan], False)
+    assert "近似 Fictlzumab" in _tree_values(gui.root)

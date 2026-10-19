@@ -113,6 +113,7 @@ STATES = [
     ("81-res-hf-fixed-ok", "res-hf-fixed-ok"),
     ("82-res-hf-zero", "res-hf-zero"),
     ("83-res-hf-zero-written", "res-hf-zero-written"),
+    ("84-res-hf-blocked", "res-hf-blocked"),
 ]
 
 

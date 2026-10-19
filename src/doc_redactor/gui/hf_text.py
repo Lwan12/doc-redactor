@@ -39,13 +39,19 @@ BAR_SIGN_TAIL = "签署信息按固定文字识别，照常删除。"
 # #28 r3 m7: rows past the outer two taken because they are the same on
 # every page. Only a hint; recognition and the default (不删) are unchanged.
 # Short on purpose: the strip must not grow and push the preview under five
-# lines at 960×640 (#28 r2 M3). In the 「按每页重复认出」 text the hint takes
-# the place of 「可能混进续表标题、表头或脚注」; elsewhere it is appended.
+# lines at 960×640 (#28 r2 M3). In the 「按每页重复认出」 text the hint goes
+# next to 「续表标题或脚注」 (#48 n1: that warning stays); elsewhere it is appended.
 BAR_PENDING_AUTO_FIXED = (
     "这个 PDF 没有页眉页脚标记，虚线框里的页眉、页脚是按每页重复认出的，"
-    "含 {n} 行固定文字，可能是表头或声明，现在不删。"
+    "含 {n} 行固定文字，可能是表头、声明、续表标题或脚注，现在不删。"
 )
 BAR_FIXED = "虚线框含 {n} 行固定文字。"
+# Right-pane value for a file that is blocked and so not written (merge-r5b S3).
+BLOCKED_VALUE = "— 未写出，不删"
+
+
+def _blocked(scan) -> bool:
+    return bool(getattr(scan, "blocked_reason", None))
 
 KEPT = hf.UI_TEXT["file_kept"]
 WATERMARK = hf.UI_TEXT["watermark"]
@@ -192,7 +198,7 @@ def delete_pages(scans, option_on: bool) -> int:
     """PDF pages where something goes. Word is counted in files, not pages."""
     if not option_on:
         return 0
-    return sum(scan.hf_delete_pages for scan in scans if scan.status != "fail")
+    return sum(scan.hf_delete_pages for scan in scans if scan.status != "fail" and not _blocked(scan))
 
 
 def pending_pages(scans, option_on: bool) -> int:
@@ -204,7 +210,7 @@ def pending_pages(scans, option_on: bool) -> int:
 def word_files(scans, option_on: bool) -> int:
     if not option_on:
         return 0
-    return sum(1 for s in scans if s.kind == KIND_WORD and s.hf_active)
+    return sum(1 for s in scans if s.kind == KIND_WORD and s.hf_active and not _blocked(s))
 
 
 def page_total(scans, option_on: bool) -> int:
@@ -263,6 +269,9 @@ def summary_rows(scan, option_on: bool, written: bool, scans=None) -> list[tuple
         return rows
     if scan.status == "fail":
         return []
+    if _blocked(scan):
+        # A blocked file is not written, so nothing is removed (merge-r5b S3).
+        return [(label, BLOCKED_VALUE, TONE_MUTED)]
     if scan.kind == KIND_IMAGE:
         return [(label, "— 图片不处理", TONE_MUTED)]
     if scan.kind == KIND_WORD:

@@ -351,8 +351,10 @@ class ResultView:
             return
         enabled = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
         cancelled_n = sum(len(s.visible_hits) - s.enabled_count() for s in scans if s.status != "fail")
-        n_hit = sum(1 for s in scans if s.status != "fail" and _has_findings(s))
-        n_no = sum(1 for s in scans if s.status != "fail" and not _has_findings(s))
+        # A blocked file with no hit is not 「有命中」; it is counted under 失败 (merge-r5 S2).
+        n_hit = sum(1 for s in scans if s.status != "fail" and _has_rule_hits(s))
+        n_no = sum(1 for s in scans if s.status != "fail" and not _has_rule_hits(s))
+        n_hf_only = sum(1 for s in scans if _hf_only_write(s, self.app))
         # Same count as the bottom bar: scan failures plus files not written.
         n_fail = failed_file_count(scans, self.app.write_errors)
         tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
@@ -370,6 +372,15 @@ class ResultView:
             ).pack(side="left")
         tk.Label(inner, text=f"    ✓ 有命中 {n_hit}", bg=BG_SURFACE, fg="#008035", font=fonts["small"]).pack(side="left")
         tk.Label(inner, text=f"    — 无命中 {n_no}", bg=BG_SURFACE, fg=MUTED, font=fonts["small"]).pack(side="left")
+        if n_hf_only:
+            # #34 次项: these 0-hit files are still written (header/footer only).
+            tk.Label(
+                inner,
+                text=f"（其中 {n_hf_only} 份只删页眉页脚{'已' if self.app.written else '将'}写出）",
+                bg=BG_SURFACE,
+                fg=MUTED,
+                font=fonts["small"],
+            ).pack(side="left")
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
         for part, tone in hf_text.top_parts(scans, self.app.remove_hf, self.app.written):
             tk.Label(
@@ -405,7 +416,8 @@ class ResultView:
         tk.Label(head, text=f"文件 {len(scans)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
             side="left", padx=10, pady=5
         )
-        tree = ttk.Treeview(parent, columns=("name", "n"), show="headings", selectmode="browse")
+        # Files.Treeview: a selected row keeps its status colour (#34 次项).
+        tree = ttk.Treeview(parent, columns=("name", "n"), show="headings", selectmode="browse", style="Files.Treeview")
         tree.heading("name", text="文件")
         tree.heading("n", text="替换数")
         # "⚠ 命中偏多  入组统计报告_V2.pdf" is about 227px in the UI font.
@@ -1689,6 +1701,11 @@ def _has_findings(scan: FileScan) -> bool:
     if scan.hits or _blocked_reason(scan):
         return True
     return int(getattr(scan, "unlocated_count", 0) or 0) > 0
+
+
+def _has_rule_hits(scan: FileScan) -> bool:
+    """Rule hits only (located or not); a block alone is not a hit."""
+    return bool(scan.hits) or int(getattr(scan, "unlocated_count", 0) or 0) > 0
 
 
 def _pdf_fit_notice(scan: FileScan, app) -> str:

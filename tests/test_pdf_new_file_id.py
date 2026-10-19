@@ -37,3 +37,24 @@ def test_written_pdf_does_not_keep_original_file_id(tmp_path: Path):
         assert "Acme" not in out.xref_get_key(-1, "ID")[1]
     finally:
         out.close()
+
+
+def test_cli_written_pdf_does_not_keep_original_file_id(tmp_path: Path):
+    """#49 次项：命令行写出（redact_path → redact_pdf）也换新 /ID。编造数据。"""
+    from doc_redactor.cli import redact_path
+
+    src = tmp_path / "id-cli.pdf"
+    _source(src)
+    engine = build_engine([], [WordlistRule("申办方", ["Acme Pharma"], True)])
+    outdir = tmp_path / "cli-out"
+    outdir.mkdir()
+    redact_path(src, outdir, engine)
+    [dest] = list(outdir.glob("*.pdf"))
+    data = dest.read_bytes()
+    assert b"Acme Pharma" not in data
+    out = pymupdf.open(dest)
+    try:
+        new_id = out.xref_get_key(-1, "ID")[1]
+        assert "Acme" not in new_id and "0102030405060708" not in new_id
+    finally:
+        out.close()
