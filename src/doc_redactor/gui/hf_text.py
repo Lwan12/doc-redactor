@@ -36,6 +36,16 @@ BAR_PENDING_EXTRA = (
 BAR_CONFIRMED_AUTO = "虚线框里按每页重复认出的页眉、页脚，写出时会删除。"
 BAR_CONFIRMED_EXTRA = "虚线框里那一行写出时会删除。页眉、页脚按文件标记删除，签署信息按固定文字删除。"
 BAR_SIGN_TAIL = "签署信息按固定文字识别，照常删除。"
+# #28 r3 m7: rows past the outer two taken because they are the same on
+# every page. Only a hint; recognition and the default (不删) are unchanged.
+# Short on purpose: the strip must not grow and push the preview under five
+# lines at 960×640 (#28 r2 M3). In the 「按每页重复认出」 text the hint takes
+# the place of 「可能混进续表标题、表头或脚注」; elsewhere it is appended.
+BAR_PENDING_AUTO_FIXED = (
+    "这个 PDF 没有页眉页脚标记，虚线框里的页眉、页脚是按每页重复认出的，"
+    "含 {n} 行固定文字，可能是表头或声明，现在不删。"
+)
+BAR_FIXED = "虚线框含 {n} 行固定文字。"
 
 KEPT = hf.UI_TEXT["file_kept"]
 WATERMARK = hf.UI_TEXT["watermark"]
@@ -121,6 +131,14 @@ def preview_notes(scan, option_on: bool) -> list[str]:
     return []
 
 
+def fixed_rows(scan) -> int:
+    """Rows of fixed text in the blocks found by repetition (counts only)."""
+    plan = scan.hf_plan
+    if plan is None:
+        return 0
+    return sum(c.fixed_rows for c in plan.candidates if c.source == hf.SOURCE_REPEAT)
+
+
 def confirm_bar(scan, option_on: bool, written: bool) -> dict | None:
     """The strip above the preview with 「确认删除 / 撤销确认」, or None.
 
@@ -131,11 +149,17 @@ def confirm_bar(scan, option_on: bool, written: bool) -> dict | None:
         return None
     extra = _extra_only(scan)
     sign = scan.hf_has_sign and not extra
+    fixed = fixed_rows(scan)
     if scan.hf_confirmed:
         text = BAR_CONFIRMED_EXTRA if extra else BAR_CONFIRMED_AUTO + (BAR_SIGN_TAIL if sign else "")
-        return {"status": CONFIRMED, "tone": TONE_OK, "text": text, "button": UNDO_BUTTON, "enabled": not written}
-    text = BAR_PENDING_EXTRA if extra else BAR_PENDING_AUTO + (BAR_SIGN_TAIL if sign else "")
-    return {"status": PENDING, "tone": TONE_WARN, "text": text, "button": CONFIRM_BUTTON, "enabled": not written}
+        if fixed:
+            text += BAR_FIXED.format(n=fixed)
+        return {"status": CONFIRMED, "tone": TONE_OK, "text": text, "button": UNDO_BUTTON, "enabled": not written, "fixed": fixed}
+    if extra:
+        text = BAR_PENDING_EXTRA + (BAR_FIXED.format(n=fixed) if fixed else "")
+    else:
+        text = (BAR_PENDING_AUTO_FIXED.format(n=fixed) if fixed else BAR_PENDING_AUTO) + (BAR_SIGN_TAIL if sign else "")
+    return {"status": PENDING, "tone": TONE_WARN, "text": text, "button": CONFIRM_BUTTON, "enabled": not written, "fixed": fixed}
 
 
 def block_style(scan, source: str) -> str:
