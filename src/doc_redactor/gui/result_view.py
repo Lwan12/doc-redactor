@@ -37,6 +37,7 @@ from doc_redactor.gui.theme import (
     status_style,
 )
 from doc_redactor.engine import redaction_label
+from doc_redactor.verify_output import is_final_failure
 from doc_redactor.pdf_redactor import (
     MSG_PDF_WIDTH,
     ShortPlan,
@@ -1134,9 +1135,10 @@ class ResultView:
         tk.Label(left, text=path, bg=BG_SURFACE, fg=INK2, font=fonts["mono_font"], anchor="w").pack(fill="x")
         if app.written and failures:
             ttk.Button(buttons, text="打开输出文件夹", style="Primary.TButton", command=app.open_output).pack(side="right")
-            ttk.Button(buttons, text="重试失败的", command=lambda: app.write_files(retry=True)).pack(
-                side="right", padx=(0, 8)
-            )
+            if any(not is_final_failure(reason) for _name, reason in failures):
+                ttk.Button(buttons, text="重试失败的", command=lambda: app.write_files(retry=True)).pack(
+                    side="right", padx=(0, 8)
+                )
             ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
             return
         if app.written:
