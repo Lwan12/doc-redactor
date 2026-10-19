@@ -440,6 +440,8 @@ def _visible_copy(widget) -> str:
             value = node.cget("text")
         except Exception:
             continue
+        # Hand-wrapped labels keep the unwrapped sentence here.
+        value = getattr(node, "logical_text", value)
         if isinstance(value, str) and value:
             chunks.append(value)
     return "\n".join(chunks)
@@ -517,13 +519,21 @@ def test_blank_only_result_notice_and_column_wrap(gui):
     assert MSG_FIT_BLANK.format(m=1) in _visible_copy(app.root)
     assert "2\u00a0处无法定位，未写出" in _visible_copy(app.root)
     assert "换成短码" not in _visible_copy(app.root)
+    import tkinter.font as tkfont
+
+    from doc_redactor.gui.result_view import NO_LINE_START
+
     for node in notices:
-        text = node.cget("text")
-        assert "\n" not in text
+        # The label is laid out by hand so a comma never starts a line.
+        lines = node.cget("text").split("\n")
         parent_w = node.master.winfo_width()
-        wrap = int(node.cget("wraplength"))
         assert parent_w > 80
-        assert abs(wrap - (parent_w - 8)) <= 4
+        assert int(node.cget("wraplength")) == 0
+        measure = tkfont.Font(font=node.cget("font")).measure
+        for line in lines:
+            assert line and line[0] not in NO_LINE_START
+            assert measure(line) <= parent_w - 8
+        assert "".join(lines).replace(" ", "") == node.logical_text.replace(" ", "")
 
 
 def test_mixed_unlocated_row_warns_and_write_button_skips_it(gui):
@@ -783,3 +793,136 @@ def test_relabel_only_keeps_unchecked_and_redraws_preview(gui, tmp_path, monkeyp
     _wait_scan(app)
     assert app.note_cleared is True
     assert all(h.enabled for h in app.scans[0].hits)
+
+
+def _s2_scans():
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    def _hit(hit_id: int, text: str) -> LocatedHit:
+        return LocatedHit(
+            hit_id=hit_id,
+            category="申办方",
+            text=text,
+            location="第 1 页 · 第 1 行",
+            unit="page:0",
+            start=0,
+            end=len(text),
+            rects=[(72.0, 80.0, 140.0, 94.0)],
+            page=0,
+        )
+
+    kept = FileScan(
+        path=Path("kept.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(1, "Acme"), _hit(2, "Acme"), _hit(3, "Acme")],
+        pages=[["Acme Acme Acme"]],
+    )
+    lost = FileScan(
+        path=Path("lost.pdf"),
+        kind=KIND_PDF,
+        status="ok",
+        hits=[_hit(4, "星辰海"), _hit(5, "星辰海"), _hit(6, "星辰海")],
+        pages=[["星辰海 星辰海 星辰海"]],
+        unlocated_count=2,
+    )
+    return kept, lost
+
+
+def test_writable_total_skips_blocked_and_failed_files():
+    from doc_redactor.gui.result_view import writable_hit_total
+
+    kept, lost = _s2_scans()
+    assert writable_hit_total([kept, lost], written=False, write_errors={}) == 3
+    kept.hits[0].enabled = False
+    assert writable_hit_total([kept, lost], written=False, write_errors={}) == 2
+    # After a write, a file the write refused no longer counts.
+    errors = {str(kept.path): "占用"}
+    assert writable_hit_total([kept, lost], written=True, write_errors=errors) == 0
+    # Before writing, stale errors are ignored.
+    assert writable_hit_total([kept, lost], written=False, write_errors=errors) == 2
+
+
+def _summary_number(app, verb: str) -> str:
+    import tkinter as tk
+
+    for node in _walk(app.root):
+        if isinstance(node, tk.Label) and node.cget("text").strip() == verb:
+            siblings = node.master.pack_slaves()
+            return siblings[siblings.index(node) + 1].cget("text")
+    raise AssertionError(f"no {verb} label")
+
+
+def test_summary_count_matches_the_write_button(gui):
+    """S2: the top 将替换 N 处 used to include hits of a blocked file."""
+    from tkinter import ttk
+
+    kept, lost = _s2_scans()
+    app = gui
+    app.scans = [kept, lost]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    buttons = [node.cget("text") for node in _walk(app.root) if isinstance(node, ttk.Button)]
+    write_label = next(label for label in buttons if label.startswith("写出 "))
+    assert "替换 3 处" in write_label
+    assert _summary_number(app, "将替换") == "3"
+    rows = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            rows += [node.item(item, "values") for item in node.get_children()]
+    all_row = next(row for row in rows if "全部文件" in str(row[0]))
+    assert str(all_row[1]) == "3"
+    lost_row = next(row for row in rows if "lost.pdf" in str(row[0]))
+    assert str(lost_row[1]) == "—"
+    # Blocked hits are not hits the user cancelled.
+    assert "你取消了" not in _visible_copy(app.root)
+
+    # After a write the blocked file is a 没写出 row; it still adds nothing.
+    app.written = True
+    app.write_errors = {str(lost.path): "2 处无法定位，未写出"}
+    app.show("result")
+    _settle(app)
+    rows = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            rows += [node.item(item, "values") for item in node.get_children()]
+    assert str(next(row for row in rows if "全部文件" in str(row[0]))[1]) == "3"
+    assert str(next(row for row in rows if "lost.pdf" in str(row[0]))[1]) == "—"
+    assert _summary_number(app, "已替换") == "3"
+
+
+_S3_TEXT = "⚠ 另有\u00a02\u00a0处太窄，连短码也放不下，只留了空白，原文已删除。 2\u00a0处无法定位，未写出"
+
+
+@pytest.mark.parametrize("width", range(4, 60))
+def test_wrapped_lines_never_start_with_a_comma(width):
+    """S3: Tk breaks a long CJK run anywhere, so 「，」 could start a line."""
+    from doc_redactor.gui.result_view import NO_LINE_START, wrap_lines
+
+    lines = wrap_lines(_S3_TEXT, width, len)
+    for line in lines:
+        assert line, lines
+        assert line[0] not in NO_LINE_START, lines
+        assert not line.startswith(" ") and not line.endswith(" ")
+    # Only normal spaces at a break are dropped; nothing else is lost.
+    assert "".join(lines).replace(" ", "") == _S3_TEXT.replace(" ", "")
+    for line in lines:
+        assert not line.endswith("\u00a0") and not line.startswith("\u00a0")
+    # The count and 处 stay together.
+    assert all("2\u00a0处" in line or "2" not in line for line in lines)
+
+
+def test_wrap_lines_fits_the_width_when_it_can():
+    from doc_redactor.gui.result_view import wrap_lines
+
+    for width in range(8, 60):
+        for line in wrap_lines(_S3_TEXT, width, len):
+            # A glued unit (count + 处, or a char plus its comma) may hang by 1.
+            assert len(line) <= width + 1

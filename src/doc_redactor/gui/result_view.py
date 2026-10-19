@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 from PIL import ImageTk
@@ -44,7 +45,7 @@ from doc_redactor.pdf_redactor import (
     placeholder_choice,
     placeholder_rect,
 )
-from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
+from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan
 
 # Left is the previous page, right is the next page.
 PDF_PAGER = (("‹", -1), ("›", 1))
@@ -330,13 +331,8 @@ class ResultView:
                 font=fonts["small"],
             ).pack(side="left")
             return
-        enabled, _counts = session_totals(scans, enabled_only=True)
-        if self.app.written:
-            for scan in scans:
-                if str(scan.path) in self.app.write_errors:
-                    enabled -= scan.enabled_count()
-        total_hits = sum(len(s.hits) for s in scans)
-        cancelled_n = total_hits - enabled
+        enabled = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
+        cancelled_n = sum(len(s.hits) - s.enabled_count() for s in scans if s.status != "fail")
         n_hit = sum(1 for s in scans if s.status != "fail" and _has_findings(s))
         n_no = sum(1 for s in scans if s.status != "fail" and not _has_findings(s))
         n_fail = sum(1 for s in scans if s.status == "fail")
@@ -388,7 +384,7 @@ class ResultView:
         tree.tag_configure("bad", foreground="#cb2f39")
         tree.tag_configure("no", foreground="#6c6c6c")
         tree.tag_configure("warn", foreground="#c04700")
-        total, _ = session_totals(scans, enabled_only=True)
+        total = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
         all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=("ok",))
         ids = [all_id]
         for scan in scans:
@@ -396,7 +392,12 @@ class ResultView:
             icon, text, _ = status_style(kind)
             if kind == "unlocated":
                 text = status_text
-            count = "—" if scan.status == "fail" else scan.enabled_count()
+            # A blocked or refused file writes nothing, so its row adds nothing
+            # to 全部文件.
+            if counts_toward_write(scan, written=self.app.written, write_errors=self.app.write_errors):
+                count = scan.enabled_count()
+            else:
+                count = "—"
             label = f"{icon} {scan.path.name}"
             if kind in {"skipped", "unlocated"}:
                 label = f"{icon} {scan.path.name}  {text}"
@@ -978,17 +979,8 @@ class ResultView:
         foot.pack(side="bottom", fill="x")
         inner = tk.Frame(foot, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=8)
-        enabled, _ = session_totals(scans, enabled_only=True)
         app = self.app
-        for scan in scans:
-            if scan.status == "fail":
-                continue
-            unlocated = int(getattr(scan, "unlocated_count", 0) or 0) > 0
-            failed_write = str(scan.path) in app.write_errors
-            # Blocked files, and files a write already refused, stay out of the
-            # button count. Each file is subtracted once.
-            if unlocated or (app.written and failed_write):
-                enabled -= scan.enabled_count()
+        enabled = writable_hit_total(scans, written=app.written, write_errors=app.write_errors)
         n_files = app.written_file_count()
         failures = app.write_failure_rows()
         path = app.output_label()
@@ -1066,11 +1058,101 @@ class ResultView:
         ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
 
 
+def writable_hit_total(scans, *, written: bool, write_errors: dict) -> int:
+    """Checked hits in files that will be (or were) written.
+
+    The one count behind the top summary, the 全部文件 row and the write
+    button. A file blocked by unlocated hits, and after a write a file the
+    write refused, add nothing.
+    """
+    return sum(
+        scan.enabled_count() for scan in scans if counts_toward_write(scan, written=written, write_errors=write_errors)
+    )
+
+
+def counts_toward_write(scan, *, written: bool, write_errors: dict) -> bool:
+    if scan.status == "fail":
+        return False
+    if int(getattr(scan, "unlocated_count", 0) or 0) > 0:
+        return False
+    return not (written and str(scan.path) in write_errors)
+
+
+# Characters that must not begin a line, and ones that must not end one.
+NO_LINE_START = frozenset("，。、；：！？）」』》〉】,.;:!?)%")
+NO_LINE_END = frozenset("（「『《〈【(")
+
+
+def _is_word_char(ch: str) -> bool:
+    return ch.isascii() and (ch.isalnum() or ch in "_-/")
+
+
+def _wrap_units(text: str) -> list[str]:
+    """Pieces that may not be split. A normal space is its own piece.
+
+    A non-breaking space glues its neighbours (so "2 处" stays together),
+    closing punctuation sticks to the character before it, opening
+    punctuation to the one after it, and an ASCII word stays whole.
+    """
+    units: list[str] = []
+    buf = ""
+    for ch in text:
+        if ch == " ":
+            if buf:
+                units.append(buf)
+                buf = ""
+            units.append(" ")
+            continue
+        glue = bool(buf) and (
+            ch == "\u00a0"
+            or buf[-1] == "\u00a0"
+            or buf[-1] in NO_LINE_END
+            or ch in NO_LINE_START
+            or (_is_word_char(ch) and _is_word_char(buf[-1]))
+        )
+        if glue:
+            buf += ch
+            continue
+        if buf:
+            units.append(buf)
+        buf = ch
+    if buf:
+        units.append(buf)
+    return units
+
+
+def wrap_lines(text: str, width: int, measure) -> list[str]:
+    """Break ``text`` into lines no wider than ``width`` where possible.
+
+    ``measure`` returns a string's width (``Font.measure`` in the UI). Breaks
+    fall between pieces from ``_wrap_units``, so a line never starts with a
+    comma or full stop. A piece wider than the whole line is kept whole.
+    """
+    lines: list[str] = []
+    current = ""
+    for unit in _wrap_units(text):
+        if unit == " ":
+            if current:
+                current += " "
+            continue
+        candidate = current + unit
+        if not current.strip() or measure(candidate) <= width:
+            current = candidate
+            continue
+        lines.append(current.rstrip(" "))
+        current = unit
+    if current.strip():
+        lines.append(current.rstrip(" "))
+    return lines
+
+
 def _wrap_label(parent, text: str, *, bg: str, fg: str, font) -> tk.Label:
     """Wrap to the parent width using the font's own line spacing.
 
     ``tk.Message`` adds extra leading, which pushed the PDF preview's last
-    line out of the 640px window.
+    line out of the 640px window. Tk's own wraplength breaks a long CJK run
+    at any character, so a 「，」 could start a line; the lines are laid out
+    here instead. ``logical_text`` keeps the unwrapped sentence.
     """
     label = tk.Label(
         parent,
@@ -1080,16 +1162,23 @@ def _wrap_label(parent, text: str, *, bg: str, fg: str, font) -> tk.Label:
         font=font,
         justify="left",
         anchor="w",
-        wraplength=40,
+        wraplength=0,
     )
+    label.logical_text = text
+    measure = tkfont.Font(font=label.cget("font")).measure
+    # Start narrow, as wraplength=40 did, so one long line cannot widen the column.
+    label.configure(text="\n".join(wrap_lines(text, 40, measure)))
+    state = {"width": None}
 
     def sync(_event=None) -> None:
         width = parent.winfo_width()
         if width <= 20:
             return
         target = max(40, width - 8)
-        if int(label.cget("wraplength")) != target:
-            label.configure(wraplength=target)
+        if state["width"] == target:
+            return
+        state["width"] = target
+        label.configure(text="\n".join(wrap_lines(text, target, measure)))
 
     parent.bind("<Configure>", sync, add="+")
     parent.after_idle(sync)

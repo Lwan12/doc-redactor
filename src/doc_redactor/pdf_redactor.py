@@ -659,23 +659,31 @@ def _line_similarity(plain: str, raw: str) -> int:
 
 
 def _best_pairs(plain_lines: list[tuple[int, int, str]], raw_lines: list) -> dict[int, int]:
-    """Pair each plain line with at most one raw line, best score first."""
-    candidates = []
-    for p_index, (_start, _end, plain) in enumerate(plain_lines):
-        for r_index, raw in enumerate(raw_lines):
-            score = _line_similarity(plain, raw[2])
-            if score > 0:
-                candidates.append((score, p_index, r_index))
-    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
-    used_plain: set[int] = set()
-    used_raw: set[int] = set()
+    """Pair plain lines with raw lines without crossing, highest total score.
+
+    Pairs keep line order: if plain line i goes to raw line j, a later plain
+    line can only go to a later raw line. A greedy best-score-first pick could
+    swap two neighbouring lines and give each hit the other line's box.
+    """
+    n, m = len(plain_lines), len(raw_lines)
+    score = [[_line_similarity(plain_lines[i][2], raw_lines[j][2]) for j in range(m)] for i in range(n)]
+    # best[i][j]: highest total for plain[i:] and raw[j:].
+    best = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            take = score[i][j] + best[i + 1][j + 1] if score[i][j] > 0 else 0
+            best[i][j] = max(take, best[i + 1][j], best[i][j + 1])
     pairing: dict[int, int] = {}
-    for _score, p_index, r_index in candidates:
-        if p_index in used_plain or r_index in used_raw:
-            continue
-        used_plain.add(p_index)
-        used_raw.add(r_index)
-        pairing[p_index] = r_index
+    i = j = 0
+    while i < n and j < m:
+        if score[i][j] > 0 and best[i][j] == score[i][j] + best[i + 1][j + 1]:
+            pairing[i] = j
+            i += 1
+            j += 1
+        elif best[i][j] == best[i + 1][j]:
+            i += 1
+        else:
+            j += 1
     return pairing
 
 
