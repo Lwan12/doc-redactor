@@ -15,16 +15,20 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote
 
 from doc_redactor.engine import RedactionEngine
+from doc_redactor.verify_output import count_not_allowed, is_invented, not_allowed
 
 # U+00A0 keeps the count on the same line as 处 when a banner wraps.
 MSG_LEAKED_HEAD = "写出后复核：换一种读法仍能读出\u00a0{n}\u00a0处"
 MSG_LEAKED = MSG_LEAKED_HEAD + "，已删除这个输出文件，没有写出"
 MSG_LEAKED_UNDELETED = MSG_LEAKED_HEAD + "，删除输出失败，请手动删除「{name}」"
-MSG_NO_HITS = "整份文件没有找到要遮的内容，没有写出。原件没有处理过，不要当成脱敏件交出去；如果里面有敏感内容，请先补规则。"
+# 文案待前端定。命令行和界面用同一句（M34-1）。
+MSG_NO_HITS_LINE = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
+MSG_NO_HITS = MSG_NO_HITS_LINE + "。如果里面有敏感内容，请先补规则。"
 
 _RASTER = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")
 _W_P = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
@@ -48,11 +52,24 @@ class NoHits(ValueError):
 
 def readings(path: Path) -> list[str]:
     """Texts other tools would get from ``path``. PDF and Word only."""
+    return [text for _name, texts, _places in views(path) for text in texts]
+
+
+def views(path: Path) -> list[tuple[str, list[str], bool]]:
+    """``(name, texts, places)`` per way of reading ``path``.
+
+    ``places`` is True for a view that reads each place the scan lists once
+    (PDF page text, the Word XML): counts add up over its texts, and unchecked
+    hits are allowed by count. Other views (PDF objects, metadata, links,
+    embedded packages) can show one place several times, so each text counts
+    on its own and nothing is allowed there: an unchecked hit is never in
+    them, since the scan does not list them.
+    """
     suffix = Path(path).suffix.lower()
     if suffix == ".pdf":
-        return _pdf_readings(Path(path))
+        return _pdf_views(Path(path))
     if suffix == ".docx":
-        return _zip_readings(Path(path).read_bytes())
+        return _docx_views(Path(path).read_bytes())
     return []
 
 
@@ -68,37 +85,46 @@ def count_leaks(
     labels: list[str] | tuple[str, ...] = (),
     source: Path | None = None,
 ) -> int:
-    """Number of hits across all readings, minus kept text and placeholders.
+    """Number of hits across all readings, minus unchecked hits and placeholders.
 
-    ``kept`` are texts of hits the user unchecked; the same text elsewhere is
-    therefore not counted either. ``labels`` are the placeholders the writer
-    used; a hit inside one of them is the writer's own text. ``source`` is the
-    original: a hit that no reading of the original has, and that neither
-    contains nor is part of any hit there, was made up by the writer's own
-    deletions ("Subject [deleted] 001") and is not counted (same rule as the
-    rescan in verify_output).
+    ``kept`` are texts of hits the user unchecked, once per hit. Only that many
+    occurrences are let through, and only in the views that read the scanned
+    places (``views``); the same word in a named destination or in metadata
+    still counts (review M34-3). The allowance is the same function as the
+    after-write check (``verify_output.not_allowed``). ``labels`` are the
+    placeholders the writer used; a hit inside one of them is the writer's own
+    text. ``source`` is the original: a hit that no reading of the original
+    has, and that neither contains nor is part of any hit there, was made up
+    by the writer's own deletions ("Subject [deleted] 001") and is not counted
+    (``verify_output.is_invented``).
     """
-    kept_norm = {_norm(text) for text in kept if text}
     label_norm = [_norm(text) for text in labels if text]
     known = None
     if source is not None:
         known = {_norm(hit.text) for text in readings(source) for hit in engine.find_hits(text)}
-    # The same place shows up in several readings (an attribute and its
-    # decoded form, metadata and the Info object). Per hit text, take the
-    # largest count any single reading gives.
+    # Per hit text, take the largest count any single view leaves after the
+    # allowance: the same place shows up in several views.
     most: dict[str, int] = {}
-    for text in readings(path):
-        seen: dict[str, int] = {}
-        for hit in engine.find_hits(text):
-            flat = _norm(hit.text)
-            if not flat or flat in kept_norm:
-                continue
-            if any(flat in label for label in label_norm):
-                continue
-            if known is not None and flat not in known and not any(k and (k in flat or flat in k) for k in known):
-                continue
-            seen[flat] = seen.get(flat, 0) + 1
-        for flat, count in seen.items():
+    for _name, texts, places in views(path):
+        found: Counter = Counter()
+        for text in texts:
+            seen: Counter = Counter()
+            for hit in engine.find_hits(text):
+                flat = _norm(hit.text)
+                if not flat:
+                    continue
+                if any(flat in label for label in label_norm):
+                    continue
+                if known is not None and is_invented(flat, known):
+                    continue
+                seen[flat] += 1
+            if places:
+                found.update(seen)
+            else:
+                for flat, count in seen.items():
+                    found[flat] = max(found[flat], count)
+        left = not_allowed(found, kept if places else (), key=_norm)
+        for flat, count in left.items():
             most[flat] = max(most.get(flat, 0), count)
     return sum(most.values())
 
@@ -131,14 +157,26 @@ def gate_output(
 # --- Word ---------------------------------------------------------------------
 
 
-def _zip_readings(data: bytes) -> list[str]:
+def _docx_views(data: bytes) -> list[tuple[str, list[str], bool]]:
+    xml: list[str] = []
+    other: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        for name in archive.namelist():
+            if name.lower().endswith((".xml", ".rels", ".vml")):
+                xml.extend(_xml_readings(archive.read(name)))
+    other = [text for text in _zip_readings(data, xml_too=False)]
+    return [("Word XML", xml, True), ("Word 内嵌包和二进制", other, False)]
+
+
+def _zip_readings(data: bytes, xml_too: bool = True) -> list[str]:
     out: list[str] = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         for name in archive.namelist():
             payload = archive.read(name)
             lowered = name.lower()
             if lowered.endswith((".xml", ".rels", ".vml")):
-                out.extend(_xml_readings(payload))
+                if xml_too:
+                    out.extend(_xml_readings(payload))
             elif payload[:2] == b"PK":
                 try:
                     out.extend(_zip_readings(payload))
@@ -171,9 +209,8 @@ def _xml_readings(payload: bytes) -> list[str]:
         elif element.text and element.getparent() is not None and not _inside_paragraph(element):
             out.append(element.text)
         for value in element.attrib.values():
-            out.append(value)
-            if "%" in value:
-                out.append(unquote(value))
+            # One string per attribute (decoded when escaped), so a place counts once.
+            out.append(unquote(value) if "%" in value else value)
     return out
 
 
@@ -189,20 +226,23 @@ def _inside_paragraph(element) -> bool:
 # --- PDF ----------------------------------------------------------------------
 
 
-def _pdf_readings(path: Path) -> list[str]:
+def _pdf_views(path: Path) -> list[tuple[str, list[str], bool]]:
     import pymupdf
 
     from doc_redactor.pdf_redactor import PAGE_TEXT_FLAGS
 
+    flags_text: list[str] = []
+    joined: list[str] = []
+    plain: list[str] = []
     out: list[str] = []
     document = pymupdf.open(path)
     try:
         for page in document:
             textpage = page.get_textpage(flags=PAGE_TEXT_FLAGS, clip=pymupdf.INFINITE_RECT())
             text = page.get_text("text", textpage=textpage)
-            out.append(text)
-            out.append(re.sub(r"(?<=\w)[-\u00ad\u2010]\n(?=\w)", "", text))
-            out.append(page.get_text("text"))
+            flags_text.append(text)
+            joined.append(re.sub(r"(?<=\w)[-\u00ad\u2010]\n(?=\w)", "", text))
+            plain.append(page.get_text("text"))
             for link in page.get_links():
                 out.append(str(link.get("uri") or ""))
                 out.append(str(link.get("file") or ""))
@@ -224,7 +264,12 @@ def _pdf_readings(path: Path) -> list[str]:
         out.extend(_pdf_strings(document.pdf_trailer()))
     finally:
         document.close()
-    return out
+    return [
+        ("PDF 整页文字", flags_text, True),
+        ("PDF 整页文字（连字符拼回）", joined, True),
+        ("PDF 页面文字", plain, True),
+        ("PDF 对象、元数据和链接", out, False),
+    ]
 
 
 def _pdf_strings(source: str) -> list[str]:

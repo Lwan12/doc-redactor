@@ -47,6 +47,7 @@ from doc_redactor.pdf_redactor import (
     placeholder_choice,
     placeholder_rect,
 )
+from doc_redactor.leak_check import MSG_NO_HITS, MSG_NO_HITS_LINE
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan
 
 # Left is the previous page, right is the next page.
@@ -403,7 +404,7 @@ class ResultView:
             label = f"{icon} {scan.path.name}"
             if kind in {"skipped", "unlocated", "blocked"}:
                 label = f"{icon} {scan.path.name}  {text}"
-            elif kind in {"many", "nowrite"}:
+            elif kind in {"many", "nowrite", "nohit_unwritten"}:
                 label = f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
@@ -629,7 +630,7 @@ class ResultView:
                 "—",
                 "没有找到要遮的内容",
                 # 文案待前端定。
-                "所选规则在这个文件里都没有命中，这个文件不会写出。可以检查规则里的例子，或看看这个文件是不是扫描件。",
+                f"所选规则在这个文件里都没有命中。{MSG_NO_HITS_LINE}。可以检查规则里的例子，或看看这个文件是不是扫描件。",
                 [("去看规则", self.app.leave_to_rules, False)],
                 fonts,
             )
@@ -1001,6 +1002,10 @@ class ResultView:
             else:
                 mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
             content = "▇▇▇▇" if self.app.hide_text else hit.text
+            if getattr(hit, "approx", False):
+                # OCR read a look-alike; show what it read so the user can judge
+                # (文案待前端定). Screen only: nothing here is written to disk.
+                content = f"近似 {content}"
             loc.insert(
                 "",
                 "end",
@@ -1340,6 +1345,8 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
         return "fail", "失败", "bad"
     if str(scan.path) in app.write_errors:
         return "nowrite", "没写出", "bad"
+    if app.write_notes.get(str(scan.path)) == MSG_NO_HITS:
+        return "nohit_unwritten", MSG_NO_HITS, "warn"
     if str(scan.path) in app.write_notes:
         return "skipped", app.write_notes[str(scan.path)], "ok"
     if scan.too_many:

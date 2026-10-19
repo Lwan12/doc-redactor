@@ -344,6 +344,20 @@ class RedactionEngine:
             self._ocr = build_engine(*self._ocr_rules, ocr=True)
         return self._ocr
 
+    def is_approximate_ocr_match(self, text: str) -> bool:
+        """True when ``text`` (what OCR read for one hit) is only a near match.
+
+        The exact rules (this engine, not ``for_ocr``) must cover the whole
+        text; otherwise the hit came from the one-misread-character allowance
+        and the screen marks it 近似 (review M34-2).
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        lead = len(text) - len(text.lstrip())
+        end = lead + len(stripped)
+        return not any(hit.start <= lead and hit.end >= end for hit in self.find_hits(text))
+
     def label(self, category: str) -> str:
         return redaction_label(category, self.replacements)
 
