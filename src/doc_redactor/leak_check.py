@@ -26,7 +26,7 @@ from doc_redactor.verify_output import count_not_allowed, is_invented, not_allow
 MSG_LEAKED_HEAD = "写出后复核：换一种读法仍能读出\u00a0{n}\u00a0处"
 MSG_LEAKED = MSG_LEAKED_HEAD + "，已删除这个输出文件，没有写出"
 MSG_LEAKED_UNDELETED = MSG_LEAKED_HEAD + "，删除输出失败，请手动删除「{name}」"
-# 文案待前端定。命令行和界面用同一句（M34-1）。
+# 命令行和界面用同一句（M34-1）。
 MSG_NO_HITS_LINE = "没有命中，没有写出脱敏件。不要把原件当成脱敏件使用"
 MSG_NO_HITS = MSG_NO_HITS_LINE + "。如果里面有敏感内容，请先补规则。"
 

@@ -109,8 +109,10 @@ STATES = [
     ("77-res-hf-auto-undo", "res-hf-auto-undo"),
     ("78-res-hf-mixed-ok", "res-hf-mixed-ok"),
     ("79-res-hf-none-plain", "res-hf-none-plain"),
-    ("80-res-hf-zero", "res-hf-zero"),
-    ("81-res-hf-zero-written", "res-hf-zero-written"),
+    ("80-res-hf-fixed", "res-hf-fixed"),
+    ("81-res-hf-fixed-ok", "res-hf-fixed-ok"),
+    ("82-res-hf-zero", "res-hf-zero"),
+    ("83-res-hf-zero-written", "res-hf-zero-written"),
 ]
 
 

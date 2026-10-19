@@ -138,6 +138,10 @@ def _line_box(text: tk.Text, index: str):
         return None
 
 
+# Under the preview; ends with 「。」 so a clipped line is easy to spot (#28 r3 m11).
+LOCATE_HINT = "点任一处高亮或右边的位置，可以定位。"
+
+
 class ResultView:
     def __init__(self, app) -> None:
         self.app = app
@@ -483,7 +487,6 @@ class ResultView:
                 body,
                 "—",
                 "这批文件里没有找到要遮的内容",
-                # 文案待前端定。
                 "文件都正常打开了，但规则一处都没命中，所以不会写出任何文件，原件也不要当成脱敏件交出去。下一步：检查规则里的例子是否和这批文件的写法一致，或换一类规则再扫。",
                 [("检查规则", self.app.leave_to_rules, True), ("换一批文件", self.app.back_to_files, False)],
                 fonts,
@@ -666,7 +669,6 @@ class ResultView:
                     body,
                     "✓" if self.app.written else "—",
                     _hf_only_line(self.app),
-                    # 文案待前端定。
                     "所选规则在这个文件里都没有命中，只删除了页眉页脚。"
                     + ("脱敏件已写出。" if self.app.written else "写出时会生成脱敏件。"),
                     [("去看规则", self.app.leave_to_rules, False)],
@@ -677,7 +679,6 @@ class ResultView:
                 body,
                 "—",
                 "没有找到要遮的内容",
-                # 文案待前端定。
                 f"所选规则在这个文件里都没有命中。{MSG_NO_HITS_LINE}。可以检查规则里的例子，或看看这个文件是不是扫描件。",
                 [("去看规则", self.app.leave_to_rules, False)],
                 fonts,
@@ -691,7 +692,7 @@ class ResultView:
         if cur is not None:
             hint = f"当前：{cur.location} · {self.app.marker(cur.category)} {cur.category}"
         else:
-            hint = "点任一处高亮，或点右边的位置，可以定位"
+            hint = LOCATE_HINT
         fit_label(foot, hint, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(fill="x", padx=8, pady=4)
 
         body.pack(fill="both", expand=True)
@@ -1203,8 +1204,8 @@ class ResultView:
                 mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
             content = "▇▇▇▇" if self.app.hide_text else hit.text
             if getattr(hit, "approx", False):
-                # OCR read a look-alike; show what it read so the user can judge
-                # (文案待前端定). Screen only: nothing here is written to disk.
+                # OCR read a look-alike; show what it read so the user can judge.
+                # Screen only: nothing here is written to disk.
                 content = f"近似 {content}"
             loc.insert(
                 "",
@@ -1676,7 +1677,6 @@ def _hf_only_write(scan: FileScan, app) -> bool:
 
 
 def _hf_only_line(app) -> str:
-    # 文案待前端定。
     return "无命中词，已删除页眉页脚并写出" if app.written else "无命中词，将删除页眉页脚并写出"
 
 
