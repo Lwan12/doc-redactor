@@ -49,6 +49,14 @@ _CODE_RANK = {code: index for index, (code, _title, _keys) in enumerate(_SHORT_G
 _FONT_INFO: dict[str, dict] = {}
 _HEIGHT_EPSILON = 1e-5
 
+# Scan the whole page, not only what the CropBox shows. Text placed outside the
+# page or cut off by the CropBox is invisible on screen, but pypdf and
+# pdftotext still read it.
+PAGE_TEXT_FLAGS = pymupdf.TEXTFLAGS_TEXT & ~pymupdf.TEXT_MEDIABOX_CLIP
+# A line ending in one of these, between two letters, is one word broken over
+# two lines. pdftotext joins it back, so the scan must too.
+_BREAK_HYPHENS = "-\u00ad\u2010"
+
 
 class UnlocatedText(ValueError):
     """Plain text has a hit whose glyphs could not be placed on the page.
@@ -279,6 +287,257 @@ def pdf_fit_counts(hits, label, category_order: list[str] | None = None) -> tupl
     return short_count, blank_count
 
 
+def page_textpage(page):
+    """Text page of everything drawn on ``page``, inside the CropBox or not."""
+    return page.get_textpage(flags=PAGE_TEXT_FLAGS, clip=pymupdf.INFINITE_RECT())
+
+
+def find_page_hits(engine: RedactionEngine, text: str) -> list[Hit]:
+    """Hits in one page's text, plus words broken by a hyphen at a line end.
+
+    The page text is matched as it is. Then a copy with every ``letter-\\nletter``
+    break removed is matched too; a hit there that crosses a removed break is
+    mapped back to the original offsets (it then covers both line fragments
+    and the hyphen) and kept unless it overlaps a hit already found.
+    """
+    hits = list(engine.find_hits(text))
+    kept: list[int] = []
+    breaks: list[int] = []
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if (
+            ch in _BREAK_HYPHENS
+            and index > 0
+            and text[index - 1].isalpha()
+            and text[index + 1 : index + 2] == "\n"
+            and text[index + 2 : index + 3].isalpha()
+        ):
+            breaks.append(index)
+            index += 2
+            continue
+        kept.append(index)
+        index += 1
+    if not breaks:
+        return hits
+    joined = "".join(text[i] for i in kept)
+    extra: list[Hit] = []
+    for hit in engine.find_hits(joined):
+        if hit.end <= hit.start:
+            continue
+        start = kept[hit.start]
+        end = kept[hit.end - 1] + 1
+        if not any(start < position < end for position in breaks):
+            continue
+        if any(start < other.end and other.start < end for other in hits + extra):
+            continue
+        extra.append(Hit(start=start, end=end, category=hit.category, text=text[start:end]))
+    return sorted(hits + extra, key=lambda item: item.start)
+
+
+def prepare_pdf(document) -> None:
+    """Drop text a reader would take instead of the glyphs. Call right after opening.
+
+    Scanning and writing both call it, so the scan sees the glyphs that are
+    really drawn and the written file carries no tagged copy of them:
+    ``/ActualText``, ``/Alt`` and ``/E`` on marked content, and the structure
+    tree (``/StructTreeRoot``) with its ``/Alt`` texts.
+    """
+    catalog = document.pdf_catalog()
+    for key in ("StructTreeRoot", "MarkInfo"):
+        if document.xref_get_key(catalog, key)[0] != "null":
+            document.xref_set_key(catalog, key, "null")
+    streams: set[int] = set()
+    for page in document:
+        streams.update(page.get_contents())
+    for xref in range(1, document.xref_length()):
+        try:
+            keys = document.xref_get_keys(xref)
+        except Exception:
+            continue
+        if document.xref_is_stream(xref) and document.xref_get_key(xref, "Subtype") == ("name", "/Form"):
+            streams.add(xref)
+        # Property lists stored as their own objects (``/Span /MC0 BDC``).
+        tagged = [key for key in ("ActualText", "Alt") if key in keys]
+        if tagged:
+            for key in tagged + (["E"] if "E" in keys else []):
+                document.xref_set_key(xref, key, "null")
+    for xref in sorted(streams):
+        try:
+            data = document.xref_stream(xref)
+        except Exception:
+            continue
+        if not data or b"BDC" not in data and b"DP" not in data:
+            continue
+        cleaned = strip_marked_content_properties(data)
+        if cleaned != data:
+            document.update_stream(xref, cleaned)
+
+
+_PDF_WHITESPACE = b" \t\r\n\f\x00"
+_PDF_DELIMITERS = b"()<>[]{}/%"
+
+
+def strip_marked_content_properties(data: bytes) -> bytes:
+    """Turn ``/Tag <<...>> BDC`` and ``/Tag /Name BDC`` into ``/Tag BMC`` (and DP into MP).
+
+    The property list is where ``/ActualText``, ``/Alt`` and ``/E`` live.
+    ``/OC`` (optional content) is kept: dropping it would show hidden layers.
+    Strings, comments and inline images are skipped so their bytes are never
+    taken for operators.
+    """
+    out: list[tuple[int, int, bytes]] = []
+    operands: list[tuple[int, int, bytes]] = []  # (start, end, kind)
+    i = 0
+    n = len(data)
+    while i < n:
+        c = data[i : i + 1]
+        if c in (b" ", b"\t", b"\r", b"\n", b"\f", b"\x00"):
+            i += 1
+            continue
+        if c == b"%":
+            while i < n and data[i : i + 1] not in (b"\r", b"\n"):
+                i += 1
+            continue
+        if c == b"(":
+            start = i
+            i = _skip_literal(data, i)
+            operands.append((start, i, b"str"))
+            continue
+        if data.startswith(b"<<", i):
+            start = i
+            i = _skip_dict(data, i)
+            operands.append((start, i, b"dict"))
+            continue
+        if c == b"<":
+            start = i
+            end = data.find(b">", i)
+            i = n if end < 0 else end + 1
+            operands.append((start, i, b"str"))
+            continue
+        if c == b"[":
+            start = i
+            i = _skip_array(data, i)
+            operands.append((start, i, b"array"))
+            continue
+        if c in (b"]", b">", b")", b"{", b"}"):
+            i += 1
+            continue
+        start = i
+        i += 1
+        while i < n and data[i] not in _PDF_WHITESPACE and data[i] not in _PDF_DELIMITERS:
+            i += 1
+        token = data[start:i]
+        if c == b"/":
+            operands.append((start, i, b"name"))
+            continue
+        if token[:1].isdigit() or token[:1] in (b"-", b"+", b".") or token in (b"true", b"false", b"null"):
+            operands.append((start, i, b"num"))
+            continue
+        # An operator.
+        if token in (b"BDC", b"DP") and len(operands) >= 2:
+            tag, props = operands[-2], operands[-1]
+            if tag[2] == b"name" and props[2] in (b"dict", b"name") and data[tag[0] : tag[1]] != b"/OC":
+                out.append((props[0], i, b"BMC" if token == b"BDC" else b"MP"))
+        elif token == b"ID":
+            # Inline image data runs to the next whitespace-delimited EI.
+            j = i + 1
+            while j < n:
+                found = data.find(b"EI", j)
+                if found < 0:
+                    j = n
+                    break
+                before = data[found - 1 : found]
+                after = data[found + 2 : found + 3]
+                if before in (b" ", b"\t", b"\r", b"\n", b"\f", b"\x00") and (
+                    not after or after in (b" ", b"\t", b"\r", b"\n", b"\f", b"\x00")
+                ):
+                    j = found + 2
+                    break
+                j = found + 2
+            i = j
+        operands = []
+    if not out:
+        return data
+    pieces = []
+    last = 0
+    for start, end, replacement in out:
+        pieces.append(data[last:start])
+        pieces.append(replacement)
+        last = end
+    pieces.append(data[last:])
+    return b"".join(pieces)
+
+
+def _skip_literal(data: bytes, i: int) -> int:
+    depth = 0
+    n = len(data)
+    while i < n:
+        c = data[i]
+        if c == 0x5C:  # backslash
+            i += 2
+            continue
+        if c == 0x28:
+            depth += 1
+        elif c == 0x29:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _skip_dict(data: bytes, i: int) -> int:
+    depth = 0
+    n = len(data)
+    while i < n:
+        if data.startswith(b"<<", i):
+            depth += 1
+            i += 2
+            continue
+        if data.startswith(b">>", i):
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return i
+            continue
+        c = data[i : i + 1]
+        if c == b"(":
+            i = _skip_literal(data, i)
+            continue
+        if c == b"<":
+            end = data.find(b">", i)
+            i = n if end < 0 else end + 1
+            continue
+        i += 1
+    return n
+
+
+def _skip_array(data: bytes, i: int) -> int:
+    depth = 0
+    n = len(data)
+    while i < n:
+        c = data[i : i + 1]
+        if c == b"(":
+            i = _skip_literal(data, i)
+            continue
+        if data.startswith(b"<<", i):
+            i = _skip_dict(data, i)
+            continue
+        if c == b"<":
+            end = data.find(b">", i)
+            i = n if end < 0 else end + 1
+            continue
+        if c == b"[":
+            depth += 1
+        elif c == b"]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
 def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCounts:
     if src.resolve() == dest.resolve():
         raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
@@ -286,16 +545,16 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCount
     try:
         if document.is_encrypted:
             raise ValueError(f"不支持加密的 PDF: {src.name}")
+        prepare_pdf(document)
         counts: dict[str, int] = {}
         items: list[tuple] = []
         unlocated = 0
         page_total = document.page_count
         for index in range(page_total):
             page = document[index]
-            flags = pymupdf.TEXTFLAGS_TEXT
-            textpage = page.get_textpage(flags=flags)
+            textpage = page_textpage(page)
             text = page.get_text("text", textpage=textpage)
-            found = list(engine.find_hits(text))
+            found = find_page_hits(engine, text)
             located = locate_text_hits(page, found, textpage)
             for hit, usable in zip(found, located):
                 if not usable:
@@ -339,18 +598,32 @@ def clear_pdf_hidden(document) -> None:
             nxt = annot.next
             page.delete_annot(annot)
             annot = nxt
+        # Links are not in the annotation chain above. Their URI is still read
+        # by pypdf and get_links().
+        for link in page.get_links():
+            page.delete_link(link)
     for name in list(document.embfile_names() or []):
         document.embfile_del(name)
     document.set_toc([])
     document.set_metadata({key: "" for key in _INFO_FIELDS})
     document.set_xml_metadata("")
     document.del_xml_metadata()
+    # Custom Info keys (/Sponsor, /ContractNo...) stay after set_metadata.
+    if document.xref_get_key(-1, "Info")[0] != "null":
+        document.xref_set_key(-1, "Info", "null")
     _drop_catalog_attachments(document)
+    _rename_layers(document)
+
+
+def _rename_layers(document) -> None:
+    """Optional content groups keep working; only their names are replaced."""
+    for number, xref in enumerate(sorted(document.get_ocgs() or {}), start=1):
+        document.xref_set_key(xref, "Name", f"(Layer {number})")
 
 
 def _drop_catalog_attachments(document) -> None:
     catalog = document.pdf_catalog()
-    for key in ("AcroForm", "PageMode"):
+    for key in ("AcroForm", "PageMode", "PageLabels"):
         kind, _value = document.xref_get_key(catalog, key)
         if kind != "null":
             document.xref_set_key(catalog, key, "null")
@@ -546,7 +819,7 @@ def locate_text_hits(page, hits, textpage=None) -> list[list[tuple[float, float,
     half the smaller box, are all returned empty so each one is counted.
     """
     if textpage is None:
-        textpage = page.get_textpage(flags=pymupdf.TEXTFLAGS_TEXT)
+        textpage = page_textpage(page)
     text = page.get_text("text", textpage=textpage)
     raw = page.get_text("rawdict", textpage=textpage)
     aligned = _align_lines(text, raw)
