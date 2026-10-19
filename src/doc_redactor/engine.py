@@ -191,13 +191,32 @@ def _term_regex(term: str) -> str:
     return prefix + body + suffix
 
 
-def _wordlist_regex(terms: list[str]) -> str | None:
+def _ocr_term_regex(term: str) -> str:
+    """``_term_regex`` that also accepts one misread character, for OCR text only.
+
+    Tesseract reads a glyph as a look-alike now and then (a fabricated drug name
+    菲替珠单抗 comes back as 菲蔡珠单抗 in a plain 34 px scan). Upscaling,
+    binarising, and chi_sim best do not fix it, and another OCR engine would
+    still read the real name off the image, so the box must be painted anyway.
+    One substitution is allowed when the term has at least four CJK characters
+    or six other characters; shorter terms stay exact so common words survive.
+    """
+    exact = _term_regex(term)
+    letters = [ch for ch in term if not ch.isspace()]
+    cjk = sum(1 for ch in letters if _is_cjk(ch))
+    if cjk >= 4 or (cjk == 0 and len(letters) >= 6):
+        return f"(?:{exact}){{s<=1}}"
+    return exact
+
+
+def _wordlist_regex(terms: list[str], ocr: bool = False) -> str | None:
     usable = [term for term in terms if term and not term.isspace()]
     if not usable:
         return None
     # Longer terms first so a prefix alternative does not consume a longer term.
     ordered = sorted(usable, key=len, reverse=True)
-    return "|".join(f"(?:{_term_regex(term)})" for term in ordered)
+    build = _ocr_term_regex if ocr else _term_regex
+    return "|".join(f"(?:{build(term)})" for term in ordered)
 
 
 # ``\b`` in a user pattern, ASCII edition: a boundary unless both sides are
@@ -241,7 +260,10 @@ def ascii_word_boundaries(pattern: str) -> str:
     return "".join(out)
 
 
-def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) -> "RedactionEngine":
+def build_engine(
+    regex_rules: list[RegexRule], wordlists: list[WordlistRule], ocr: bool = False
+) -> "RedactionEngine":
+    """``ocr=True`` lets long wordlist terms match with one misread character."""
     recognizers: list[PatternRecognizer] = []
     for rule in regex_rules:
         pattern = ascii_word_boundaries(rule.pattern)
@@ -258,7 +280,7 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
             )
         )
     for rule in wordlists:
-        pattern = _wordlist_regex(rule.terms)
+        pattern = _wordlist_regex(rule.terms, ocr=ocr)
         if pattern is None:
             continue
         flags = re.DOTALL | re.MULTILINE
@@ -293,7 +315,12 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
         context_aware_enhancer=_PassthroughEnhancer(),
     )
     order = [rule.name for rule in regex_rules] + [rule.category for rule in wordlists]
-    return RedactionEngine(analyzer, _replacements_from_rules(regex_rules, wordlists), order)
+    engine = RedactionEngine(analyzer, _replacements_from_rules(regex_rules, wordlists), order)
+    if ocr:
+        engine._ocr = engine
+    else:
+        engine._ocr_rules = (list(regex_rules), list(wordlists))
+    return engine
 
 
 class RedactionEngine:
@@ -306,6 +333,16 @@ class RedactionEngine:
         self.analyzer = analyzer
         self.replacements = dict(replacements or {})
         self.category_order = list(category_order or [])
+        self._ocr: RedactionEngine | None = None
+        self._ocr_rules: tuple[list[RegexRule], list[WordlistRule]] | None = None
+
+    def for_ocr(self) -> "RedactionEngine":
+        """The engine used on OCR text: same rules, long terms forgive one misread character."""
+        if self._ocr is None:
+            if self._ocr_rules is None:
+                return self
+            self._ocr = build_engine(*self._ocr_rules, ocr=True)
+        return self._ocr
 
     def label(self, category: str) -> str:
         return redaction_label(category, self.replacements)
