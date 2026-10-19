@@ -11,6 +11,7 @@ from doc_redactor.config import load_rules
 from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
+from doc_redactor.image_redactor import WriteBlocked
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
 
 SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
@@ -35,7 +36,7 @@ def redact_paths(
         src = Path(raw)
         try:
             counts = redact_path(src, destination, engine)
-        except UnlocatedText as exc:
+        except (UnlocatedText, WriteBlocked) as exc:
             blocked.append(f"{src.name}: {exc}")
             continue
         summaries.append((src.name, counts))

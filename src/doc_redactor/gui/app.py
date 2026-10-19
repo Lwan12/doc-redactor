@@ -964,6 +964,8 @@ class App:
                 continue
             if int(getattr(scan, "unlocated_count", 0) or 0) > 0:
                 continue
+            if getattr(scan, "blocked_reason", None):
+                continue
             if scan.enabled_count() > 0:
                 total += 1
         return total

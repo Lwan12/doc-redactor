@@ -992,3 +992,99 @@ def test_unwritten_file_is_not_ticked_after_write(gui):
     copy = [getattr(n, "logical_text", n.cget("text")) for n in _walk(app.root) if isinstance(n, tk.Label)]
     assert "lost.pdf 未写出，不计入合计" in copy
 
+
+
+def _plain_hit(hit_id: int, text: str, unit: str):
+    from doc_redactor.scan import LocatedHit
+
+    return LocatedHit(
+        hit_id=hit_id,
+        category="申办方",
+        text=text,
+        location="第 1 段",
+        unit=unit,
+        start=0,
+        end=len(text),
+        rects=[(72.0, 80.0, 140.0, 94.0)],
+        page=0,
+    )
+
+
+def test_blocked_file_warns_and_write_button_skips_it(gui):
+    """A file with an image the tool cannot check is warned and not counted."""
+    from tkinter import ttk
+
+    from doc_redactor.gui.result_view import _scan_status
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_PDF, KIND_WORD, FileScan
+
+    reason = MSG_NO_OCR.format(n=1)
+    kept = FileScan(
+        path=Path("kept.pdf"), kind=KIND_PDF, status="ok", hits=[_plain_hit(1, "Acme", "page:0")], pages=[["Acme"]]
+    )
+    blocked = FileScan(
+        path=Path("blocked.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(2, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        blocked_reason=reason,
+    )
+    app = gui
+    app.scans = [kept, blocked]
+    app.selected = 1
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+
+    kind, _text, tag = _scan_status(blocked, app)
+    assert (kind, tag) == ("blocked", "warn")
+    labels = []
+    for node in _walk(app.root):
+        if isinstance(node, ttk.Treeview) and tuple(node.cget("columns")) == ("name", "n"):
+            labels += [node.item(item, "values") for item in node.get_children()]
+    row = next(values for values in labels if "blocked.docx" in values[0])
+    assert row[0].startswith("⚠")
+    assert str(row[1]) == "—"
+    copy = _visible_copy(app.root)
+    assert reason in copy
+    assert "正则" not in copy
+    buttons = [node.cget("text") for node in _walk(app.root) if isinstance(node, ttk.Button)]
+    write_label = next(label for label in buttons if label.startswith("写出 "))
+    assert write_label.startswith("写出 1 个脱敏文件")
+    assert "替换 1 处" in write_label
+
+
+def test_word_comment_notice_before_and_after_write(gui):
+    from doc_redactor.scan import KIND_WORD, FileScan
+
+    scan = FileScan(
+        path=Path("notes.docx"),
+        kind=KIND_WORD,
+        status="ok",
+        hits=[_plain_hit(1, "星辰海", "para:0")],
+        paragraphs=["星辰海"],
+        comment_count=2,
+    )
+    app = gui
+    app.scans = [scan]
+    app.selected = 0
+    app.written = False
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    app.show("result")
+    _settle(app)
+    assert "写出时会删除 2 条批注" in _visible_copy(app.root)
+
+    app.written = True
+    app.show("result")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert "已删除 2 条批注" in copy
+    assert "写出时会删除" not in copy

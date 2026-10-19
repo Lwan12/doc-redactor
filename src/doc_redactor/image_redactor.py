@@ -173,13 +173,22 @@ def _save_image(image: Image.Image, dest: Path) -> None:
         image.save(dest, format=fmt)
 
 
+_FORMATS = {
+    ".jpg": "JPEG",
+    ".jpeg": "JPEG",
+    ".png": "PNG",
+    ".gif": "GIF",
+    ".bmp": "BMP",
+    ".tif": "TIFF",
+    ".tiff": "TIFF",
+}
+
+
 def _format_for_suffix(suffix: str) -> str:
-    lowered = suffix.lower()
-    if lowered in {".jpg", ".jpeg"}:
-        return "JPEG"
-    if lowered == ".png":
-        return "PNG"
-    raise ValueError(f"不支持的图片类型: {suffix}")
+    fmt = _FORMATS.get(suffix.lower())
+    if fmt is None:
+        raise ValueError(f"不支持的图片类型: {suffix}")
+    return fmt
 
 
 def _refuse_same_path(src: Path, dest: Path) -> None:
@@ -189,3 +198,26 @@ def _refuse_same_path(src: Path, dest: Path) -> None:
 
 def is_raster_suffix(suffix: str) -> bool:
     return suffix.lower() in {".png", ".jpg", ".jpeg"}
+
+
+# Pictures inside a Word file that are read with OCR and painted in place.
+# Animated GIF and multi-page TIFF keep only the first frame.
+EMBEDDED_RASTER_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"})
+
+
+def is_embedded_raster_suffix(suffix: str) -> bool:
+    return suffix.lower() in EMBEDDED_RASTER_SUFFIXES
+
+
+class WriteBlocked(ValueError):
+    """The file holds something that cannot be checked, so it is not written.
+
+    The message names the reason and counts only; it never carries source text.
+    """
+
+
+# 文案待前端定。
+MSG_NO_OCR = "有 {n} 张图片没法检查（未找到 Tesseract），未写出"
+MSG_BAD_IMAGE = "有 {n} 张图片打不开，没法检查，未写出"
+MSG_VECTOR = "有 {n} 张矢量图（EMF、WMF 等），没法检查其中文字，未写出"
+MSG_INLINE_FAILED = "有 {n} 张内嵌图没能涂黑，未写出"

@@ -14,10 +14,19 @@ import pymupdf
 from PIL import Image
 from docx import Document
 
-from doc_redactor.docx_redactor import apply_hits_to_paragraph, iter_document_paragraphs, scrub_docx_properties
+from doc_redactor.docx_redactor import (
+    apply_hits_to_paragraph,
+    count_docx_comments,
+    docx_media_block_reason,
+    iter_document_paragraphs,
+    scrub_docx_hidden,
+)
 from doc_redactor.engine import Hit, RedactionEngine, counts_from_categories, merge_counts, redaction_label
 from doc_redactor.image_redactor import (
+    WriteBlocked,
+    _format_for_suffix,
     analyze_image_entities,
+    is_embedded_raster_suffix,
     is_raster_suffix,
     paint_image_boxes,
 )
@@ -27,10 +36,16 @@ from doc_redactor.pdf_redactor import (
     UnlocatedText,
     append_legend,
     clear_pdf_hidden,
+    inline_boxes_to_rects,
+    inline_images,
     locate_text_hits,
     legend_lines,
+    paint_inline_images,
+    pdf_image_block_reason,
+    pdf_xref_image,
     redact_text_placeholders,
 )
+from doc_redactor.image_redactor import MSG_BAD_IMAGE, MSG_INLINE_FAILED, MSG_NO_OCR
 from doc_redactor.tesseract_cmd import require_tesseract
 
 FILE_HIT_WARN = 500
@@ -126,6 +141,11 @@ class FileScan:
     # Hits found in text whose rectangles could not be placed. The text itself
     # is not stored. A positive count blocks the write of this file.
     unlocated_count: int = 0
+    # Why this file must not be written (an image that cannot be checked).
+    # Counts only, never source text. Set at scan time; blocks the write.
+    blocked_reason: str | None = None
+    # Word comments found in the file. The write deletes them all.
+    comment_count: int = 0
 
     @property
     def enabled_hits(self) -> list[LocatedHit]:
@@ -283,6 +303,13 @@ def write_scans(
         if scan.status == "fail":
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, error=scan.error))
             continue
+        if scan.blocked_reason:
+            written.append(
+                WriteResult(
+                    path=scan.path, dest=None, report=None, counts={}, skipped=True, error=scan.blocked_reason
+                )
+            )
+            continue
         if scan.unlocated_count > 0:
             written.append(
                 WriteResult(
@@ -361,6 +388,8 @@ def write_scan(
 ) -> dict[str, int]:
     if scan.unlocated_count > 0:
         raise UnlocatedText(scan.unlocated_count)
+    if scan.blocked_reason:
+        raise WriteBlocked(scan.blocked_reason)
     if Path(dest).resolve() == Path(scan.path).resolve():
         raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
     mapping = replacements or {}
@@ -393,7 +422,7 @@ def session_totals(scans: list[FileScan], *, enabled_only: bool = True) -> tuple
 def _finish(scan: FileScan) -> FileScan:
     if scan.status == "fail":
         return scan
-    if not scan.hits and scan.unlocated_count <= 0:
+    if not scan.hits and scan.unlocated_count <= 0 and not scan.blocked_reason:
         scan.status = "nohit"
     scan.too_many = too_many_file_hits(len(scan.hits))
     return scan
@@ -425,7 +454,10 @@ def _scan_docx(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) 
                 )
             )
     scan.paragraphs = paragraphs
-    _scan_docx_media(path, engine, ids, scan)
+    scan.comment_count = count_docx_comments(document)
+    scan.blocked_reason = docx_media_block_reason(path)
+    if not scan.blocked_reason:
+        _scan_docx_media(path, engine, ids, scan)
     return _finish(scan)
 
 
@@ -438,17 +470,17 @@ def _scan_docx_media(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
         return
     if not payloads:
         return
-    try:
-        require_tesseract()
-    except RuntimeError:
-        return
+    # docx_media_block_reason already refused files with pictures that do not
+    # decode, or no Tesseract. Anything failing here still blocks the write.
     for media_index, (name, payload) in enumerate(payloads.items(), start=1):
         try:
             with Image.open(io.BytesIO(payload)) as opened:
                 opened.load()
                 entities = analyze_image_entities(opened, engine)
-        except Exception:
-            continue
+        except Exception as exc:
+            scan.blocked_reason = _blocked_message(exc)
+            scan.hits = [hit for hit in scan.hits if not hit.unit.startswith("media:")]
+            return
         for entity in entities:
             top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
             scan.hits.append(
@@ -497,17 +529,19 @@ def _scan_pdf(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -
                     )
                 )
         scan.pages = pages
-        _scan_pdf_images(document, engine, ids, scan)
+        scan.blocked_reason = pdf_image_block_reason(document)
+        if not scan.blocked_reason:
+            try:
+                _scan_pdf_images(document, engine, ids, scan)
+            except Exception as exc:
+                scan.blocked_reason = _blocked_message(exc)
+                scan.hits = [hit for hit in scan.hits if not hit.unit.startswith(("pdfimg:", "pdfinline:"))]
     finally:
         document.close()
     return _finish(scan)
 
 
 def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> None:
-    try:
-        require_tesseract()
-    except RuntimeError:
-        return
     seen: set[int] = set()
     image_index = 0
     for page in document:
@@ -519,11 +553,8 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                 continue
             seen.add(xref)
             image_index += 1
-            try:
-                image = _pdf_xref_image(document, xref)
-                entities = analyze_image_entities(image, engine)
-            except Exception:
-                continue
+            image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
+            entities = analyze_image_entities(image, engine)
             for entity in entities:
                 top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
                 scan.hits.append(
@@ -537,6 +568,32 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                         page=page.number,
                     )
                 )
+    for page in document:
+        for inline_index, (info, image) in enumerate(inline_images(page)):
+            image_index += 1
+            entities = analyze_image_entities(image, engine)
+            for entity in entities:
+                top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
+                scan.hits.append(
+                    LocatedHit(
+                        hit_id=ids.next(),
+                        category=entity["category"],
+                        text=entity["text"],
+                        location=f"第 {page.number + 1} 页图 {image_index} · 图内 第 {_row_of(top)} 行",
+                        unit=f"pdfinline:{page.number}:{inline_index}",
+                        boxes=list(entity["boxes"]),
+                        rects=inline_boxes_to_rects(info, image.size, entity["boxes"]),
+                        page=page.number,
+                    )
+                )
+
+
+def _blocked_message(exc: Exception) -> str:
+    if isinstance(exc, WriteBlocked):
+        return str(exc)
+    if isinstance(exc, RuntimeError) and "Tesseract" in str(exc):
+        return MSG_NO_OCR.format(n=1)
+    return MSG_BAD_IMAGE.format(n=1)
 
 
 def _scan_image_file(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> FileScan:
@@ -575,7 +632,7 @@ def _write_docx(scan: FileScan, dest: Path, label, engine: RedactionEngine | Non
             Hit(start=hit.start, end=hit.end, category=hit.category, text=hit.text) for hit in unit_hits
         ]
         categories.extend(apply_hits_to_paragraph(paragraph, engine_hits, label))
-    scrub_docx_properties(document)
+    scrub_docx_hidden(document)
     mkdir_output(dest.parent)
     document.save(str(dest))
     media_counts = _write_docx_media(dest, by_unit)
@@ -611,7 +668,7 @@ def _write_docx_media(dest: Path, by_unit: dict[str, list[LocatedHit]]) -> dict[
             opened.load()
             painted = paint_image_boxes(opened, boxes)
         buf = io.BytesIO()
-        fmt = "JPEG" if Path(name).suffix.lower() in {".jpg", ".jpeg"} else "PNG"
+        fmt = _format_for_suffix(Path(name).suffix)
         if fmt == "JPEG":
             painted.save(buf, format=fmt, quality=95)
         else:
@@ -642,7 +699,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
         items = []
         for hit in scan.enabled_hits:
             # Image hits are black boxes. They have no text rectangle.
-            if not hit.rects or str(hit.unit).startswith("pdfimg:"):
+            if not hit.rects or str(hit.unit).startswith(("pdfimg:", "pdfinline:")):
                 continue
             items.append((hit.page, list(hit.rects), hit.category, hit.text))
         stats = redact_text_placeholders(document, items, label, order)
@@ -658,10 +715,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                     xref = item[0]
                     if xref not in by_xref:
                         continue
-                    try:
-                        image = _pdf_xref_image(document, xref)
-                    except Exception:
-                        continue
+                    image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
                     boxes: list[tuple[int, int, int, int]] = []
                     for hit in by_xref[xref]:
                         boxes.extend(hit.boxes)
@@ -669,6 +723,22 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                     buf = io.BytesIO()
                     painted.save(buf, format="PNG")
                     page.replace_image(xref, stream=buf.getvalue())
+        inline_units = [hit for hit in scan.enabled_hits if hit.unit.startswith("pdfinline:")]
+        if inline_units:
+            by_page: dict[int, dict[int, list[LocatedHit]]] = {}
+            for hit in inline_units:
+                _tag, page_no, index = hit.unit.split(":")
+                by_page.setdefault(int(page_no), {}).setdefault(int(index), []).append(hit)
+            for page_no, by_index in by_page.items():
+                page = document[page_no]
+                found = inline_images(page)
+                jobs = []
+                for index, hits in by_index.items():
+                    if index >= len(found):
+                        raise WriteBlocked(MSG_INLINE_FAILED.format(n=len(by_index)))
+                    info, image = found[index]
+                    jobs.append((info, image.size, [box for hit in hits for box in hit.boxes]))
+                paint_inline_images(page, jobs)
         if stats.used:
             append_legend(document, legend_lines(stats.used))
         clear_pdf_hidden(document)
@@ -698,23 +768,11 @@ def _write_image(scan: FileScan, dest: Path) -> dict[str, int]:
     return scan.category_counts(enabled_only=True)
 
 
-def _pdf_xref_image(document, xref: int) -> Image.Image:
-    pixmap = pymupdf.Pixmap(document, xref)
-    if pixmap.colorspace is not None and pixmap.n - pixmap.alpha not in (1, 3):
-        pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
-    if pixmap.alpha:
-        pixmap = pymupdf.Pixmap(pixmap, 0)
-    data = pixmap.tobytes("png")
-    image = Image.open(io.BytesIO(data))
-    image.load()
-    return image
-
-
 def _is_media(name: str) -> bool:
     lowered = name.lower()
     if not lowered.startswith("word/media/"):
         return False
-    return is_raster_suffix(Path(lowered).suffix)
+    return is_embedded_raster_suffix(Path(lowered).suffix)
 
 
 def _row_of(top: int, row_height: int = 36) -> int:

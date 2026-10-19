@@ -283,3 +283,78 @@ def test_cli_write_parsed_back_has_no_metadata(tmp_path: Path):
     dest = tmp_path / "cli.docx"
     redact_docx(src, dest, _engine())
     _assert_parsed_clean(dest)
+
+
+# ---------------------------------------------------------------- HLinks and docVars
+# HLinks is the hyperlink list Word keeps in app.xml (ECMA extended
+# properties); a file link there carries server, folder and file names.
+# docVars in settings.xml hold macro/template variables, often a name.
+HLINK = "file:///\\\\fs01\\Acme Pharma\\ABC-2026-001\\Fictizumab_IB.docx"
+HLINKS = (
+    '<HLinks><vt:vector size="6" baseType="variant">'
+    "<vt:variant><vt:i4>1</vt:i4></vt:variant><vt:variant><vt:i4>0</vt:i4></vt:variant>"
+    "<vt:variant><vt:i4>0</vt:i4></vt:variant><vt:variant><vt:i4>5</vt:i4></vt:variant>"
+    f"<vt:variant><vt:lpwstr>{HLINK}</vt:lpwstr></vt:variant><vt:variant><vt:lpwstr></vt:lpwstr></vt:variant>"
+    "</vt:vector></HLinks>"
+)
+DOC_VARS = f'<w:docVars><w:docVar w:name="Sponsor" w:val="{SECRET}"/></w:docVars>'
+
+
+def _build_links(path: Path) -> None:
+    raw = path.with_suffix(".base.docx")
+    _build(raw)
+    with zipfile.ZipFile(raw) as src, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "docProps/app.xml":
+                data = data.replace(b"<HyperlinksChanged>", HLINKS.encode() + b"<HyperlinksChanged>")
+            elif info.filename == "word/settings.xml":
+                # CT_Settings order: docVars sits right before rsids/mathPr/etc.
+                text = data.decode("utf-8")
+                for marker in ("<w:rsids", "<m:mathPr", "<w:themeFontLang", "<w:clrSchemeMapping", "</w:settings>"):
+                    if marker in text:
+                        text = text.replace(marker, DOC_VARS + marker, 1)
+                        break
+                data = text.encode("utf-8")
+            dst.writestr(info, data)
+    raw.unlink()
+
+
+def _assert_links_gone(path: Path) -> None:
+    from lxml import etree
+
+    with zipfile.ZipFile(path) as archive:
+        app = etree.fromstring(archive.read("docProps/app.xml"))
+        settings = etree.fromstring(archive.read("word/settings.xml"))
+    assert not [el for el in app.iter() if isinstance(el.tag, str) and etree.QName(el).localname == "HLinks"]
+    assert not [el for el in settings.iter() if isinstance(el.tag, str) and etree.QName(el).localname in ("docVars", "docVar")]
+    for root in (app, settings):
+        text = etree.tostring(root, encoding="unicode")
+        for word in ("Acme", "Fictizumab", "ABC-2026", "fs01"):
+            assert word not in text
+
+
+def test_fixture_carries_hlinks_and_docvars(tmp_path: Path):
+    src = tmp_path / "links.docx"
+    _build_links(src)
+    with zipfile.ZipFile(src) as archive:
+        assert "fs01" in archive.read("docProps/app.xml").decode("utf-8")
+        assert "docVar " in archive.read("word/settings.xml").decode("utf-8")
+    Document(str(src))
+
+
+def test_gui_write_clears_hlinks_and_docvars(tmp_path: Path):
+    src = tmp_path / "links.docx"
+    _build_links(src)
+    scan = scan_path(src, _engine())
+    dest = tmp_path / "out.docx"
+    write_scan(scan, dest)
+    _assert_links_gone(dest)
+
+
+def test_cli_write_clears_hlinks_and_docvars(tmp_path: Path):
+    src = tmp_path / "links.docx"
+    _build_links(src)
+    dest = tmp_path / "links.redacted.docx"
+    redact_docx(src, dest, _engine())
+    _assert_links_gone(dest)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import re
 import zipfile
 from pathlib import Path
@@ -10,22 +11,38 @@ from docx import Document
 from docx.table import Table, _Cell
 
 from doc_redactor.engine import Hit, RedactionEngine, merge_counts, redaction_label
-from doc_redactor.image_redactor import is_raster_suffix, redact_image_bytes
+from doc_redactor.image_redactor import (
+    MSG_BAD_IMAGE,
+    MSG_NO_OCR,
+    MSG_VECTOR,
+    WriteBlocked,
+    is_embedded_raster_suffix,
+    redact_image_bytes,
+)
+from doc_redactor import tesseract_cmd
 
 
 def redact_docx(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]:
     if src.resolve() == dest.resolve():
         raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
+    reason = docx_media_block_reason(src)
+    if reason:
+        raise WriteBlocked(reason)
     document = Document(str(src))
     counts: dict[str, int] = {}
     _redact_container(document, engine, counts)
     for section in document.sections:
         for header_footer in _owned_headers_footers(section):
             _redact_container(header_footer, engine, counts)
-    scrub_docx_properties(document)
+    scrub_docx_hidden(document)
     dest.parent.mkdir(parents=True, exist_ok=True)
     document.save(str(dest))
-    merge_counts(counts, _redact_media(dest, engine))
+    try:
+        merge_counts(counts, _redact_media(dest, engine))
+    except BaseException:
+        # The saved file still holds the original pictures.
+        dest.unlink(missing_ok=True)
+        raise
     return counts
 
 
@@ -62,7 +79,8 @@ _CORE_TEXT_FIELDS = (
 # app.xml fields that can carry names; Application, page/word counts stay.
 # Word copies the title into TitlesOfParts; HeadingPairs counts its entries,
 # so both go together (each is optional, the pair stays consistent).
-_APP_TEXT_TAGS = ("Company", "Manager", "HyperlinkBase", "Template", "HeadingPairs", "TitlesOfParts")
+# HLinks lists every hyperlink target (file links carry server and folder names).
+_APP_TEXT_TAGS = ("Company", "Manager", "HyperlinkBase", "HLinks", "Template", "HeadingPairs", "TitlesOfParts")
 _ATTACHED_TEMPLATE_REL = "/attachedTemplate"
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _CUSTOM_XML_ITEM = re.compile(r"^/customXml/item\d+\.xml$")
@@ -104,6 +122,214 @@ def scrub_docx_properties(document) -> None:
             part._blob = _EMPTY_CUSTOM
         elif _CUSTOM_XML_ITEM.match(name):
             part._blob = _cleared_custom_item(part.blob)
+
+
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_SVG_BLIP = "{http://schemas.microsoft.com/office/drawing/2016/SVG/main}svgBlip"
+# Comments and everything that hangs off them: threads, ids, dates, people.
+_COMMENT_RELS = ("/comments", "/commentsExtended", "/commentsIds", "/commentsExtensible", "/people")
+_COMMENT_MARKS = ("commentRangeStart", "commentRangeEnd", "commentReference")
+# Tracked changes keep their marks; the name on them becomes this.
+REVISION_AUTHOR = "作者"
+
+
+def scrub_docx_hidden(document) -> int:
+    """Everything a reader can pull out of the package besides the visible text.
+
+    Properties (``scrub_docx_properties``), comments (deleted whole, like the
+    PDF path), revision author names, rsid session ids, and SVG pictures
+    (the raster fallback Word stores beside them stays and is painted).
+    Returns the number of comments removed.
+    """
+    scrub_docx_properties(document)
+    removed = _drop_comments(document)
+    _drop_svg_pictures(document)
+    for part, root, store in _xml_roots(document.part.package):
+        _scrub_marks(root)
+        store()
+    return removed
+
+
+def count_docx_comments(document) -> int:
+    for rel in document.part.rels.values():
+        if not rel.is_external and rel.reltype.endswith("/comments"):
+            return _comment_count(rel.target_part)
+    return 0
+
+
+def _comment_count(part) -> int:
+    from lxml import etree
+
+    element = getattr(part, "element", None)
+    if element is None:
+        try:
+            element = etree.fromstring(part.blob)
+        except (etree.XMLSyntaxError, ValueError):
+            return 0
+    return len(element.findall(f"{{{_W_NS}}}comment"))
+
+
+def _drop_comments(document) -> int:
+    removed = 0
+    rels = document.part.rels
+    for rid, rel in list(rels.items()):
+        if rel.is_external or not any(rel.reltype.endswith(end) for end in _COMMENT_RELS):
+            continue
+        if rel.reltype.endswith("/comments"):
+            removed += _comment_count(rel.target_part)
+        del rels[rid]
+    return removed
+
+
+def _xml_roots(package):
+    """(part, root element, store) for every XML part under /word/.
+
+    python-docx keeps some parts as parsed elements and others as raw bytes;
+    ``store`` writes a byte part back after it was edited.
+    """
+    from lxml import etree
+
+    for part in package.iter_parts():
+        name = str(part.partname)
+        if not name.startswith("/word/") or not name.endswith(".xml"):
+            continue
+        element = getattr(part, "_element", None)
+        if element is not None:
+            yield part, element, lambda: None
+            continue
+        try:
+            root = etree.fromstring(part.blob)
+        except (etree.XMLSyntaxError, ValueError):
+            continue
+
+        def store(part=part, root=root):
+            part._blob = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+        yield part, root, store
+
+
+def _scrub_marks(root) -> None:
+    w = f"{{{_W_NS}}}"
+    for local in _COMMENT_MARKS:
+        for node in list(root.iter(w + local)):
+            parent = node.getparent()
+            parent.remove(node)
+            # Word puts a reference alone in its own run; drop the empty run.
+            if parent.tag == w + "r" and all(child.tag == w + "rPr" for child in parent):
+                grand = parent.getparent()
+                if grand is not None:
+                    grand.remove(parent)
+    # rsids are editing-session ids; docVars are macro/template variables
+    # (settings.xml), which often hold a name or project code.
+    for local in ("rsids", "docVars"):
+        for node in list(root.iter(w + local)):
+            node.getparent().remove(node)
+    for node in root.iter():
+        if not isinstance(node.tag, str):
+            continue
+        for key in list(node.attrib):
+            if not key.startswith(w):
+                continue
+            local = key[len(w):]
+            if local.startswith("rsid"):
+                del node.attrib[key]
+            elif local == "author":
+                node.attrib[key] = REVISION_AUTHOR
+
+
+def _drop_svg_pictures(document) -> None:
+    """Remove SVG copies of pictures. Only the extension that points at them goes.
+
+    ``docx_media_block_reason`` refuses a file whose only picture data is an
+    SVG, so every picture keeps its raster blip after this.
+    """
+    for part, root, store in _xml_roots(document.part.package):
+        rels = getattr(part, "rels", None)
+        if not rels:
+            continue
+        changed = False
+        for rid, rel in list(rels.items()):
+            if rel.is_external or not str(rel.target_part.partname).lower().endswith(".svg"):
+                continue
+            for node in list(root.iter(_SVG_BLIP)):
+                if node.get(f"{{{_R_NS}}}embed") == rid:
+                    ext = node.getparent()
+                    holder = ext.getparent()
+                    holder.remove(ext)
+                    if len(holder) == 0 and holder.tag == f"{{{_A_NS}}}extLst":
+                        holder.getparent().remove(holder)
+            del rels[rid]
+            changed = True
+        if changed:
+            store()
+
+
+def docx_media_block_reason(path: Path) -> str | None:
+    """Why this Word file must not be written, or None.
+
+    Pictures are the one part read with OCR. A picture that cannot be read
+    (vector data, a broken file, no Tesseract) would go out unchecked.
+    """
+    from PIL import Image
+
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = [n for n in archive.namelist() if n.lower().startswith("word/media/")]
+            payloads = {n: archive.read(n) for n in names}
+            only_svg = _svg_only_pictures(archive)
+    except (OSError, zipfile.BadZipFile):
+        return None
+    raster = {n: d for n, d in payloads.items() if is_embedded_raster_suffix(Path(n).suffix)}
+    svg = [n for n in payloads if n.lower().endswith(".svg")]
+    other = [n for n in payloads if n not in raster and n not in svg]
+    vectors = [n for n in other if Path(n).suffix.lower() in _VECTOR_SUFFIXES]
+    if vectors or only_svg:
+        return MSG_VECTOR.format(n=len(vectors) + only_svg)
+    broken = [n for n in other if n not in vectors]
+    for name, data in raster.items():
+        try:
+            with Image.open(io.BytesIO(data)) as opened:
+                opened.load()
+        except Exception:
+            broken.append(name)
+    if broken:
+        return MSG_BAD_IMAGE.format(n=len(broken))
+    if raster and tesseract_cmd.find_tesseract() is None:
+        return MSG_NO_OCR.format(n=len(raster))
+    return None
+
+
+_VECTOR_SUFFIXES = frozenset({".emf", ".wmf", ".emz", ".wmz", ".eps", ".pict", ".pct", ".svgz"})
+
+
+def _svg_only_pictures(archive: zipfile.ZipFile) -> int:
+    """Pictures whose main blip (not the SVG extension) points at an SVG."""
+    from lxml import etree
+
+    count = 0
+    for name in archive.namelist():
+        if not (name.startswith("word/") and name.endswith(".xml")):
+            continue
+        rels_name = f"{Path(name).parent.as_posix()}/_rels/{Path(name).name}.rels"
+        if rels_name not in archive.namelist():
+            continue
+        try:
+            rels = etree.fromstring(archive.read(rels_name))
+            root = etree.fromstring(archive.read(name))
+        except etree.XMLSyntaxError:
+            continue
+        svg_ids = {
+            rel.get("Id")
+            for rel in rels
+            if str(rel.get("Target", "")).lower().endswith(".svg") and rel.get("TargetMode") != "External"
+        }
+        if not svg_ids:
+            continue
+        for blip in root.iter(f"{{{_A_NS}}}blip"):
+            if blip.get(f"{{{_R_NS}}}embed") in svg_ids:
+                count += 1
+    return count
 
 
 def _drop_attached_template(document) -> None:
@@ -490,4 +716,4 @@ def _is_media_image(name: str) -> bool:
     lowered = name.lower()
     if not lowered.startswith("word/media/"):
         return False
-    return is_raster_suffix(Path(lowered).suffix)
+    return is_embedded_raster_suffix(Path(lowered).suffix)
