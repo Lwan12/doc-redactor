@@ -433,6 +433,56 @@ def _walk(widget):
         yield from _walk(child)
 
 
+def _visible_copy(widget) -> str:
+    chunks = []
+    for node in _walk(widget):
+        try:
+            value = node.cget("text")
+        except Exception:
+            continue
+        if isinstance(value, str) and value:
+            chunks.append(value)
+    return "\n".join(chunks)
+
+
+def test_pdf_fit_notices_use_the_product_copy(gui):
+    from doc_redactor.pdf_redactor import MSG_FIT_BLANK, MSG_FIT_SHORT, MSG_PDF_WIDTH, MSG_REPL_HINT
+
+    app = gui
+    app.apply_shoot_state("res-pdf")
+    _settle(app)
+    copy = _visible_copy(app.root)
+    assert MSG_FIT_SHORT.format(n=2) in copy
+    assert MSG_FIT_BLANK.format(m=1) in copy
+    assert MSG_PDF_WIDTH in copy
+    assert "正则" not in copy
+
+    app.apply_shoot_state("rule-placeholder")
+    _settle(app)
+    rules = _visible_copy(app.root)
+    assert MSG_REPL_HINT in rules
+    assert "正则" not in rules
+
+    app.apply_shoot_state("words-list")
+    _settle(app)
+    words = _visible_copy(app.root)
+    assert MSG_REPL_HINT in words
+    assert "正则" not in words
+
+    app.apply_shoot_state("plan-list")
+    _settle(app)
+    plan = _visible_copy(app.root)
+    assert MSG_REPL_HINT in plan
+    assert "正则" not in plan
+
+    app.apply_shoot_state("main-rules")
+    _settle(app)
+    main = _visible_copy(app.root)
+    assert "截断" not in main
+    assert "换成短码" in main
+    assert "正则" not in main
+
+
 def test_skipped_row_puts_the_file_name_before_the_note(gui):
     from tkinter import ttk
 

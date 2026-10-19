@@ -1043,7 +1043,11 @@ class App:
         )
         if not path:
             return
-        payload = hit_list_payload(self.scans)
+        payload = hit_list_payload(
+            self.scans,
+            replacements=self.ruleset.replacements(),
+            category_order=[rule.name for rule in self.ruleset.rules],
+        )
         Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def open_output(self) -> None:

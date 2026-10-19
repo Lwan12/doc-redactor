@@ -483,7 +483,10 @@ class RuleSet:
                     replacement=rule.replacement,
                 )
             )
-        return build_engine(regex_rules, wordlists)
+        engine = build_engine(regex_rules, wordlists)
+        # Disabled rules still take a number so [R1] does not move when one is off.
+        engine.category_order = [rule.name for rule in self.rules]
+        return engine
 
     def replacements(self) -> dict[str, str]:
         return {rule.name: rule.replacement_text() for rule in self.rules}

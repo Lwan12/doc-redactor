@@ -165,27 +165,25 @@ def test_pdf_writes_placeholder_and_drops_source(tmp_path: Path):
     assert counts["PROJECT_ID"] == 2
 
 
-def test_pdf_placeholder_shrinks_then_truncates():
+def test_pdf_placeholder_shrinks_or_stays_blank():
     document = pymupdf.open()
     page = document.new_page()
     wide = pymupdf.Rect(72, 700, 72 + 73, 700 + 15)
-    fill_placeholder(page, wide, "[PROTOCOL]")
+    assert fill_placeholder(page, wide, "[PROTOCOL]") is True
     assert "[PROTOCOL]" in page.get_text()
 
     page2 = document.new_page()
-    tight = pymupdf.Rect(72, 200, 96, 208)
-    fill_placeholder(page2, tight, "[STUDY DRUG]")
-    shown = page2.get_text().strip()
-    assert shown
-    assert shown != "[STUDY DRUG]"
-    assert shown.startswith("[")
-    assert "Fictizumab" not in shown
-    assert "[STUDY DRUG]" not in shown
+    shrink = pymupdf.Rect(72, 200, 72 + 50, 216)
+    assert fill_placeholder(page2, shrink, "[STUDY DRUG]") is True
+    compact = "".join(page2.get_text().split())
+    assert "[STUDYDRUG]" in compact
+    assert "[STU" not in compact.replace("[STUDYDRUG]", "")
 
     page3 = document.new_page()
-    tiny = pymupdf.Rect(72, 200, 74, 202)
-    fill_placeholder(page3, tiny, "[STUDY DRUG]")
-    assert "STUDY DRUG" not in page3.get_text()
+    tight = pymupdf.Rect(72, 200, 96, 208)
+    assert fill_placeholder(page3, tight, "[STUDY DRUG]") is False
+    assert page3.get_text().strip() == ""
+    assert "[STU" not in page3.get_text()
     document.close()
 
 

@@ -36,6 +36,13 @@ from doc_redactor.gui.theme import (
     status_style,
 )
 from doc_redactor.engine import redaction_label
+from doc_redactor.pdf_redactor import (
+    MSG_PDF_WIDTH,
+    ShortPlan,
+    fit_notice,
+    pdf_fit_counts,
+    placeholder_choice,
+)
 from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan, session_totals
 
 # Left is the previous page, right is the next page.
@@ -156,7 +163,7 @@ class ResultView:
         head = tk.Frame(self.frame, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
         head.pack(fill="x")
         row = tk.Frame(head, bg=BG_SURFACE)
-        row.pack(fill="x", padx=12, pady=8)
+        row.pack(fill="x", padx=12, pady=4)
         title = "已写出" if app.written else "结果预览，写出前可以逐处取消"
         tk.Label(row, text=title, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="right")
         StepBar(row, app).frame.pack(side="left", fill="x", expand=True)
@@ -170,7 +177,7 @@ class ResultView:
                 bg=BG_INSET,
                 fg=INK,
                 font=fonts["small"],
-            ).pack(side="left", padx=12, pady=6)
+            ).pack(side="left", padx=12, pady=3)
             hide = tk.BooleanVar(value=app.hide_text)
             ttk.Checkbutton(
                 note,
@@ -266,7 +273,9 @@ class ResultView:
             # column is what remains, wide enough for 「方案号清单」 on one line.
             body.columnconfigure(0, minsize=280, weight=0)
             body.columnconfigure(1, weight=1, minsize=200)
-            body.columnconfigure(2, minsize=340, weight=0)
+            # The hit list's own column widths set this pane. A smaller minimum
+            # leaves the middle column enough width that a PDF page still fits.
+            body.columnconfigure(2, minsize=300, weight=0)
             body.rowconfigure(0, weight=1)
             left = tk.Frame(body, bg=BG_SURFACE, highlightthickness=1, highlightbackground=LINE2)
             left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
@@ -346,6 +355,21 @@ class ResultView:
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
 
     def _file_list(self, parent, scans, fonts) -> None:
+        # Pack the notice first so the tree keeps the remaining height.
+        # The filename column is too narrow for the full sentence.
+        notices = []
+        for scan in scans:
+            text = _pdf_fit_notice(scan, self.app)
+            if text:
+                notices.append((scan.path.name, text))
+        if notices:
+            box = tk.Frame(parent, bg=BG_INSET)
+            box.pack(side="bottom", fill="x")
+            for name, text in notices:
+                tk.Label(box, text=name, bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
+                    anchor="w", padx=8, pady=(2, 0)
+                )
+                _wrap_label(box, text, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=6, pady=(0, 2))
         head = tk.Frame(parent, bg=BG_INSET)
         head.pack(fill="x")
         tk.Label(head, text=f"文件 {len(scans)}", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(
@@ -498,6 +522,9 @@ class ResultView:
             title_row, text=_type_name(scan.kind), bg=BG_INSET, fg=INK2, font=fonts["small"], relief="solid", bd=1
         ).pack(side="left", pady=(4, 0))
         has_prev = scan.status != "fail" and bool(scan.hits)
+        notice = _pdf_fit_notice(scan, self.app) if scan.kind == KIND_PDF else ""
+        if notice and has_prev:
+            _wrap_label(head, notice, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=8, pady=(1, 0))
         if has_prev:
             controls = tk.Frame(head, bg=BG_INSET)
             controls.pack(fill="x")
@@ -624,6 +651,7 @@ class ResultView:
         self._hit_ranges = {}
         cats = {cat: i for i, cat in enumerate(self.app.category_order())}
         replacements = self.app.ruleset.replacements()
+        self._short_plan = ShortPlan([rule.name for rule in self.app.ruleset.rules])
 
         def insert_run(block: str, block_hits: list, title: bool = False):
             pos = 0
@@ -731,6 +759,15 @@ class ResultView:
             if scan.kind == KIND_IMAGE:
                 return "█" * max(3, min(len(hit.text), 8)), ("black", "cur" if cur else "")
             label = replacements.get(hit.category) or redaction_label(hit.category)
+            if scan.kind == KIND_PDF and hit.rects:
+                plan = getattr(self, "_short_plan", None) or ShortPlan(
+                    [rule.name for rule in self.app.ruleset.rules]
+                )
+                code, _title = plan.resolve(hit.category)
+                _kind, shown = placeholder_choice(hit.rects[0], label, code)
+                if not shown:
+                    return "", ("redacted", "cur" if cur else "")
+                return shown.replace(" ", "\u00a0"), ("redacted", "cur" if cur else "")
             return label.replace(" ", "\u00a0"), ("redacted", "cur" if cur else "")
         shown = "▇" * min(len(hit.text), 8) if hide else hit.text
         return shown, ("cur" if cur else "hit",)
@@ -876,11 +913,11 @@ class ResultView:
         loc.heading("loc", text="位置")
         loc.heading("cat", text="类")
         loc.heading("text", text="内容")
-        # Room for "第 501 页 · 第 1 行" and "PRJ-2026-017-S02", plus the scrollbar.
+        # Room for "第 501 页 · 第 1 行" (125px) and "PRJ-2026-017-S02" (124px).
         loc.column("on", width=32, minwidth=32, stretch=False, anchor="center")
-        loc.column("loc", width=140, minwidth=132, stretch=False)
+        loc.column("loc", width=128, minwidth=126, stretch=False)
         loc.column("cat", width=28, minwidth=28, stretch=False)
-        loc.column("text", width=132, minwidth=124, stretch=True)
+        loc.column("text", width=126, minwidth=124, stretch=True)
         cat_index = {c: i for i, c in enumerate(cats)}
         for hit in hits:
             mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
@@ -929,6 +966,16 @@ class ResultView:
         n_files = app.written_file_count()
         failures = app.write_failure_rows()
         path = app.output_label()
+        if any(scan.kind == KIND_PDF for scan in scans):
+            tk.Label(
+                inner,
+                text=MSG_PDF_WIDTH,
+                bg=BG_SURFACE,
+                fg=INK2,
+                font=fonts["small"],
+                anchor="w",
+                justify="left",
+            ).pack(side="bottom", fill="x")
         buttons = tk.Frame(inner, bg=BG_SURFACE)
         buttons.pack(side="right")
         left = tk.Frame(inner, bg=BG_SURFACE)
@@ -991,6 +1038,52 @@ class ResultView:
             state=("normal" if can_write else "disabled"),
         ).pack(side="right", padx=(0, 8))
         ttk.Button(buttons, text="返回修改", command=app.back_to_rules).pack(side="right", padx=(0, 8))
+
+
+def _wrap_label(parent, text: str, *, bg: str, fg: str, font) -> tk.Label:
+    """Wrap to the parent width using the font's own line spacing.
+
+    ``tk.Message`` adds extra leading, which pushed the PDF preview's last
+    line out of the 640px window.
+    """
+    label = tk.Label(
+        parent,
+        text=text,
+        bg=bg,
+        fg=fg,
+        font=font,
+        justify="left",
+        anchor="w",
+        wraplength=40,
+    )
+
+    def sync(_event=None) -> None:
+        width = parent.winfo_width()
+        if width <= 20:
+            return
+        target = max(40, width - 8)
+        if int(label.cget("wraplength")) != target:
+            label.configure(wraplength=target)
+
+    parent.bind("<Configure>", sync, add="+")
+    parent.after_idle(sync)
+    return label
+
+
+def _pdf_fit_notice(scan: FileScan, app) -> str:
+    if scan.kind != KIND_PDF or scan.status == "fail" or not scan.hits:
+        return ""
+    replacements = app.ruleset.replacements()
+
+    def label(category: str) -> str:
+        custom = replacements.get(category)
+        if isinstance(custom, str) and custom.strip():
+            return custom
+        return redaction_label(category)
+
+    order = [rule.name for rule in app.ruleset.rules]
+    short_count, blank_count = pdf_fit_counts(scan.enabled_hits, label, order)
+    return fit_notice(short_count, blank_count)
 
 
 def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:

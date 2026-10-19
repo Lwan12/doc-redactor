@@ -21,7 +21,14 @@ from doc_redactor.image_redactor import (
     is_raster_suffix,
     paint_image_boxes,
 )
-from doc_redactor.pdf_redactor import clear_pdf_hidden, fill_placeholder, find_hit_rects
+from doc_redactor.pdf_redactor import (
+    RedactionCounts,
+    append_legend,
+    clear_pdf_hidden,
+    find_hit_rects,
+    legend_lines,
+    redact_text_placeholders,
+)
 from doc_redactor.tesseract_cmd import require_tesseract
 
 FILE_HIT_WARN = 500
@@ -136,6 +143,8 @@ class WriteResult:
     skipped: bool = False
     error: str | None = None
     note: str | None = None
+    short_count: int = 0
+    blank_count: int = 0
 
 
 class IdGen:
@@ -306,7 +315,16 @@ def write_scans(
         else:
             report_path = dest.with_name(f"{dest.stem}.report.json")
         write_report(report_path, counts)
-        written.append(WriteResult(path=scan.path, dest=dest, report=report_path, counts=counts))
+        written.append(
+            WriteResult(
+                path=scan.path,
+                dest=dest,
+                report=report_path,
+                counts=counts,
+                short_count=int(getattr(counts, "short_count", 0) or 0),
+                blank_count=int(getattr(counts, "blank_count", 0) or 0),
+            )
+        )
     return written
 
 
@@ -585,33 +603,19 @@ def _write_docx_media(dest: Path, by_unit: dict[str, list[LocatedHit]]) -> dict[
     return counts
 
 
-def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None) -> dict[str, int]:
+def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None) -> RedactionCounts:
     document = pymupdf.open(scan.path)
     try:
         if document.is_encrypted:
             raise ValueError(MSG_ENCRYPTED_PDF)
-        placed = False
-        fills: list[tuple[int, tuple[float, float, float, float], str]] = []
+        order = list(getattr(engine, "category_order", []) or [])
+        items = []
         for hit in scan.enabled_hits:
-            if not hit.rects:
+            # Image hits are black boxes. They have no text rectangle.
+            if not hit.rects or str(hit.unit).startswith("pdfimg:"):
                 continue
-            page = document[hit.page]
-            usable = []
-            for x0, y0, x1, y1 in hit.rects:
-                rect = pymupdf.Rect(x0, y0, x1, y1)
-                if rect.is_empty or rect.width <= 0 or rect.height <= 0:
-                    continue
-                page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
-                usable.append((x0, y0, x1, y1))
-                placed = True
-            if usable:
-                # First line of this hit. A later, larger repeat must not steal the label.
-                fills.append((hit.page, usable[0], label(hit.category)))
-        if placed:
-            for page in document:
-                page.apply_redactions(images=0, graphics=0, text=0)
-            for page_index, box, text in fills:
-                fill_placeholder(document[page_index], pymupdf.Rect(*box), text)
+            items.append((hit.page, list(hit.rects), hit.category))
+        stats = redact_text_placeholders(document, items, label, order)
         image_units = [hit for hit in scan.enabled_hits if hit.unit.startswith("pdfimg:")]
         if image_units:
             by_xref: dict[int, list[LocatedHit]] = {}
@@ -635,12 +639,18 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                     buf = io.BytesIO()
                     painted.save(buf, format="PNG")
                     page.replace_image(xref, stream=buf.getvalue())
+        if stats.used:
+            append_legend(document, legend_lines(stats.used))
         clear_pdf_hidden(document)
         mkdir_output(dest.parent)
         document.save(dest, garbage=4, clean=True)
     finally:
         document.close()
-    return scan.category_counts(enabled_only=True)
+    return RedactionCounts(
+        scan.category_counts(enabled_only=True),
+        short_count=stats.short_count,
+        blank_count=stats.blank_count,
+    )
 
 
 def _write_image(scan: FileScan, dest: Path) -> dict[str, int]:

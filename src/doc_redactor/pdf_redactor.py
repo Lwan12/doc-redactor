@@ -1,8 +1,15 @@
-"""Redact PDF text by deletion, and raster images by OCR plus black boxes."""
+"""Redact PDF text by deletion, and raster images by OCR plus black boxes.
+
+PDF placeholders stay on one line. The full label shrinks down to 6pt.
+If it still does not fit, the category's short code is used. If that does
+not fit either, the box stays blank. A half-written label is never emitted.
+"""
 
 from __future__ import annotations
 
 import io
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pymupdf
@@ -11,10 +18,224 @@ from PIL import Image
 from doc_redactor.engine import Hit, RedactionEngine, merge_counts
 from doc_redactor.image_redactor import redact_image
 
-MIN_PLACEHOLDER_SIZE = 4.0
+MIN_PLACEHOLDER_SIZE = 6.0
+MSG_REPL_HINT = (
+    "PDF 里位置窄时，会先把字缩小；还放不下就换成短码（如 [SP]），并在 PDF 最后加一页说明。Word 里总是写完整的替换文字。"
+)
+MSG_FIT_SHORT = "ⓘ 这个 PDF 有 {n} 处位置太窄，已换成短码，最后一页有对照说明。"
+MSG_FIT_BLANK = "⚠ 另有 {m} 处太窄，连短码也放不下，只留了空白，原文已删除。"
+MSG_PDF_WIDTH = "PDF 只能在原来的位置写字，空位和原文一样宽，看的人能看出原文大概多长。"
+LEGEND_TITLE = "替换说明"
+LEGEND_FOOTER = "本页由 doc-redactor 生成，只说明替换文字的意思，不含任何原文。"
+
+# Shared by aliases. The title is the name printed on the legend page.
+_SHORT_GROUPS = (
+    ("[PR]", "项目号", ("PROJECT_ID", "项目号")),
+    ("[PN]", "方案号清单", ("方案号清单", "字母加数字")),
+    ("[SP]", "申办方", ("SPONSOR", "申办方")),
+    ("[SD]", "药名", ("DRUG", "药名")),
+    ("[NCT]", "NCT", ("NCT", "NCT 试验登记号")),
+    ("[EM]", "邮箱", ("EMAIL", "邮箱")),
+    ("[PH]", "手机", ("PHONE", "手机号", "手机号（中国大陆）")),
+)
+_BUILTIN_SHORT = {
+    key: (code, title) for code, title, keys in _SHORT_GROUPS for key in keys
+}
+_CODE_RANK = {code: index for index, (code, _title, _keys) in enumerate(_SHORT_GROUPS)}
+_FONT_INFO: dict[str, dict] = {}
+_HEIGHT_EPSILON = 1e-5
 
 
-def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]:
+class RedactionCounts(dict):
+    """Category counts plus how many boxes used a short code or stayed blank.
+
+    ``json.dumps`` and ``==`` only see the category keys, so a report stays
+    free of the extra tallies.
+    """
+
+    def __init__(self, counts: dict | None = None, short_count: int = 0, blank_count: int = 0):
+        super().__init__()
+        if counts:
+            self.update(counts)
+        self.short_count = int(short_count)
+        self.blank_count = int(blank_count)
+
+
+@dataclass
+class PlaceholderStats:
+    short_count: int = 0
+    blank_count: int = 0
+    used: list[tuple[str, str, str]] = field(default_factory=list)
+
+
+class ShortPlan:
+    """One short code per category, stable for a single PDF."""
+
+    def __init__(self, category_order: list[str] | None = None) -> None:
+        self._custom: dict[str, tuple[str, str]] = {}
+        seen: set[str] = set()
+        number = 0
+        for name in category_order or []:
+            if not name or name in _BUILTIN_SHORT or name in seen:
+                continue
+            seen.add(name)
+            number += 1
+            self._custom[name] = (f"[R{number}]", name)
+        self._next = number + 1
+
+    def resolve(self, category: str) -> tuple[str, str]:
+        builtin = _BUILTIN_SHORT.get(category)
+        if builtin is not None:
+            return builtin
+        known = self._custom.get(category)
+        if known is not None:
+            return known
+        code = (f"[R{self._next}]", category)
+        self._next += 1
+        self._custom[category] = code
+        return code
+
+
+def legend_lines(used: list[tuple[str, str, str]]) -> list[str]:
+    """One line per short code actually used. The first full label wins."""
+    chosen: dict[str, tuple[str, str]] = {}
+    for code, title, full in used:
+        if code not in chosen:
+            chosen[code] = (title, full)
+
+    def sort_key(code: str) -> tuple:
+        if code in _CODE_RANK:
+            return (0, _CODE_RANK[code], 0, code)
+        body = code[1:-1] if code.startswith("[") and code.endswith("]") else code
+        if body.startswith("R") and body[1:].isdigit():
+            return (1, int(body[1:]), 0, code)
+        return (2, 0, 0, code)
+
+    lines = []
+    for code in sorted(chosen, key=sort_key):
+        title, full = chosen[code]
+        lines.append(f"{code} = {title}（{full}）")
+    return lines
+
+
+def fit_notice(short_count: int, blank_count: int) -> str:
+    if short_count <= 0:
+        return ""
+    text = MSG_FIT_SHORT.format(n=short_count)
+    if blank_count > 0:
+        text += "\n" + MSG_FIT_BLANK.format(m=blank_count)
+    return text
+
+
+def _font_for(text: str) -> str:
+    if any(ord(ch) > 255 for ch in text):
+        return "china-s"
+    return "helv"
+
+
+def _fontinfo(fontname: str) -> dict:
+    cached = _FONT_INFO.get(fontname)
+    if cached is not None:
+        return cached
+    document = pymupdf.open()
+    try:
+        page = document.new_page()
+        xref = page.insert_font(fontname=fontname)
+        fontdict = pymupdf.CheckFontInfo(document, xref)[1]
+        glyphs = document.get_char_widths(xref)
+        cached = {
+            "ascender": float(fontdict["ascender"]),
+            "descender": float(fontdict["descender"]),
+            "ordering": int(fontdict["ordering"]),
+            "glyphs": glyphs,
+        }
+    finally:
+        document.close()
+    _FONT_INFO[fontname] = cached
+    return cached
+
+
+def _line_box(fontsize: float, info: dict) -> float:
+    ascender = info["ascender"]
+    descender = info["descender"]
+    factor = 1.2 if ascender - descender <= 1 else ascender - descender
+    return fontsize * factor - descender * fontsize
+
+
+def _single_line_fits(text: str, fontsize: float, max_width: float, max_height: float, info: dict) -> bool:
+    """True only when insert_textbox would keep the whole string on one line."""
+    if not text or "\n" in text or max_width <= 0 or max_height <= 0:
+        return False
+    if _line_box(fontsize, info) - max_height > _HEIGHT_EPSILON:
+        return False
+    ordering = info["ordering"]
+    glyphs = info["glyphs"]
+
+    def pixlen(value: str) -> float:
+        if ordering >= 0:
+            return len(value) * fontsize
+        return sum(glyphs[ord(ch)][1] for ch in value) * fontsize
+
+    space = fontsize if ordering >= 0 else glyphs[32][1] * fontsize
+    words = text.expandtabs(1).split(" ")
+    rest = max_width
+    for index, word in enumerate(words):
+        width = pixlen(word)
+        if width > max_width or rest < width:
+            return False
+        rest -= width
+        if index < len(words) - 1:
+            rest -= space
+    return True
+
+
+def fitted_fontsize(rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> float | None:
+    box = pymupdf.Rect(rect)
+    if not text or box.is_empty or box.width <= 0 or box.height <= 0:
+        return None
+    info = _fontinfo(_font_for(text))
+    half = int(math.floor(min(float(box.height), 72.0) * 2 + 1e-9))
+    min_half = int(round(min_size * 2))
+    if half < min_half:
+        return None
+    while half >= min_half:
+        size = half / 2.0
+        if _single_line_fits(text, size, float(box.width), float(box.height), info):
+            return size
+        half -= 1
+    return None
+
+
+def placeholder_choice(rect, full: str, short: str) -> tuple[str, str]:
+    if fitted_fontsize(rect, full) is not None:
+        return "full", full
+    if short and fitted_fontsize(rect, short) is not None:
+        return "short", short
+    return "blank", ""
+
+
+def pdf_fit_counts(hits, label, category_order: list[str] | None = None) -> tuple[int, int]:
+    """How many enabled hits with rectangles need a short code or a blank."""
+    plan = ShortPlan(category_order)
+    short_count = 0
+    blank_count = 0
+    for hit in hits:
+        if not getattr(hit, "enabled", True):
+            continue
+        rects = getattr(hit, "rects", None) or []
+        if not rects:
+            continue
+        full = label(hit.category)
+        code, _title = plan.resolve(hit.category)
+        kind, _shown = placeholder_choice(rects[0], full, code)
+        if kind == "short":
+            short_count += 1
+        elif kind == "blank":
+            blank_count += 1
+    return short_count, blank_count
+
+
+def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCounts:
     if src.resolve() == dest.resolve():
         raise ValueError("输出路径与原文件相同，已拒绝覆盖原文件")
     document = pymupdf.open(src)
@@ -22,15 +243,30 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]
         if document.is_encrypted:
             raise ValueError(f"不支持加密的 PDF: {src.name}")
         counts: dict[str, int] = {}
-        for page in document:
-            merge_counts(counts, _redact_page_text(page, engine))
+        items: list[tuple[int, list, str]] = []
+        page_total = document.page_count
+        for index in range(page_total):
+            page = document[index]
+            flags = pymupdf.TEXTFLAGS_TEXT
+            textpage = page.get_textpage(flags=flags)
+            text = page.get_text("text", textpage=textpage)
+            for hit in engine.find_hits(text):
+                usable = _hit_rects(page, hit, textpage)
+                if not usable:
+                    continue
+                items.append((index, usable, hit.category))
+                counts[hit.category] = counts.get(hit.category, 0) + 1
+        order = list(getattr(engine, "category_order", []) or [])
+        stats = redact_text_placeholders(document, items, engine.label, order)
         merge_counts(counts, _redact_images(document, engine))
+        if stats.used:
+            append_legend(document, legend_lines(stats.used))
         clear_pdf_hidden(document)
         dest.parent.mkdir(parents=True, exist_ok=True)
         document.save(dest, garbage=4, clean=True)
     finally:
         document.close()
-    return counts
+    return RedactionCounts(counts, stats.short_count, stats.blank_count)
 
 
 _INFO_FIELDS = ("title", "author", "subject", "keywords", "creator", "producer")
@@ -78,62 +314,85 @@ def _drop_catalog_attachments(document) -> None:
         document.xref_set_key(names_xref, "EmbeddedFiles", "null")
 
 
-def _redact_page_text(page, engine: RedactionEngine) -> dict[str, int]:
-    flags = pymupdf.TEXTFLAGS_TEXT
-    textpage = page.get_textpage(flags=flags)
-    text = page.get_text("text", textpage=textpage)
-    hits = engine.find_hits(text)
-    if not hits:
-        return {}
-    matched: list[Hit] = []
-    fills: list[tuple[object, str]] = []
-    placed = False
-    for hit in hits:
-        usable = _hit_rects(page, hit, textpage)
-        if not usable:
+def redact_text_placeholders(document, items, label, category_order: list[str] | None = None) -> PlaceholderStats:
+    """Delete each hit's rectangles and write one single-line placeholder.
+
+    ``items`` are ``(page_index, rects, category)``. Every rectangle is
+    deleted. The label sits on the first one. A cross-line tail stays blank.
+    """
+    plan = ShortPlan(category_order)
+    stats = PlaceholderStats()
+    by_page: dict[int, list[tuple[list, str]]] = {}
+    page_total = document.page_count
+    for page_index, rects, category in items:
+        if page_index < 0 or page_index >= page_total or not rects:
             continue
-        for rect in usable:
-            page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
-        # One placeholder per hit, on the first line of a cross-line match.
-        fills.append((usable[0], engine.label(hit.category)))
-        matched.append(hit)
-        placed = True
-    if placed:
-        # images=0 keeps image xobjects intact so the later OCR pass can see them.
+        by_page.setdefault(page_index, []).append((rects, category))
+    for page_index, jobs in by_page.items():
+        page = document[page_index]
+        fills: list[tuple[object, str]] = []
+        placed = False
+        for rects, category in jobs:
+            usable = []
+            for rect in rects:
+                box = pymupdf.Rect(rect)
+                if box.is_empty or box.width <= 0 or box.height <= 0:
+                    continue
+                page.add_redact_annot(box, fill=(1, 1, 1), cross_out=False)
+                usable.append(box)
+                placed = True
+            if usable:
+                fills.append((usable[0], category))
+        if not placed:
+            continue
+        # images=0 keeps image xobjects intact so a later OCR pass can see them.
         page.apply_redactions(images=0, graphics=0, text=0)
-        for rect, label in fills:
-            fill_placeholder(page, rect, label)
-    return _category_counts(matched)
+        for box, category in fills:
+            full = label(category)
+            code, title = plan.resolve(category)
+            kind = _write_choice(page, box, full, code)
+            if kind == "short":
+                stats.short_count += 1
+                stats.used.append((code, title, full))
+            elif kind == "blank":
+                stats.blank_count += 1
+    return stats
 
 
-def fill_placeholder(page, rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> None:
-    """Write ``text`` into ``rect``, shrinking then truncating so it stays inside.
+def _write_choice(page, rect, full: str, short: str) -> str:
+    """Full label, then short code, then blank. Never a clipped string."""
+    for kind, text in (("full", full), ("short", short)):
+        if not text:
+            continue
+        size = fitted_fontsize(rect, text)
+        if size is None:
+            continue
+        if _commit_textbox(page, rect, text, size, _font_for(text)):
+            return kind
+    return "blank"
+
+
+def fill_placeholder(page, rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> bool:
+    """Write ``text`` on one line inside ``rect``, or write nothing.
 
     Original page text must already have been deleted (apply_redactions).
-    A box too small for even one glyph is left empty — never the source word.
+    The size starts near the box height and stops at ``min_size``. A box that
+    cannot hold the whole string is left empty — never a shortened label.
     """
     box = pymupdf.Rect(rect)
-    if not text or box.is_empty or box.width <= 0 or box.height <= 0:
-        return
-    fontsize = min(11.0, max(min_size, float(box.height) * 0.9))
-    while fontsize >= min_size - 1e-6:
-        if _commit_textbox(page, box, text, fontsize):
-            return
-        fontsize -= 0.5
-    shown = text
-    while shown:
-        if _commit_textbox(page, box, shown, min_size):
-            return
-        shown = shown[:-1]
+    size = fitted_fontsize(box, text, min_size=min_size)
+    if size is None:
+        return False
+    return _commit_textbox(page, box, text, size, _font_for(text))
 
 
-def _commit_textbox(page, rect, text: str, fontsize: float) -> bool:
+def _commit_textbox(page, rect, text: str, fontsize: float, fontname: str) -> bool:
     shape = page.new_shape()
     leftover = shape.insert_textbox(
         rect,
         text,
         fontsize=fontsize,
-        fontname="helv",
+        fontname=fontname,
         color=(0, 0, 0),
         align=pymupdf.TEXT_ALIGN_LEFT,
     )
@@ -143,11 +402,55 @@ def _commit_textbox(page, rect, text: str, fontsize: float) -> bool:
     return True
 
 
-def _category_counts(hits: list[Hit]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for hit in hits:
-        counts[hit.category] = counts.get(hit.category, 0) + 1
-    return counts
+def _font_runs(text: str):
+    """Split into helv and china-s runs so ASCII keeps a proportional advance.
+
+    A CJK font draws every character one em wide. pdftotext then treats the
+    gaps inside ``[SP]`` as columns and reads the line out of order.
+    """
+    if not text:
+        return
+    font = _font_for(text[0])
+    chunk = [text[0]]
+    for ch in text[1:]:
+        nxt = _font_for(ch)
+        if nxt == font:
+            chunk.append(ch)
+            continue
+        yield font, "".join(chunk)
+        font = nxt
+        chunk = [ch]
+    yield font, "".join(chunk)
+
+
+def _insert_mixed(page, x: float, y: float, text: str, fontsize: float) -> None:
+    cursor = float(x)
+    for font, chunk in _font_runs(text):
+        page.insert_text((cursor, y), chunk, fontname=font, fontsize=fontsize, color=(0, 0, 0))
+        if font == "helv":
+            cursor += pymupdf.get_text_length(chunk, fontname="helv", fontsize=fontsize)
+        else:
+            cursor += len(chunk) * fontsize
+
+
+def append_legend(document, lines: list[str]) -> None:
+    """Add one unrotated page that explains the short codes used in this file."""
+    if not lines:
+        return
+    template = document[document.page_count - 1]
+    width = float(template.rect.width)
+    height = float(template.rect.height)
+    page = document.new_page(width=width, height=height)
+    _insert_mixed(page, 72, 72, LEGEND_TITLE, 16)
+    y = 108.0
+    limit = height - 80
+    for line in lines:
+        if y > limit:
+            break
+        _insert_mixed(page, 72, y, line, 12)
+        y += 22
+    footer_y = min(max(y + 28, height - 56), height - 28)
+    _insert_mixed(page, 72, footer_y, LEGEND_FOOTER, 11)
 
 
 def find_hit_rects(page, hit: Hit, textpage) -> list[tuple[float, float, float, float]]:

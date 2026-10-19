@@ -284,15 +284,19 @@ def test_pdf_deletes_cjk_term_stuck_to_chinese_and_across_lines(tmp_path: Path):
         assert _compact(mupdf_text).count("[SPONSOR]") == 3
         assert _compact(poppler).count("[SPONSOR]") == 3
 
-    # The two-character first line is narrower than [SPONSOR], so the label
-    # may wrap inside that rectangle. It still has to be extractable there,
-    # and the single-character second line stays blank of the label.
+    # The two-character first line is narrower than [SPONSOR] even at 6pt,
+    # so that box gets the short code. The single-character second line
+    # stays blank, and the legend page explains [SP].
+    assert counts.short_count == 1
+    assert counts.blank_count == 0
     single_rects = [pymupdf.Rect(hit.rects[0]) for hit in scan.hits if "\n" not in hit.text]
     first = pymupdf.Rect(scan_wrapped[0].rects[0])
     second = pymupdf.Rect(scan_wrapped[0].rects[1])
     for output in (cli_out, gui_out):
         written = pymupdf.open(output)
         try:
+            assert written.page_count == 2
+            assert "[SP] = 申办方（[SPONSOR]）" in written[1].get_text()
             page = written[0]
             words = page.get_text("words")
 
@@ -301,8 +305,9 @@ def test_pdf_deletes_cjk_term_stuck_to_chinese_and_across_lines(tmp_path: Path):
                     word[4] for word in words if predicate(outer, pymupdf.Rect(word[:4]))
                 )
 
-            assert _compact(_blob(first, _contains)) == "[SPONSOR]"
+            assert _compact(_blob(first, _contains)) == "[SP]"
             assert "SPONSOR" not in _blob(second, _overlaps)
+            assert "[" not in _blob(second, _overlaps)
             boxes = [pymupdf.Rect(item) for item in page.search_for("[SPONSOR]")]
             assert len(boxes) == 2
             for origin in single_rects:
@@ -436,20 +441,39 @@ def test_pdf_short_cjk_word_shrinks_long_placeholder(tmp_path: Path):
     assert max(rect.height for rect in sources) > min(rect.height for rect in sources) * 1.5
 
     cli_out = tmp_path / "cli.pdf"
-    assert redact_pdf(source, cli_out, engine) == {"药名": 2}
+    cli_counts = redact_pdf(source, cli_out, engine)
+    assert cli_counts == {"药名": 2}
+    assert cli_counts.short_count == 1
     scan = scan_path(source, engine)
     assert len(scan.hits) == 2
     assert all(len(hit.rects) == 1 for hit in scan.hits)
     gui_out = tmp_path / "gui.pdf"
-    assert write_scan(scan, gui_out, engine=engine) == {"药名": 2}
+    gui_counts = write_scan(scan, gui_out, engine=engine)
+    assert gui_counts == {"药名": 2}
+    assert gui_counts.short_count == 1
 
+    wide_source = max(sources, key=lambda item: item.width)
+    narrow_source = min(sources, key=lambda item: item.width)
     for output in (cli_out, gui_out):
         mupdf_text, poppler = _extract(output)
         assert "星海" not in mupdf_text
         assert "星海" not in poppler
-        assert _compact(mupdf_text).count("[STUDYDRUG]") == 2
-        assert _compact(poppler).count("[STUDYDRUG]") == 2
-        _assert_placeholders_in_sources(output, sources, "[STUDY DRUG]")
+        opened = pymupdf.open(output)
+        try:
+            assert opened.page_count == 2
+            legend = opened[1].get_text()
+            assert "[SD] = 药名（[STUDY DRUG]）" in legend
+            page = opened[0]
+            wide_blob = "".join(
+                word[4] for word in page.get_text("words") if _contains(wide_source, pymupdf.Rect(word[:4]))
+            )
+            narrow_blob = "".join(
+                word[4] for word in page.get_text("words") if _contains(narrow_source, pymupdf.Rect(word[:4]))
+            )
+            assert "STUDY" in wide_blob and "DRUG" in wide_blob
+            assert narrow_blob.replace(" ", "") == "[SD]"
+        finally:
+            opened.close()
 
 
 def _assert_single_placeholder(path: Path, source_rect: pymupdf.Rect) -> None:

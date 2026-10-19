@@ -242,13 +242,20 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
         supported_languages=["en"],
         context_aware_enhancer=_PassthroughEnhancer(),
     )
-    return RedactionEngine(analyzer, _replacements_from_rules(regex_rules, wordlists))
+    order = [rule.name for rule in regex_rules] + [rule.category for rule in wordlists]
+    return RedactionEngine(analyzer, _replacements_from_rules(regex_rules, wordlists), order)
 
 
 class RedactionEngine:
-    def __init__(self, analyzer: AnalyzerEngine, replacements: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        analyzer: AnalyzerEngine,
+        replacements: dict[str, str] | None = None,
+        category_order: list[str] | None = None,
+    ) -> None:
         self.analyzer = analyzer
         self.replacements = dict(replacements or {})
+        self.category_order = list(category_order or [])
 
     def label(self, category: str) -> str:
         return redaction_label(category, self.replacements)

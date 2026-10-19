@@ -95,13 +95,13 @@ def demo_scans(*, many: bool = False, nohit: bool = False, all_fail: bool = Fals
     ]
     pdf_hits: list[LocatedHit] = []
     pdf_map = [
-        (0, 1, "项目号", "PRJ-2026-017"),
-        (0, 2, "申办方", "华曜医药有限公司"),
-        (1, 1, "项目号", "PRJ-2026-017"),
-        (1, 2, "药名", "瑞沃替尼片"),
-        (1, 4, "项目号", "PRJ-2026-017-S02"),
+        (0, 1, "项目号", "PRJ-2026-017", (40, 70, 220, 86)),
+        (0, 2, "申办方", "华曜医药有限公司", (40, 100, 68, 116)),
+        (1, 1, "项目号", "PRJ-2026-017", (40, 140, 220, 156)),
+        (1, 2, "药名", "瑞沃替尼片", (40, 170, 64, 186)),
+        (1, 4, "项目号", "PRJ-2026-017-S02", (40, 200, 48, 208)),
     ]
-    for page, line, cat, text in pdf_map:
+    for page, line, cat, text, rect in pdf_map:
         src = pdf_pages[page][line]
         start = src.find(text)
         pdf_hits.append(
@@ -114,7 +114,7 @@ def demo_scans(*, many: bool = False, nohit: bool = False, all_fail: bool = Fals
                 start,
                 start + len(text),
                 page=page,
-                rects=[(72, 80, 200, 100)],
+                rects=[rect],
             )
         )
         hid += 1
