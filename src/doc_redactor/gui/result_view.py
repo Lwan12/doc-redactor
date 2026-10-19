@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
@@ -1089,17 +1090,25 @@ class ResultView:
         tree.configure(yscrollcommand=cat_scroll.set)
         tree.pack(side="left", fill="x", expand=True)
         cat_box.pack(fill="x")
+        # 「去掉页眉页脚」 lines under 合计. They take part in sharing the pane
+        # height (see _fit_right_pane): folded to one line, then hidden, when
+        # the window is short. The same numbers stay in the top summary.
+        hf_rows = []
         for label_text, value, tone in hf_text.summary_rows(current, self.app.remove_hf, self.app.written, scans):
             row = tk.Frame(parent, bg=BG_SURFACE)
             row.pack(fill="x")
             fg = _tone_fg(tone)
-            tk.Label(row, text=label_text, bg=BG_SURFACE, fg=WARN if tone == hf_text.TONE_WARN else INK, font=fonts["small"]).pack(
-                side="left", anchor="n", padx=(10, 6), pady=3
-            )
+            name = tk.Label(row, text=label_text, bg=BG_SURFACE, fg=WARN if tone == hf_text.TONE_WARN else INK, font=fonts["small"])
+            name.pack(side="left", anchor="n", padx=(10, 6), pady=3)
             values = tk.Frame(row, bg=BG_SURFACE)
             values.pack(side="right", padx=(0, 4), pady=3)
+            extra = []
             for i, line in enumerate(value.split("\n")):
-                tk.Label(values, text=line, bg=BG_SURFACE, fg=fg if i == 0 else INK2, font=fonts["small"]).pack(anchor="e")
+                label = tk.Label(values, text=line, bg=BG_SURFACE, fg=fg if i == 0 else INK2, font=fonts["small"])
+                label.pack(anchor="e")
+                if i:
+                    extra.append(label)
+            hf_rows.append(_HfRow(row, name, values, tuple(extra)))
 
         def on_cat(_e=None):
             if getattr(self, "_building", False):
@@ -1181,7 +1190,7 @@ class ResultView:
             loc.selection_set(str(self.app.current_hit))
             loc.see(str(self.app.current_hit))
         loc.pack(fill="both", expand=True)
-        self._fit_right_pane(parent, cat_box, tree, cat_scroll, loc)
+        self._fit_right_pane(parent, cat_box, tree, cat_scroll, loc, hf_rows)
 
         def on_loc_click(event):
             row = loc.identify_row(event.y)
@@ -1198,15 +1207,18 @@ class ResultView:
 
         loc.bind("<Button-1>", on_loc_click)
 
-    def _fit_right_pane(self, parent, cat_box, tree, cat_scroll, loc) -> None:
+    def _fit_right_pane(self, parent, cat_box, tree, cat_scroll, loc, hf_rows=()) -> None:
         """Share the pane height so the location list keeps LOC_MIN_ROWS full rows.
 
         The category table gives up rows first (down to CAT_MIN_ROWS) and
-        then scrolls; no row is dropped. Tall windows keep every row.
+        then scrolls; no row is dropped. If that is not enough, the
+        header/footer lines fold to their first line, then hide (their
+        numbers are also in the top summary). Tall windows keep every row.
         """
         wanted = int(tree.cget("height"))
         total_rows = len(tree.get_children())
-        state = {"busy": False}
+        state = {"busy": False, "hf": HF_FULL}
+        hf_frames = {r.frame for r in hf_rows}
 
         def fit(_event=None) -> None:
             if state["busy"] or not parent.winfo_exists():
@@ -1221,10 +1233,27 @@ class ResultView:
                 # Heading plus borders: what a table needs beyond its rows.
                 overhead = max(0, tree.winfo_reqheight() - shown * row_h)
                 others = sum(
-                    child.winfo_reqheight() for child in parent.pack_slaves() if child not in (cat_box, loc)
+                    child.winfo_reqheight()
+                    for child in parent.pack_slaves()
+                    if child not in (cat_box, loc) and child not in hf_frames
                 )
+                if "heights" not in state:
+                    state["heights"] = [hf_row_heights(r) for r in hf_rows]
+                heights = state["heights"]
+                level = hf_level(
+                    avail - others,
+                    heights,
+                    row_h=row_h,
+                    overhead=overhead,
+                    wanted=wanted,
+                )
+                if level != state["hf"]:
+                    for r in hf_rows:
+                        _show_hf_row(r, level)
+                    state["hf"] = level
+                hf_h = sum(h[level] for h in heights)
                 rows = category_rows_that_fit(
-                    avail - others, row_h=row_h, overhead=overhead, wanted=wanted
+                    avail - others - hf_h, row_h=row_h, overhead=overhead, wanted=wanted
                 )
                 if rows != shown:
                     tree.configure(height=rows)
@@ -1390,6 +1419,51 @@ def category_rows_that_fit(space: int, *, row_h: int, overhead: int, wanted: int
     room = space - 2 * overhead - LOC_MIN_ROWS * row_h
     fit = room // row_h
     return max(min(CAT_MIN_ROWS, wanted), min(wanted, fit))
+
+
+# How much of a 「去掉页眉页脚」 line shows in the right pane.
+HF_FULL, HF_FOLDED, HF_HIDDEN = 0, 1, 2
+
+
+@dataclass(frozen=True)
+class _HfRow:
+    frame: object
+    name: object
+    values: object
+    extra: tuple
+
+
+def hf_row_heights(row: _HfRow) -> tuple[int, int, int]:
+    """(full, folded, hidden) heights of one line, measured while it is full."""
+    full = row.frame.winfo_reqheight()
+    return full, full - sum(label.winfo_reqheight() for label in row.extra), 0
+
+
+def hf_level(space: int, heights, *, row_h: int, overhead: int, wanted: int) -> int:
+    """Least folding of the header/footer lines that leaves the location list
+    LOC_MIN_ROWS rows next to a category table of at least CAT_MIN_ROWS."""
+    cat_rows = min(CAT_MIN_ROWS, wanted)
+    need = 2 * overhead + (cat_rows + LOC_MIN_ROWS) * max(1, row_h)
+    for level in (HF_FULL, HF_FOLDED):
+        if space - sum(h[level] for h in heights) >= need:
+            return level
+    return HF_HIDDEN if heights else HF_FULL
+
+
+def _show_hf_row(row: _HfRow, level: int) -> None:
+    for label in row.extra:
+        label.pack_forget()
+    if level == HF_HIDDEN:
+        row.name.pack_forget()
+        row.values.pack_forget()
+        row.frame.configure(height=1)
+        return
+    if not row.name.winfo_ismapped():
+        row.name.pack(side="left", anchor="n", padx=(10, 6), pady=3)
+        row.values.pack(side="right", padx=(0, 4), pady=3)
+    if level == HF_FULL:
+        for label in row.extra:
+            label.pack(anchor="e")
 
 
 def _tree_row_height(tree) -> int:

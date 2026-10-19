@@ -1163,3 +1163,43 @@ def test_category_rows_that_fit_leaves_room_for_the_list():
     assert category_rows_that_fit(50, row_h=26, overhead=28, wanted=7) == CAT_MIN_ROWS
     # Never more than wanted, even when wanted is below the floor.
     assert category_rows_that_fit(50, row_h=26, overhead=28, wanted=2) == 2
+
+
+@pytest.mark.parametrize("mode", ["tag", "auto", "mixed", "none"])
+def test_location_list_shows_three_full_rows_with_header_footer_on_at_960x640(gui, mode):
+    """#28 + #30: with 「去掉页眉页脚」 on and after writing, the header/footer
+    lines in the right pane share the height and the list keeps 3 full rows."""
+    from doc_redactor.gui.demo import demo_hf_scans
+
+    app = gui
+    app.root.geometry("960x640+0+0")
+    _settle(app)
+    scans = demo_hf_scans(mode)
+    app.scans = scans
+    app.remove_hf = True
+    app.output_var.set("/tmp/out")
+    app.selected_cat = None
+    app.current_hit = None
+    app.written = True
+    app.write_errors = {}
+    app.write_notes = {}
+    app.preview_mode = "orig"
+    app.hide_text = False
+    for selected in ["all"] + [i for i, s in enumerate(scans) if s.status != "fail" and s.visible_hits]:
+        app.selected = selected
+        app.show("result")
+        _settle(app)
+        _settle(app)
+        assert app.root.winfo_height() == 640
+        assert _full_rows(_loc_tree(app)) >= 3, (mode, selected)
+
+
+def test_header_footer_lines_fold_then_hide_only_when_needed():
+    from doc_redactor.gui.result_view import HF_FOLDED, HF_FULL, HF_HIDDEN, hf_level
+
+    heights = [(56, 31, 0), (31, 31, 0)]  # two-line value, one-line value
+    need = 2 * 30 + (3 + 3) * 24
+    assert hf_level(need + 87, heights, row_h=24, overhead=30, wanted=7) == HF_FULL
+    assert hf_level(need + 62, heights, row_h=24, overhead=30, wanted=7) == HF_FOLDED
+    assert hf_level(need + 40, heights, row_h=24, overhead=30, wanted=7) == HF_HIDDEN
+    assert hf_level(need, [], row_h=24, overhead=30, wanted=7) == HF_FULL
