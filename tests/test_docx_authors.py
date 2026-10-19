@@ -1,6 +1,6 @@
 """修订作者、批注作者一律改成固定值「Author」（幕僚长定：人名本身就是敏感信息）。
 
-不管作者名命中没命中规则都改。覆盖：正文、页眉、脚注里的 w:ins / w:del / w:rPrChange，
+不管作者名命中没命中规则都改。批注在本分支整条删除（连同 people.xml），所以这里断言批注已不在。覆盖：正文、页眉、脚注里的 w:ins / w:del / w:rPrChange，
 styles.xml 里的格式修订，批注的 w:author / w:initials，people.xml 的 w15:author
 和 w15:presenceInfo（userId 常是邮箱或账号）。界面和命令行两条路，
 写出后用 python-docx 和 lxml（装了 pandoc 再加 pandoc --track-changes=all）读回。全部是编造数据。
@@ -175,8 +175,9 @@ def test_every_revision_and_comment_author_becomes_author(tmp_path: Path):
     for output in _write_both_ways(source, tmp_path):
         found = _person_attributes(output)
         parts = {part for part, _local, _value in found}
-        # 每处都还在（修订标记和批注本身不删），只是名字换了。
-        assert {"word/document.xml", "word/comments.xml", "word/footnotes.xml", "word/styles.xml", "word/people.xml"} <= parts
+        # 修订标记都还在，只是名字换了；批注和 people.xml 整条删掉（图片与元数据 PR）。
+        assert {"word/document.xml", "word/footnotes.xml", "word/styles.xml"} <= parts
+        assert not parts & {"word/comments.xml", "word/people.xml"}
         assert any(part.startswith("word/header") for part in parts)
         wrong = [(part, local) for part, local, value in found if local in ("author", "initials") and value != FIXED_AUTHOR]
         assert not wrong, wrong
@@ -185,9 +186,7 @@ def test_every_revision_and_comment_author_becomes_author(tmp_path: Path):
         for number, name in enumerate(NAMES, 1):
             assert name not in text, f"{output.parent.name} 读出了作者名 #{number}"
         document = Document(str(output))
-        comments = list(document.comments)
-        assert len(comments) == 2
-        assert {(c.author, c.initials) for c in comments} == {(FIXED_AUTHOR, FIXED_AUTHOR)}
+        assert len(list(document.comments)) == 0
 
 
 @pytest.mark.skipif(shutil.which("pandoc") is None, reason="没装 pandoc")
