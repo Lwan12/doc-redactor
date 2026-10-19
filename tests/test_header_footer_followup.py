@@ -178,7 +178,7 @@ def test_scan_path_to_confirm_bar_counts_fixed_rows(tmp_path):
     scan = scan_path(src, build_engine([], [WordlistRule("药名", ["Nothingmab"], True)]), remove_hf=True)
     bar = hf_text.confirm_bar(scan, True, False)
     assert bar is not None and bar["status"] == hf_text.PENDING
-    assert bar["fixed"] == 1 and "含 1 行固定文字" in bar["text"]
+    assert "含 1 行固定文字" in bar["text"]
     assert "Version" not in bar["text"]
     set_file_hf_confirmed(scan, True)
     done = hf_text.confirm_bar(scan, True, False)

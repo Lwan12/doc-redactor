@@ -1743,3 +1743,70 @@ def test_inline_image_near_match_shows_approx_in_hit_table(gui, tmp_path, monkey
     assert any(h.unit.startswith("pdfinline:") for h in scan.hits)
     _show_one(gui, [scan], False)
     assert "近似 Fictlzumab" in _tree_values(gui.root)
+
+
+def test_top_bar_unchecked_count_matches_blocked_rows(gui, tmp_path):
+    """#51 M1：被拦下的文件不论有没有命中，都只算顶栏「没法检查」，数字等于列表里 ⚠ 没法检查 的份数。编造数据。"""
+    import re as _re
+
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_PDF, KIND_WORD, FileScan
+
+    reason = MSG_NO_OCR.format(n=1)
+    kept = FileScan(path=Path("C.pdf"), kind=KIND_PDF, status="ok", hits=[_plain_hit(1, "Acme", "page:0")], pages=[["Acme"]])
+    blocked_hit = FileScan(
+        path=Path("A.docx"), kind=KIND_WORD, status="ok", hits=[_plain_hit(2, "星辰海", "para:0")],
+        paragraphs=["星辰海"], blocked_reason=reason,
+    )
+    blocked_zero = _hf_zero_scan(tmp_path, "E.pdf")
+    blocked_zero.blocked_reason = reason
+    _show_one(gui, [kept, blocked_hit, blocked_zero], False)
+    tree = _file_tree(gui.root)
+    rows = [tree.item(i, "values")[0] for i in tree.get_children()]
+    warned = sum(1 for r in rows if r.startswith("⚠") and "没法检查" in r)
+    assert warned == 2, rows
+    copy = _visible_copy(gui.root)
+    m = _re.search(r"没法检查 (\d+)", copy)
+    assert m and int(m.group(1)) == warned, copy
+    assert "有命中 1" in copy and "无命中 0" in copy, copy
+
+
+def test_top_bar_counts_each_file_once(gui, tmp_path):
+    """#51：顶栏每份文件只算一类，各类之和等于总份数；写出失败单算，不再同时算「有命中」。编造数据。"""
+    import re as _re
+
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_PDF, KIND_WORD, FileScan
+
+    reason = MSG_NO_OCR.format(n=1)
+    kept = FileScan(path=Path("C.pdf"), kind=KIND_PDF, status="ok", hits=[_plain_hit(1, "Acme", "page:0")], pages=[["Acme"]])
+    wfail = FileScan(path=Path("W.pdf"), kind=KIND_PDF, status="ok", hits=[_plain_hit(2, "Acme", "page:0")], pages=[["Acme"]])
+    nohit = FileScan(path=Path("D.pdf"), kind=KIND_PDF, status="ok", hits=[], pages=[["plain"]])
+    blocked_hit = FileScan(
+        path=Path("A.docx"), kind=KIND_WORD, status="ok", hits=[_plain_hit(3, "星辰海", "para:0")],
+        paragraphs=["星辰海"], blocked_reason=reason,
+    )
+    scans = [kept, wfail, nohit, blocked_hit]
+
+    def counts():
+        copy = _visible_copy(gui.root)
+        got = {}
+        for name in ("有命中", "无命中", "没法检查", "失败"):
+            m = _re.search(name + r" (\d+)", copy)
+            got[name] = int(m.group(1)) if m else 0
+        return got
+
+    _show_one(gui, scans, False)
+    before = counts()
+    assert sum(before.values()) == len(scans), before
+    assert before == {"有命中": 2, "无命中": 1, "没法检查": 1, "失败": 0}, before
+
+    gui.scans = scans
+    gui.written = True
+    gui.write_errors = {str(wfail.path): "磁盘已满", str(blocked_hit.path): reason}
+    gui.write_notes = {}
+    gui.show("result")
+    _settle(gui)
+    after = counts()
+    assert sum(after.values()) == len(scans), after
+    assert after["失败"] == 2 and after["有命中"] == 1, after

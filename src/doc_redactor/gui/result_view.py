@@ -351,14 +351,16 @@ class ResultView:
             return
         enabled = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
         cancelled_n = sum(len(s.visible_hits) - s.enabled_count() for s in scans if s.status != "fail")
-        # A blocked file with no hit is neither 「有命中」 nor 「无命中」: its
-        # images were not checked, so it gets its own count (merge-r5 S2).
-        n_hit = sum(1 for s in scans if s.status != "fail" and _has_rule_hits(s))
-        n_unchecked = sum(1 for s in scans if s.status != "fail" and not _has_rule_hits(s) and _blocked_reason(s))
-        n_no = sum(1 for s in scans if s.status != "fail" and not _has_rule_hits(s) and not _blocked_reason(s))
+        # Each file in exactly one bucket, same order as the file list's own
+        # status: 失败 (scan or write failed) > 没法检查 (blocked) > 有命中 > 无命中.
+        # The buckets add up to 共 N (#51 M1 and the top-bar partition).
+        buckets = [_top_bucket(s, self.app) for s in scans]
+        n_fail = buckets.count("fail")
+        n_unchecked = buckets.count("unchecked")
+        n_hit = buckets.count("hit")
+        n_no = buckets.count("no")
         n_hf_only = sum(1 for s in scans if _hf_only_write(s, self.app))
-        # Same count as the bottom bar: scan failures plus files not written.
-        n_fail = failed_file_count(scans, self.app.write_errors)
+        # n_fail equals failed_file_count (bottom bar): scan failures plus files not written.
         tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
         verb = "已替换" if self.app.written else "将替换"
         tk.Label(inner, text=f"    {verb} ", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
@@ -1707,6 +1709,14 @@ def _has_findings(scan: FileScan) -> bool:
     if scan.hits or _blocked_reason(scan):
         return True
     return int(getattr(scan, "unlocated_count", 0) or 0) > 0
+
+
+def _top_bucket(scan: FileScan, app) -> str:
+    if scan.status == "fail" or app.write_errors.get(str(scan.path)):
+        return "fail"
+    if _blocked_reason(scan):
+        return "unchecked"
+    return "hit" if _has_rule_hits(scan) else "no"
 
 
 def _has_rule_hits(scan: FileScan) -> bool:
