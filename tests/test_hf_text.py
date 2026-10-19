@@ -155,3 +155,13 @@ def test_image_row_says_not_processed():
     img = _by_kind(demo_hf_scans("tag"), "image")
     assert not hf_text.shows_box(img, True)
     assert hf_text.summary_value(img, True, False) == "— 图片不处理"
+
+
+def test_no_header_footer_rows_for_files_scanned_with_the_option_off():
+    # The option was off when these files were scanned: nothing was looked
+    # for, so the right pane has no 「页眉页脚」 line to show (#30 layout).
+    scans = demo_hf_scans("tag")
+    for scan in scans:
+        scan.hf_route = ""
+    assert hf_text.summary_rows(None, True, False, scans) == []
+    assert all(hf_text.summary_rows(s, True, False) == [] for s in scans if s.kind != "image")

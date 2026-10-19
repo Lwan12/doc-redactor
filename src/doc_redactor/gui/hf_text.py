@@ -224,6 +224,8 @@ def summary_rows(scan, option_on: bool, written: bool, scans=None) -> list[tuple
     label = "▭ 页眉页脚"
     if scan is None:
         scans = scans or []
+        if not any(s.hf_route for s in scans):
+            return []  # scanned with the option off: nothing was looked for
         n, words = delete_pages(scans, True), word_files(scans, True)
         values = []
         if n:
@@ -240,12 +242,14 @@ def summary_rows(scan, option_on: bool, written: bool, scans=None) -> list[tuple
     if scan.kind == KIND_IMAGE:
         return [(label, "— 图片不处理", TONE_MUTED)]
     if scan.kind == KIND_WORD:
+        if not scan.hf_route:
+            return []
         if not scan.hf_found:
             return [(label, "— 没有页眉页脚", TONE_MUTED)]
         if scan.hf_keep:
             return [(label, WORD_KEEP, TONE_INFO)]
         return [(label, WORD_REMOVED if written else WORD_REMOVE, TONE_INFO)]
-    if scan.kind != KIND_PDF:
+    if scan.kind != KIND_PDF or not scan.hf_route:
         return []
     if scan.hf_keep:
         return [(label, "— 这个文件保留", TONE_MUTED)]
