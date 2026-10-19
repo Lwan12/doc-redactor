@@ -1237,6 +1237,12 @@ def pdf_xref_image(document, xref: int, smask: int = 0) -> Image.Image:
             mask = pymupdf.Pixmap(document, smask)
             if pixmap.n == 1:
                 pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
+            if (pixmap.width, pixmap.height) != (mask.width, mask.height):
+                # The PDF scales both onto the same box, so a mask need not
+                # match the colour data (a 2×2 indexed fill under a wide text
+                # mask is common). Stretch the colour data up to the mask, so
+                # glyphs drawn in the mask keep their full resolution for OCR.
+                pixmap = pymupdf.Pixmap(pixmap, mask.width, mask.height, None)
             pixmap = pymupdf.Pixmap(pixmap, mask)
         data = pixmap.tobytes("png")
         image = Image.open(io.BytesIO(data))

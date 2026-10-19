@@ -573,3 +573,69 @@ def test_missing_tesseract_cli_says_why_and_what_to_do(tmp_path: Path, monkeypat
     assert NO_OCR_WHY in err, err
     assert all(word in err for word in NO_OCR_FIX), err
     assert not list((tmp_path / "out").glob("*.redacted.*"))
+
+
+# ---------------------------------------------------------------- PDF: small indexed image under a larger soft mask
+
+INDEXED_2X2 = "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace [/Indexed /DeviceRGB 1 <ffffff000000>] /SMask {smask} 0 R >>"
+
+
+def _indexed_mask_pdf(tmp_path: Path, colour: bytes = b"\x01\x01\x01\x01") -> Path:
+    """A 2×2 indexed fill whose 900×300 soft mask carries the glyphs (all fictional)."""
+    alpha = _card("RGBA").getchannel("A")
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 760), "Status normal", fontsize=12)
+    stub = io.BytesIO()
+    Image.new("RGB", (2, 2), "white").save(stub, "PNG")
+    image = page.insert_image(pymupdf.Rect(72, 100, 522, 250), stream=stub.getvalue())
+    smask = document.get_new_xref()
+    document.update_object(
+        smask,
+        f"<< /Type /XObject /Subtype /Image /Width {alpha.width} /Height {alpha.height} "
+        "/BitsPerComponent 8 /ColorSpace /DeviceGray >>",
+    )
+    document.update_stream(smask, alpha.tobytes())
+    document.update_object(image, INDEXED_2X2.format(smask=smask))
+    document.update_stream(image, colour)
+    src = tmp_path / "indexed-mask.pdf"
+    document.save(src)
+    document.close()
+    return src
+
+
+def test_pdf_small_indexed_image_with_larger_mask_is_read(tmp_path: Path):
+    from doc_redactor.pdf_redactor import pdf_xref_image
+
+    document = pymupdf.open(_indexed_mask_pdf(tmp_path))
+    ((xref, smask, width, height, *_),) = document[0].get_images(full=True)
+    assert (width, height) == (2, 2) and smask
+    image = pdf_xref_image(document, xref, smask)
+    assert image.size == (900, 300)
+    document.close()
+
+
+def test_pdf_undecodable_masked_image_still_blocks(tmp_path: Path):
+    from doc_redactor.image_redactor import WriteBlocked
+    from doc_redactor.pdf_redactor import pdf_xref_image
+
+    document = pymupdf.open(_indexed_mask_pdf(tmp_path))
+    ((xref, smask, *_),) = document[0].get_images(full=True)
+    broken = INDEXED_2X2.format(smask=smask).replace("[/Indexed /DeviceRGB 1 <ffffff000000>]", "/NoSuchSpace")
+    document.update_object(xref, broken)
+    with pytest.raises(WriteBlocked) as caught:
+        pdf_xref_image(document, xref, smask)
+    assert "打不开" in str(caught.value)
+    document.close()
+
+
+@needs_ocr
+def test_pdf_small_indexed_image_with_larger_mask_is_written_and_painted(tmp_path: Path):
+    src = _indexed_mask_pdf(tmp_path)
+    clip = pymupdf.Rect(60, 90, 540, 260)
+    assert _rendered_secrets(src, clip) == ["ABC-2026-001", "Acme Pharma", "Fictizumab"]
+    scan, result = _gui_write(src, tmp_path / "gui")
+    assert result.error is None, result.error
+    assert sum(1 for h in scan.hits if h.unit.startswith("pdfimg:")) == 3
+    for dest in (result.dest, _cli_write(src, tmp_path / "cli")):
+        assert _rendered_secrets(dest, clip) == []
