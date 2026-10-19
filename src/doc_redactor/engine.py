@@ -1,4 +1,8 @@
-"""Presidio analyzer wired only to regex and deny-list recognizers.
+"""Presidio analyzer wired only to regex recognizers.
+
+Wordlists are compiled here. Presidio's deny_list wraps terms in ``\\W``
+boundaries, and Python treats CJK characters as word characters, so a Chinese
+term stuck to other Chinese never matched.
 
 The NLP engine is Presidio's NoOpNlpEngine. It does not load spaCy language
 models and does not download en_core_web_lg or any other model.
@@ -110,6 +114,84 @@ def _replacements_from_rules(regex_rules: list[RegexRule], wordlists: list[Wordl
     return mapping
 
 
+def _is_ascii_alnum(ch: str) -> bool:
+    return len(ch) == 1 and ch.isascii() and ch.isalnum()
+
+
+def _is_cjk(ch: str) -> bool:
+    """Han, Hiragana, Katakana, Hangul, and nearby CJK blocks."""
+    if len(ch) != 1:
+        return False
+    code = ord(ch)
+    return (
+        0x1100 <= code <= 0x11FF
+        or 0x2E80 <= code <= 0x2FDF
+        or 0x3000 <= code <= 0x303F
+        or 0x3040 <= code <= 0x30FF
+        or 0x3130 <= code <= 0x318F
+        or 0x31F0 <= code <= 0x31FF
+        or 0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xAC00 <= code <= 0xD7AF
+        or 0xF900 <= code <= 0xFAFF
+        or 0xFF66 <= code <= 0xFF9D
+        or 0x20000 <= code <= 0x2A6DF
+        or 0x2A700 <= code <= 0x2B73F
+        or 0x2B740 <= code <= 0x2B81F
+        or 0x2B820 <= code <= 0x2CEAF
+        or 0x2CEB0 <= code <= 0x2EBEF
+        or 0x30000 <= code <= 0x3134F
+    )
+
+
+def _term_regex(term: str) -> str:
+    """Match ``term`` with ASCII whole-word edges and optional breaks inside CJK.
+
+    A side whose first or last character is an ASCII letter or digit must not
+    sit against another ASCII letter or digit (``Acme`` does not match
+    ``Acmes``). A CJK or other non-ASCII edge has no boundary, so ``星辰海``
+    matches inside ``星辰海医药有限公司``.
+
+    ``\\s*`` is inserted only between adjacent characters that include CJK, so
+    ``星\\n辰海`` matches and the hit text keeps the original break. A space
+    that is part of the term (an English phrase) matches any whitespace,
+    including a newline.
+    """
+    tokens: list[tuple[str, str | None]] = []
+    index = 0
+    while index < len(term):
+        if term[index].isspace():
+            while index < len(term) and term[index].isspace():
+                index += 1
+            tokens.append(("ws", None))
+            continue
+        tokens.append(("ch", term[index]))
+        index += 1
+    parts: list[str] = []
+    for position, (kind, ch) in enumerate(tokens):
+        if kind == "ws":
+            parts.append(r"\s+")
+            continue
+        if position > 0 and tokens[position - 1][0] == "ch":
+            previous = tokens[position - 1][1] or ""
+            if _is_cjk(previous) or _is_cjk(ch or ""):
+                parts.append(r"\s*")
+        parts.append(re.escape(ch or ""))
+    body = "".join(parts)
+    prefix = r"(?<![0-9A-Za-z])" if term and _is_ascii_alnum(term[0]) else ""
+    suffix = r"(?![0-9A-Za-z])" if term and _is_ascii_alnum(term[-1]) else ""
+    return prefix + body + suffix
+
+
+def _wordlist_regex(terms: list[str]) -> str | None:
+    usable = [term for term in terms if term and not term.isspace()]
+    if not usable:
+        return None
+    # Longer terms first so a prefix alternative does not consume a longer term.
+    ordered = sorted(usable, key=len, reverse=True)
+    return "|".join(f"(?:{_term_regex(term)})" for term in ordered)
+
+
 def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) -> "RedactionEngine":
     recognizers: list[PatternRecognizer] = []
     for rule in regex_rules:
@@ -126,7 +208,8 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
             )
         )
     for rule in wordlists:
-        if not rule.terms:
+        pattern = _wordlist_regex(rule.terms)
+        if pattern is None:
             continue
         flags = re.DOTALL | re.MULTILINE
         if not rule.case_sensitive:
@@ -135,7 +218,7 @@ def build_engine(regex_rules: list[RegexRule], wordlists: list[WordlistRule]) ->
             PatternRecognizer(
                 supported_entity=rule.category,
                 name=rule.category,
-                deny_list=list(rule.terms),
+                patterns=[Pattern(name=rule.category, regex=pattern, score=1.0)],
                 global_regex_flags=flags,
             )
         )

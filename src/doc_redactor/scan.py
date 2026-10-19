@@ -605,8 +605,8 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                 usable.append((x0, y0, x1, y1))
                 placed = True
             if usable:
-                target = max(usable, key=lambda item: (item[2] - item[0]) * (item[3] - item[1]))
-                fills.append((hit.page, target, label(hit.category)))
+                # First line of this hit. A later, larger repeat must not steal the label.
+                fills.append((hit.page, usable[0], label(hit.category)))
         if placed:
             for page in document:
                 page.apply_redactions(images=0, graphics=0, text=0)

@@ -89,22 +89,13 @@ def _redact_page_text(page, engine: RedactionEngine) -> dict[str, int]:
     fills: list[tuple[object, str]] = []
     placed = False
     for hit in hits:
-        rects = _search_hit(page, hit, textpage)
-        usable = []
-        for rect in rects:
-            if rect.is_empty or rect.width <= 0 or rect.height <= 0:
-                continue
-            # search_for is case-insensitive. Keep the rect only when the
-            # visible text still contains this hit's exact characters.
-            extracted = page.get_textbox(rect) or ""
-            if hit.text not in extracted:
-                continue
-            usable.append(rect)
+        usable = _hit_rects(page, hit, textpage)
         if not usable:
             continue
         for rect in usable:
             page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
-        fills.append((max(usable, key=_rect_area), engine.label(hit.category)))
+        # One placeholder per hit, on the first line of a cross-line match.
+        fills.append((usable[0], engine.label(hit.category)))
         matched.append(hit)
         placed = True
     if placed:
@@ -113,10 +104,6 @@ def _redact_page_text(page, engine: RedactionEngine) -> dict[str, int]:
         for rect, label in fills:
             fill_placeholder(page, rect, label)
     return _category_counts(matched)
-
-
-def _rect_area(rect) -> float:
-    return float(rect.width) * float(rect.height)
 
 
 def fill_placeholder(page, rect, text: str, *, min_size: float = MIN_PLACEHOLDER_SIZE) -> None:
@@ -164,30 +151,105 @@ def _category_counts(hits: list[Hit]) -> dict[str, int]:
 
 
 def find_hit_rects(page, hit: Hit, textpage) -> list[tuple[float, float, float, float]]:
-    rects = []
-    for rect in _search_hit(page, hit, textpage):
-        if rect.is_empty or rect.width <= 0 or rect.height <= 0:
-            continue
-        extracted = page.get_textbox(rect) or ""
-        if hit.text not in extracted:
-            continue
-        rects.append((float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)))
-    return rects
+    """Rectangles for this hit only, one per text line it covers.
+
+    ``page.search_for`` returns every occurrence of the string on the page, so
+    each hit of a repeated word used to carry every box. Offsets into the same
+    textpage's plain text select this hit's glyphs. A cross-line hit returns
+    one rectangle per line, including a one-character fragment.
+
+    Those boxes are already in the space ``add_redact_annot`` and
+    ``insert_textbox`` use. Extraction and redaction annotations temporarily
+    clear ``/Rotate``, and ``insert_textbox`` adds the CropBox origin itself.
+    Multiplying by ``page.derotation_matrix`` would move the placeholder off
+    the deleted glyphs.
+    """
+    return [
+        (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+        for rect in _hit_rects(page, hit, textpage)
+    ]
 
 
-def _search_hit(page, hit: Hit, textpage) -> list:
-    pieces = [hit.text]
-    if "\n" in hit.text:
-        pieces = [part.strip() for part in hit.text.splitlines() if part.strip()]
-    rects = []
-    for piece in pieces:
-        if len(piece) < 2:
+def _hit_rects(page, hit: Hit, textpage) -> list:
+    if textpage is None:
+        textpage = page.get_textpage(flags=pymupdf.TEXTFLAGS_TEXT)
+    text = page.get_text("text", textpage=textpage)
+    raw = page.get_text("rawdict", textpage=textpage)
+    entries = _align_chars(text, raw)
+    return _rects_covering(entries, hit.start, hit.end)
+
+
+def _raw_lines(raw: dict):
+    for block in raw.get("blocks") or []:
+        if block.get("type", 0) != 0:
             continue
-        found = page.search_for(piece, textpage=textpage)
-        if not found:
-            found = page.search_for(piece)
-        rects.extend(found)
-    return rects
+        for line in block.get("lines") or []:
+            pieces = []
+            for span in line.get("spans") or []:
+                for ch in span.get("chars") or []:
+                    value = ch.get("c") or ""
+                    bbox = ch.get("bbox")
+                    if not value or not bbox or len(bbox) < 4:
+                        continue
+                    pieces.append(
+                        (
+                            value,
+                            (
+                                float(bbox[0]),
+                                float(bbox[1]),
+                                float(bbox[2]),
+                                float(bbox[3]),
+                            ),
+                        )
+                    )
+            yield pieces
+
+
+def _align_chars(text: str, raw: dict) -> list[tuple[int, int, tuple[float, float, float, float], int]]:
+    """Map plain-text offsets to glyph boxes from the same textpage.
+
+    ``get_text("text")`` inserts a newline after each line. Those newlines are
+    not glyphs. Returns an empty list when the two views cannot be aligned,
+    so a hit is skipped instead of painted on the wrong occurrence.
+    """
+    entries: list[tuple[int, int, tuple[float, float, float, float], int]] = []
+    pos = 0
+    line_id = 0
+    for pieces in _raw_lines(raw):
+        for value, bbox in pieces:
+            if not text.startswith(value, pos):
+                return []
+            entries.append((pos, pos + len(value), bbox, line_id))
+            pos += len(value)
+        if pieces and not str(pieces[-1][0]).endswith("\n") and pos < len(text) and text[pos] == "\n":
+            pos += 1
+        line_id += 1
+    if pos != len(text):
+        return []
+    return entries
+
+
+def _rects_covering(entries, start: int, end: int) -> list:
+    if end <= start:
+        return []
+    grouped = []
+    current_line = None
+    current = None
+    for cstart, cend, bbox, line_id in entries:
+        if cend <= start or cstart >= end:
+            continue
+        rect = pymupdf.Rect(bbox)
+        rect.normalize()
+        if current is None or current_line != line_id:
+            if current is not None and not current.is_empty:
+                grouped.append(current)
+            current = rect
+            current_line = line_id
+        else:
+            current |= rect
+    if current is not None and not current.is_empty:
+        grouped.append(current)
+    return [rect for rect in grouped if rect.width > 0 and rect.height > 0]
 
 
 def _redact_images(document, engine: RedactionEngine) -> dict[str, int]:
