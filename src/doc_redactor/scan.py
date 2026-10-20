@@ -820,7 +820,8 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
         try:
             found = inline_images(page)
         except WriteBlocked as exc:
-            raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=image_index + 1)) from exc
+            index = image_index + getattr(exc, "inline_position", 0) + 1
+            raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=index)) from exc
         for inline_index, (info, image) in enumerate(found):
             image_index += 1
             entities = _ocr_entities(image, engine, page.number + 1, image_index)

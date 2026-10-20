@@ -80,3 +80,34 @@ def test_good_images_still_scan(tmp_path: Path):
     document.save(pdf)
     scan = scan_path(pdf, _engine())
     assert scan.blocked_reason is None
+
+
+def _inline_image_ops(x: int, y: int) -> bytes:
+    # 2×2 gray inline image, upright, 100×50 pt.
+    return f"q 100 0 0 50 {x} {y} cm BI /W 2 /H 2 /CS /G /BPC 8 ID ".encode() + b"\x00\xff\xff\x00" + b" EI Q\n"
+
+
+def test_second_inline_image_failing_names_its_own_index(tmp_path: Path, monkeypatch):
+    pdf = tmp_path / "inline.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 60), "Acme Pharma")
+    xref = page.get_contents()[0]
+    document.update_stream(xref, document.xref_stream(xref) + b"\n" + _inline_image_ops(72, 600) + _inline_image_ops(72, 400))
+    document.save(pdf)
+
+    from doc_redactor import pdf_redactor
+
+    real_open = pdf_redactor.Image.open
+    calls = {"n": 0}
+
+    def flaky_open(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("fake broken inline image")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(pdf_redactor.Image, "open", flaky_open)
+    monkeypatch.setattr(scan_module, "analyze_image_entities", lambda *_a, **_k: [])
+    scan = scan_path(pdf, _engine())
+    assert scan.blocked_reason == "第 1 页图 2 打不开，没法检查，未写出"
