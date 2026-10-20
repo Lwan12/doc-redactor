@@ -23,8 +23,11 @@ from doc_redactor.image_redactor import (
     MSG_INLINE_FAILED,
     MSG_NO_OCR,
     WriteBlocked,
+    PdfImageOcrFailed,
     analyze_image_entities,
-    redact_image,
+    checked_pdf_image_entities,
+    paint_image_boxes,
+    skipped_pdf_image,
 )
 from doc_redactor import tesseract_cmd
 
@@ -86,12 +89,16 @@ class RedactionCounts(dict):
     free of the extra tallies.
     """
 
-    def __init__(self, counts: dict | None = None, short_count: int = 0, blank_count: int = 0):
+    def __init__(
+        self, counts: dict | None = None, short_count: int = 0, blank_count: int = 0,
+        skipped_images: list[dict] | None = None,
+    ):
         super().__init__()
         if counts:
             self.update(counts)
         self.short_count = int(short_count)
         self.blank_count = int(blank_count)
+        self.skipped_images = list(skipped_images or [])
 
 
 @dataclass
@@ -578,7 +585,8 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCount
             raise WriteBlocked(reason)
         order = list(getattr(engine, "category_order", []) or [])
         stats = redact_text_placeholders(document, items, engine.label, order)
-        merge_counts(counts, _redact_images(document, engine))
+        image_counts = _redact_images(document, engine)
+        merge_counts(counts, image_counts)
         if stats.used:
             append_legend(document, legend_lines(stats.used))
         clear_pdf_hidden(document)
@@ -586,7 +594,7 @@ def redact_pdf(src: Path, dest: Path, engine: RedactionEngine) -> RedactionCount
         document.save(dest, garbage=4, clean=True)
     finally:
         document.close()
-    return RedactionCounts(counts, stats.short_count, stats.blank_count)
+    return RedactionCounts(counts, stats.short_count, stats.blank_count, image_counts.skipped_images)
 
 
 _INFO_FIELDS = ("title", "author", "subject", "keywords", "creator", "producer")
@@ -1337,35 +1345,63 @@ def _rects_covering(entries, start: int, end: int) -> list:
     return [rect for rect in grouped if rect.width > 0 and rect.height > 0]
 
 
-def _redact_images(document, engine: RedactionEngine) -> dict[str, int]:
+def _redact_images(document, engine: RedactionEngine) -> RedactionCounts:
     counts: dict[str, int] = {}
     seen: set[int] = set()
+    skipped: list[dict] = []
+    skipped_xrefs: dict[int, int] = {}
+    image_index = 0
     for page in document:
         images = page.get_images(full=True) or []
         masks = {item[1] for item in images if len(item) > 1 and item[1]}
         for item in images:
             xref = item[0]
+            if xref in skipped_xrefs:
+                location = skipped_pdf_image(page.number + 1, skipped_xrefs[xref], f"pdfimg:{xref}")
+                if location not in skipped:
+                    skipped.append(location)
             if not xref or xref in seen or xref in masks:
                 continue
             seen.add(xref)
+            image_index += 1
             image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
-            redacted, image_counts = redact_image(image, engine)
-            if not image_counts:
+            try:
+                entities = checked_pdf_image_entities(
+                    image, engine, page.number + 1, image_index, analyze=analyze_image_entities
+                )
+            except PdfImageOcrFailed:
+                skipped.append(skipped_pdf_image(page.number + 1, image_index, f"pdfimg:{xref}"))
+                skipped_xrefs[xref] = image_index
                 continue
+            if not entities:
+                continue
+            # Painting/replacement errors still block the file.
+            redacted = paint_image_boxes(image, [box for entity in entities for box in entity["boxes"]])
             page.replace_image(xref, stream=_png_bytes(redacted))
-            merge_counts(counts, image_counts)
+            for entity in entities:
+                category = entity["category"]
+                counts[category] = counts.get(category, 0) + 1
     for page in document:
         jobs = []
-        for info, image in inline_images(page):
-            entities = analyze_image_entities(image, engine)
+        for inline_index, (info, image) in enumerate(inline_images(page)):
+            image_index += 1
+            try:
+                entities = checked_pdf_image_entities(
+                    image, engine, page.number + 1, image_index, analyze=analyze_image_entities
+                )
+            except PdfImageOcrFailed:
+                skipped.append(skipped_pdf_image(
+                    page.number + 1, image_index, f"pdfinline:{page.number}:{inline_index}"
+                ))
+                continue
             if not entities:
                 continue
             boxes = [box for entity in entities for box in entity["boxes"]]
             jobs.append((info, image.size, boxes))
             for entity in entities:
                 counts[entity["category"]] = counts.get(entity["category"], 0) + 1
-        paint_inline_images(page, jobs)
-    return counts
+        paint_inline_images(page, jobs, protected_rects=skipped_image_rects(page, skipped))
+    return RedactionCounts(counts, skipped_images=skipped)
 
 
 def pdf_xref_image(document, xref: int, smask: int = 0) -> Image.Image:
@@ -1486,7 +1522,24 @@ def inline_boxes_to_rects(info: dict, size: tuple[int, int], boxes) -> list[tupl
     return rects
 
 
-def paint_inline_images(page, jobs) -> None:
+def skipped_image_rects(page, skipped_images) -> list:
+    """Locate skipped pictures that an inline pixel edit must not touch."""
+    units = {item["unit"] for item in skipped_images if item["page"] == page.number + 1}
+    if not units:
+        return []
+    protected = []
+    inline_index = 0
+    for info in page.get_image_info(xrefs=True):
+        xref = info.get("xref", 0)
+        unit = f"pdfimg:{xref}" if xref else f"pdfinline:{page.number}:{inline_index}"
+        if not xref:
+            inline_index += 1
+        if unit in units:
+            protected.append(pymupdf.Rect(info["bbox"]))
+    return protected
+
+
+def paint_inline_images(page, jobs, *, protected_rects=()) -> None:
     """Burn boxes into inline images and check the pixels really changed.
 
     ``jobs`` is (image info, pixel size, pixel boxes). MuPDF blanks the
@@ -1501,6 +1554,9 @@ def paint_inline_images(page, jobs) -> None:
     for info, size, boxes in jobs:
         rects = inline_boxes_to_rects(info, size, boxes)
         for rect in rects:
+            if any(pymupdf.Rect(rect).intersects(area) for area in protected_rects):
+                # MuPDF would also burn an overlapping skipped picture.
+                raise WriteBlocked(MSG_INLINE_FAILED.format(n=1))
             page.add_redact_annot(pymupdf.Rect(rect), fill=(0, 0, 0), cross_out=False)
         placed.append((_inline_key(info), size, boxes))
     page.apply_redactions(

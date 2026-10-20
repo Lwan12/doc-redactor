@@ -46,7 +46,7 @@ from doc_redactor.gui.theme import (
 )
 from doc_redactor import header_footer as hf
 from doc_redactor.engine import redaction_label
-from doc_redactor.image_redactor import blocked_advice
+from doc_redactor.image_redactor import blocked_advice, partial_image_notice
 from doc_redactor.verify_output import is_final_failure
 from doc_redactor.pdf_redactor import (
     MSG_PDF_WIDTH,
@@ -172,6 +172,7 @@ class ResultView:
             child.destroy()
         fonts = app.fonts
         scans = app.scans
+        partial_scans = [s for s in scans if _has_skipped_images(s)]
         all_fail = bool(scans) and all(s.status == "fail" for s in scans)
         nohit_all = bool(scans) and all(s.status != "fail" and not _has_findings(s) for s in scans) and not any(
             s.status == "fail" for s in scans
@@ -189,6 +190,8 @@ class ResultView:
         row = tk.Frame(head, bg=BG_SURFACE)
         row.pack(fill="x", padx=12, pady=4)
         title = "已写出" if app.written else "结果预览，写出前可以逐处取消"
+        if partial_scans:
+            title = ("已写出 · " if app.written else "") + MSG_PARTIAL_IMAGES
         tk.Label(row, text=title, bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(side="right")
         StepBar(row, app).frame.pack(side="left", fill="x", expand=True)
 
@@ -222,15 +225,30 @@ class ResultView:
                 fg="#cb2f39",
                 font=fonts["small"],
             ).pack(fill="x", padx=12, pady=6)
+        if partial_scans and not app.written:
+            warning = tk.Frame(self.frame, bg=WARN_BG)
+            warning.pack(fill="x")
+            _wrap_label(
+                warning,
+                f"⚠ {len(partial_scans)} 个文件有图片未检查。{MSG_PARTIAL_IMAGES}。未检查的图片会保留原样，具体位置见文件预览。",
+                bg=WARN_BG,
+                fg=WARN,
+                font=fonts["small"],
+            ).pack(fill="x", padx=12, pady=6)
         if app.written:
-            ok = tk.Frame(self.frame, bg="#e8f5ed")
+            bg, fg = (WARN_BG, WARN) if partial_scans else ("#e8f5ed", "#008035")
+            ok = tk.Frame(self.frame, bg=bg)
             ok.pack(fill="x")
             tk.Label(
                 ok,
-                text="✓ " + MSG_WRITTEN_TOP.format(n=app.written_file_count())
-                + ("已删除 " + str(app.hf_written_count()) + " 个文件的页眉页脚。" if app.hf_written_count() else ""),
-                bg="#e8f5ed",
-                fg="#008035",
+                text=(
+                    _partial_batch_notice(scans, app)
+                    if partial_scans
+                    else "✓ " + MSG_WRITTEN_TOP.format(n=app.written_file_count())
+                    + ("已删除 " + str(app.hf_written_count()) + " 个文件的页眉页脚。" if app.hf_written_count() else "")
+                ),
+                bg=bg,
+                fg=fg,
                 font=fonts["small"],
                 wraplength=920,
                 justify="left",
@@ -355,14 +373,15 @@ class ResultView:
         enabled = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
         cancelled_n = sum(len(s.visible_hits) - s.enabled_count() for s in scans if s.status != "fail")
         # Each file in exactly one bucket, same order as the file list's own
-        # status: 失败 (scan or write failed) > 没法检查 (blocked) > 有命中 > 无命中.
+        # status: 失败 > 没法检查 > 部分脱敏 > 有命中 > 无命中.
         # The buckets add up to 共 N (#51 M1 and the top-bar partition).
         buckets = [_top_bucket(s, self.app) for s in scans]
         n_fail = buckets.count("fail")
         n_unchecked = buckets.count("unchecked")
+        n_partial = buckets.count("partial")
         n_hit = buckets.count("hit")
         n_no = buckets.count("no")
-        n_hf_only = sum(1 for s in scans if _hf_only_write(s, self.app))
+        n_hf_only = sum(1 for s in scans if _hf_only_write(s, self.app) and not _has_skipped_images(s))
         # n_fail equals failed_file_count (bottom bar): scan failures plus files not written.
         tk.Label(inner, text=f"共 {len(scans)} 个文件", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
         verb = "已替换" if self.app.written else "将替换"
@@ -392,6 +411,10 @@ class ResultView:
             tk.Label(inner, text=f"    ⚠ 没法检查 {n_unchecked}", bg=BG_SURFACE, fg="#c04700", font=fonts["small"]).pack(
                 side="left"
             )
+        if n_partial:
+            tk.Label(
+                inner, text=f"    ⚠ 部分脱敏 {n_partial}", bg=BG_SURFACE, fg=WARN, font=fonts["small"]
+            ).pack(side="left")
         tk.Label(inner, text=f"    ✕ 失败 {n_fail}", bg=BG_SURFACE, fg="#cb2f39", font=fonts["small"]).pack(side="left")
         for part, tone in hf_text.top_parts(scans, self.app.remove_hf, self.app.written):
             tk.Label(
@@ -439,12 +462,17 @@ class ResultView:
         tree.tag_configure("no", foreground="#6c6c6c")
         tree.tag_configure("warn", foreground="#c04700")
         total = writable_hit_total(scans, written=self.app.written, write_errors=self.app.write_errors)
-        all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=("ok",))
+        all_tag = "warn" if any(_has_skipped_images(s) for s in scans) else "ok"
+        all_id = tree.insert("", "end", values=("▤ 全部文件", total), tags=(all_tag,))
         ids = [all_id]
         hf_rows: dict[str, int] = {}
         for index, scan in enumerate(scans):
             kind, status_text, tag = _scan_status(scan, self.app)
             icon, text, _ = status_style(kind)
+            if kind == "partial":
+                icon, text = "⚠", "部分脱敏"
+                if not scan.will_write() or (self.app.written and not _partial_written(scan, self.app)):
+                    text += "，未写出"
             if kind == "unlocated":
                 text = status_text
             # A blocked or refused file writes nothing, so its row adds nothing
@@ -456,7 +484,7 @@ class ResultView:
             label = f"{icon} {scan.path.name}"
             if kind in {"skipped", "unlocated", "blocked"}:
                 label = f"{icon} {scan.path.name}  {text}"
-            elif kind in {"many", "nowrite", "nohit_unwritten"}:
+            elif kind in {"many", "nowrite", "nohit_unwritten", "partial"}:
                 label = f"{icon} {text}  {scan.path.name}"
             item = tree.insert("", "end", values=(label, count), tags=(tag,))
             ids.append(item)
@@ -614,7 +642,25 @@ class ResultView:
             title_row, text=_type_name(scan.kind), bg=BG_INSET, fg=INK2, font=fonts["small"], relief="solid", bd=1
         ).pack(side="left", pady=(4, 0))
         blocked = _blocked_reason(scan)
-        has_prev = scan.status != "fail" and bool(scan.hits) and not blocked
+        has_prev = scan.status != "fail" and bool(scan.hits or _has_skipped_images(scan)) and not blocked
+        # Keep the detailed image list scrollable, so a long PDF cannot push
+        # the document preview and export controls out of the window.
+        partial_notice = _partial_file_notice(scan, self.app) if not blocked else ""
+        if partial_notice:
+            warning = tk.Frame(head, bg=WARN_BG)
+            warning.pack(fill="x", padx=4, pady=(2, 0))
+            scroll = ttk.Scrollbar(warning, orient="vertical")
+            scroll.pack(side="right", fill="y")
+            detail = tk.Text(
+                warning, height=3, width=1, wrap="word", relief="flat", bd=0,
+                padx=4, pady=3, font=fonts["small"], bg=WARN_BG, fg=WARN,
+                yscrollcommand=scroll.set,
+            )
+            detail.partial_image_warning = True
+            detail.insert("1.0", partial_notice)
+            detail.configure(state="disabled")
+            detail.pack(fill="x")
+            scroll.configure(command=detail.yview)
         notice = "" if blocked else _file_notice(scan, self.app)
         if notice:
             _wrap_label(head, notice, bg=BG_INSET, fg=INK, font=fonts["small"]).pack(fill="x", padx=8, pady=(1, 0))
@@ -687,7 +733,9 @@ class ResultView:
                 fonts,
             )
             return
-        if not scan.hits:
+        if not scan.hits and (
+            not _has_skipped_images(scan) or int(getattr(scan, "unlocated_count", 0) or 0) > 0
+        ):
             body.pack(fill="both", expand=True)
             unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
             if unlocated > 0:
@@ -1465,6 +1513,13 @@ class ResultView:
         failures = app.write_failure_rows()
         n_failed = failed_file_count(scans, app.write_errors)
         path = app.output_label()
+        has_partial = any(_has_skipped_images(s) for s in scans)
+        if has_partial:
+            _wrap_label(
+                inner,
+                _partial_batch_notice(scans, app) if app.written else f"⚠ {MSG_PARTIAL_IMAGES}。未检查的图片保留原样。",
+                bg=BG_SURFACE, fg=WARN, font=fonts["small"],
+            ).pack(side="top", fill="x", pady=(0, 4))
         if any(scan.kind == KIND_PDF for scan in scans):
             tk.Label(
                 inner,
@@ -1488,7 +1543,7 @@ class ResultView:
                 font=fonts["small"],
                 anchor="w",
             ).pack(fill="x")
-        elif app.written:
+        elif app.written and not has_partial:
             tk.Label(
                 left,
                 text=f"✓ 已写出 {n_files} 个脱敏文件，共替换 {enabled} 处",
@@ -1497,7 +1552,7 @@ class ResultView:
                 font=fonts["small"],
                 anchor="w",
             ).pack(fill="x")
-        else:
+        elif not app.written:
             # Wrap to the room the buttons leave: a fixed 480px ran under them
             # at 960px and cut the last character (#28 r2 m5).
             _wrap_label(left, _output_hint(scans, app), bg=BG_SURFACE, fg=INK2, font=fonts["small"]).pack(fill="x")
@@ -1519,7 +1574,11 @@ class ResultView:
         can_write = write_allowed(has_fresh_scans=bool(scans)) and (enabled > 0 or n_files > 0) and not all_fail
         ttk.Button(
             buttons,
-            text=f"写出 {n_files} 个脱敏文件（替换 {enabled} 处）",
+            text=(
+                f"写出 {n_files} 个文件（含部分脱敏）"
+                if has_partial
+                else f"写出 {n_files} 个脱敏文件（替换 {enabled} 处）"
+            ),
             style="Primary.TButton",
             command=app.write_files,
             state=("normal" if can_write else "disabled"),
@@ -1656,6 +1715,7 @@ def counts_toward_write(scan, *, written: bool, write_errors: dict) -> bool:
 
 MSG_UNWRITTEN = "未写出"
 MSG_BLOCKED_TITLE = "有图片没法检查，未写出"
+MSG_PARTIAL_IMAGES = "部分脱敏，图片需人工检查"
 MSG_LOC_HEADER = "被替换的位置 {n}"
 MSG_LOC_HEADER_UNWRITTEN = "被替换的位置 {n}（另 {m} 处未写出）"
 MSG_MATRIX_UNWRITTEN = "{names} 未写出，不计入合计"
@@ -1796,6 +1856,43 @@ def _blocked_reason(scan) -> str:
     return str(getattr(scan, "blocked_reason", None) or "")
 
 
+def _has_skipped_images(scan) -> bool:
+    return scan.kind == KIND_PDF and bool(getattr(scan, "skipped_images", None))
+
+
+def _partial_written(scan, app) -> bool:
+    return bool(
+        app.written
+        and scan.will_write()
+        and counts_toward_write(scan, written=app.written, write_errors=app.write_errors)
+        and app.write_notes.get(str(scan.path)) != MSG_NO_HITS
+    )
+
+
+def _partial_file_notice(scan: FileScan, app) -> str:
+    if not _has_skipped_images(scan) or scan.status == "fail":
+        return ""
+    written = _partial_written(scan, app)
+    notice = partial_image_notice(scan.skipped_images, written=written)
+    if not written and (app.written or not scan.will_write()):
+        notice += " 这个文件未写出，原件不能当成脱敏件交出去。"
+    return notice
+
+
+def _partial_batch_notice(scans, app) -> str:
+    partial = [s for s in scans if _has_skipped_images(s)]
+    written = sum(1 for s in partial if _partial_written(s, app))
+    text = f"⚠ 已写出 {app.written_file_count()} 个文件"
+    if written:
+        text += f"，其中 {written} 个{MSG_PARTIAL_IMAGES}。"
+    else:
+        text += f"。{MSG_PARTIAL_IMAGES}。"
+    unwritten = len(partial) - written
+    if unwritten:
+        text += f"另有 {unwritten} 个图片未检查的文件未写出。"
+    return text + "未检查的图片保留原样，具体位置见文件预览。"
+
+
 def _comment_notice(scan: FileScan, app) -> str:
     """Word comments are deleted on write; say so."""
     count = int(getattr(scan, "comment_count", 0) or 0)
@@ -1822,7 +1919,7 @@ def _file_notice(scan: FileScan, app) -> str:
 
 
 def _has_findings(scan: FileScan) -> bool:
-    if scan.hits or _blocked_reason(scan):
+    if scan.hits or _blocked_reason(scan) or _has_skipped_images(scan):
         return True
     return int(getattr(scan, "unlocated_count", 0) or 0) > 0
 
@@ -1832,6 +1929,8 @@ def _top_bucket(scan: FileScan, app) -> str:
         return "fail"
     if _blocked_reason(scan):
         return "unchecked"
+    if _has_skipped_images(scan):
+        return "partial"
     return "hit" if _has_rule_hits(scan) else "no"
 
 
@@ -1870,7 +1969,10 @@ def _hf_only_write(scan: FileScan, app) -> bool:
     if scan.status == "fail" or scan.enabled_hits or not scan.hf_active:
         return False
     key = str(scan.path)
-    return key not in app.write_errors and key not in app.write_notes
+    return key not in app.write_errors and (
+        key not in app.write_notes
+        or (_has_skipped_images(scan) and app.write_notes[key] != MSG_NO_HITS)
+    )
 
 
 # Treeview cell padding: 128px keeps 「第 501 页 · 第 1 行」 (about 120px) whole.
@@ -1900,6 +2002,16 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
         return "fail", "失败", "bad"
     if str(scan.path) in app.write_errors:
         return "nowrite", "没写出", "bad"
+    if _has_skipped_images(scan):
+        if _blocked_reason(scan):
+            return "blocked", "没法检查", "warn"
+        unlocated = int(getattr(scan, "unlocated_count", 0) or 0)
+        if unlocated > 0:
+            return "unlocated", f"{unlocated} 处无法定位", "warn"
+        text = MSG_PARTIAL_IMAGES
+        if not scan.will_write() or (app.written and not _partial_written(scan, app)):
+            text += "，未写出"
+        return "partial", text, "warn"
     if app.write_notes.get(str(scan.path)) == MSG_NO_HITS:
         return "nohit_unwritten", MSG_NO_HITS, "no"
     if str(scan.path) in app.write_notes:

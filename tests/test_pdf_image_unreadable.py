@@ -72,7 +72,11 @@ def test_ocr_error_is_not_reported_as_unopenable(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(scan_module, "analyze_image_entities", boom)
     scan = scan_path(pdf, _engine())
-    assert scan.blocked_reason == "第 1 页图 1 识别文字时出错，没法检查，未写出"
+    assert scan.blocked_reason is None
+    assert len(scan.skipped_images) == 1
+    assert scan.skipped_images[0]["page"] == 1
+    assert scan.skipped_images[0]["index"] == 1
+    assert scan.skipped_images[0]["reason"] == "识别文字时出错，图片保留原样"
     assert not [hit for hit in scan.hits if hit.unit.startswith("pdfimg:")]
 
 

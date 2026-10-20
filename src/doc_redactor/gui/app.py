@@ -1066,6 +1066,16 @@ class App:
         new_paths = []
         for scan, item in zip(targets, results):
             key = str(scan.path)
+            # Writing can discover another image that cannot be OCR-checked.
+            # Keep that warning on the scan as well as the write result, so
+            # the preview and every subsequent refresh retain partial status.
+            skipped = getattr(item, "skipped_images", None)
+            if skipped:
+                previous = list(getattr(scan, "skipped_images", []) or [])
+                for image in skipped:
+                    if image not in previous:
+                        previous.append(dict(image))
+                scan.skipped_images = previous
             if is_write_failure(scan, item):
                 self.write_errors[key] = item.error or "没写出"
                 self.write_notes.pop(key, None)

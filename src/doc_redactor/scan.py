@@ -32,6 +32,10 @@ from doc_redactor.image_redactor import (
     is_embedded_raster_suffix,
     is_raster_suffix,
     paint_image_boxes,
+    PdfImageOcrFailed,
+    checked_pdf_image_entities,
+    skipped_pdf_image,
+    write_partial_warning,
 )
 from doc_redactor.pdf_redactor import (
     MSG_UNLOCATED,
@@ -46,6 +50,7 @@ from doc_redactor.pdf_redactor import (
     legend_lines,
     page_textpage,
     paint_inline_images,
+    skipped_image_rects,
     pdf_image_block_reason,
     pdf_xref_image,
     prepare_pdf,
@@ -56,7 +61,6 @@ from doc_redactor.image_redactor import (
     MSG_BAD_IMAGE_AT,
     MSG_INLINE_FAILED,
     MSG_NO_OCR,
-    MSG_OCR_FAILED_AT,
 )
 from doc_redactor.tesseract_cmd import require_tesseract
 from doc_redactor.verify_output import check_written, count_leftovers
@@ -163,6 +167,8 @@ class FileScan:
     # Why this file must not be written (an image that cannot be checked).
     # Counts only, never source text. Set at scan time; blocks the write.
     blocked_reason: str | None = None
+    # Decoded PDF pictures whose OCR failed, retained unchanged in a partial export.
+    skipped_images: list[dict] = field(default_factory=list)
     # Word comments found in the file. The write deletes them all.
     comment_count: int = 0
     # 「去掉页眉页脚」. Empty route: the option was off at scan time (or image).
@@ -276,6 +282,7 @@ class WriteResult:
     short_count: int = 0
     blank_count: int = 0
     hf_removed: bool = False
+    skipped_images: list[dict] = field(default_factory=list)
 
 
 def set_file_hf_confirmed(scan: FileScan, value: bool, *, written: bool = False) -> bool:
@@ -391,8 +398,9 @@ def scan_paths(
     return results
 
 
-def destination_for(path: Path, outdir: Path) -> Path:
-    return Path(outdir) / f"{path.stem}.redacted{path.suffix}"
+def destination_for(path: Path, outdir: Path, *, partial: bool = False) -> Path:
+    marker = "partial-redacted" if partial else "redacted"
+    return Path(outdir) / f"{path.stem}.{marker}{path.suffix}"
 
 
 def report_for(path: Path, outdir: Path) -> Path:
@@ -452,12 +460,15 @@ def write_scans(
             note = MSG_NO_HITS if not scan.hits else None
             written.append(WriteResult(path=scan.path, dest=None, report=None, counts={}, skipped=True, note=note))
             continue
-        dest = destination_for(scan.path, destination)
+        dest = destination_for(scan.path, destination, partial=bool(scan.skipped_images))
         if dest.exists() and not overwrite:
             if sequence:
                 dest = sequenced_path(dest)
             else:
-                report_path = report_for(scan.path, destination)
+                report_path = (
+                    dest.with_name(f"{dest.stem}.report.json")
+                    if scan.skipped_images else report_for(scan.path, destination)
+                )
                 written.append(
                     WriteResult(
                         path=scan.path,
@@ -513,7 +524,18 @@ def write_scans(
             report_path = destination / f"{scan.path.stem}.report.json"
         else:
             report_path = dest.with_name(f"{dest.stem}.report.json")
-        write_report(report_path, counts)
+        try:
+            write_report(report_path, counts)
+            write_partial_warning(dest, scan.skipped_images)
+        except OSError as exc:
+            # Never advertise a partial export whose required warning was not saved.
+            dest.unlink(missing_ok=True)
+            report_path.unlink(missing_ok=True)
+            written.append(WriteResult(
+                path=scan.path, dest=None, report=None, counts={}, skipped=True,
+                error=output_dir_unwritable(exc),
+            ))
+            continue
         written.append(
             WriteResult(
                 path=scan.path,
@@ -523,6 +545,7 @@ def write_scans(
                 short_count=int(getattr(counts, "short_count", 0) or 0),
                 blank_count=int(getattr(counts, "blank_count", 0) or 0),
                 hf_removed=scan.hf_active,
+                skipped_images=list(scan.skipped_images),
             )
         )
     return written
@@ -598,7 +621,7 @@ def session_totals(scans: list[FileScan], *, enabled_only: bool = True) -> tuple
 def _finish(scan: FileScan) -> FileScan:
     if scan.status == "fail":
         return scan
-    if not scan.hits and scan.unlocated_count <= 0 and not scan.blocked_reason and not scan.hf_found:
+    if not scan.hits and scan.unlocated_count <= 0 and not scan.blocked_reason and not scan.hf_found and not scan.skipped_images:
         scan.status = "nohit"
     scan.too_many = too_many_file_hits(len(scan.hits))
     return scan
@@ -787,12 +810,17 @@ def _union(rects):
 
 def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> None:
     seen: set[int] = set()
+    skipped_xrefs: dict[int, int] = {}
     image_index = 0
     for page in document:
         images = page.get_images(full=True) or []
         masks = {item[1] for item in images if len(item) > 1 and item[1]}
         for item in images:
             xref = item[0]
+            if xref in skipped_xrefs:
+                location = skipped_pdf_image(page.number + 1, skipped_xrefs[xref], f"pdfimg:{xref}")
+                if location not in scan.skipped_images:
+                    scan.skipped_images.append(location)
             if not xref or xref in seen or xref in masks:
                 continue
             seen.add(xref)
@@ -801,7 +829,12 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                 image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
             except Exception as exc:
                 raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=image_index)) from exc
-            entities = _ocr_entities(image, engine, page.number + 1, image_index)
+            try:
+                entities = _ocr_entities(image, engine, page.number + 1, image_index)
+            except PdfImageOcrFailed:
+                scan.skipped_images.append(skipped_pdf_image(page.number + 1, image_index, f"pdfimg:{xref}"))
+                skipped_xrefs[xref] = image_index
+                continue
             for entity in entities:
                 top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
                 scan.hits.append(
@@ -824,7 +857,13 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
             raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=index)) from exc
         for inline_index, (info, image) in enumerate(found):
             image_index += 1
-            entities = _ocr_entities(image, engine, page.number + 1, image_index)
+            try:
+                entities = _ocr_entities(image, engine, page.number + 1, image_index)
+            except PdfImageOcrFailed:
+                scan.skipped_images.append(skipped_pdf_image(
+                    page.number + 1, image_index, f"pdfinline:{page.number}:{inline_index}"
+                ))
+                continue
             for entity in entities:
                 top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
                 scan.hits.append(
@@ -844,15 +883,7 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
 
 def _ocr_entities(image, engine: RedactionEngine, page_no: int, index: int) -> list[dict]:
     """OCR one PDF image. An OCR error names the image instead of calling it unopenable."""
-    try:
-        return analyze_image_entities(image, engine)
-    except RuntimeError as exc:
-        if "Tesseract" in str(exc):
-            # Not installed, or its language data is missing: MSG_NO_OCR, with its own fix.
-            raise
-        raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc
-    except Exception as exc:
-        raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc
+    return checked_pdf_image_entities(image, engine, page_no, index, analyze=analyze_image_entities)
 
 
 def _blocked_message(exc: Exception) -> str:
@@ -1022,7 +1053,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                         raise WriteBlocked(MSG_INLINE_FAILED.format(n=len(by_index)))
                     info, image = found[index]
                     jobs.append((info, image.size, [box for hit in hits for box in hit.boxes]))
-                paint_inline_images(page, jobs)
+                paint_inline_images(page, jobs, protected_rects=skipped_image_rects(page, scan.skipped_images))
         if stats.used:
             append_legend(document, legend_lines(stats.used))
         clear_pdf_hidden(document)
@@ -1034,6 +1065,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
         scan.category_counts(enabled_only=True),
         short_count=stats.short_count,
         blank_count=stats.blank_count,
+        skipped_images=scan.skipped_images,
     )
 
 

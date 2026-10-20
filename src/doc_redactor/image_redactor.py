@@ -8,6 +8,7 @@ Language is chi_sim+eng. Hits are painted black.
 from __future__ import annotations
 
 import io
+import json
 import re
 from pathlib import Path
 
@@ -233,6 +234,51 @@ class WriteBlocked(ValueError):
     """
 
 
+class PdfImageOcrFailed(WriteBlocked):
+    """A decoded PDF picture could not be OCR-checked; it may be kept with a warning."""
+
+
+def checked_pdf_image_entities(image, engine, page: int, index: int, *, analyze=None) -> list[dict]:
+    """Only OCR-stage failures are eligible for a partial PDF export.
+
+    Decoding, painting and write verification remain outside this boundary.
+    Missing Tesseract or language data retains the existing blocking behavior.
+    """
+    try:
+        return (analyze or analyze_image_entities)(image, engine)
+    except Exception as exc:
+        if (isinstance(exc, RuntimeError) and "Tesseract" in str(exc)) or type(exc).__name__ == "TesseractNotFoundError":
+            raise
+        raise PdfImageOcrFailed(MSG_OCR_SKIPPED_AT.format(page=page, index=index)) from exc
+
+
+def skipped_pdf_image(page: int, index: int, unit: str) -> dict:
+    """Safe location metadata only. Never store the exception or recognized text."""
+    return {"page": page, "index": index, "unit": unit, "reason": "识别文字时出错，图片保留原样"}
+
+
+def partial_image_notice(skipped_images, written: bool = False) -> str:
+    if not skipped_images:
+        return ""
+    places = "、".join(f"第 {item['page']} 页图 {item['index']}" for item in skipped_images)
+    prefix = "已写出部分脱敏文件，图片需人工检查" if written else "部分脱敏，图片需人工检查"
+    return f"{prefix}：{places}。这些图片保留原样，可能仍含敏感信息"
+
+
+def write_partial_warning(dest: Path, skipped_images) -> Path | None:
+    """Persist the partial status beside an exported PDF, without source text."""
+    if not skipped_images:
+        return None
+    path = dest.with_suffix(".warnings.json")
+    payload = {
+        "status": "partial",
+        "message": partial_image_notice(skipped_images, written=True),
+        "skipped_images": list(skipped_images),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 # 没装 Tesseract：说清为什么不写出（图里的字查不了），和怎么办（MSG_NO_OCR_FIX）。
 MSG_NO_OCR = "有 {n} 张图片没法检查：没找到 Tesseract（识别图片文字的程序），查不了图里的字有没有敏感词，所以未写出"
 MSG_NO_OCR_FIX = "装好 Tesseract（带中文 chi_sim 和英文 eng 语言数据）后重新扫描；已经装了的，把环境变量 TESSERACT_CMD 设成 tesseract 程序的路径"
@@ -241,6 +287,7 @@ MSG_BAD_IMAGE = "有 {n} 张图片打不开，没法检查，未写出"
 # PDF 里的图按页和图号写明是哪一张；读图失败和识别文字出错分开说。
 MSG_BAD_IMAGE_AT = "第 {page} 页图 {index} 打不开，没法检查，未写出"
 MSG_OCR_FAILED_AT = "第 {page} 页图 {index} 识别文字时出错，没法检查，未写出"
+MSG_OCR_SKIPPED_AT = "第 {page} 页图 {index} 识别文字时出错，图片保留原样，需人工检查"
 MSG_VECTOR = "有 {n} 张矢量图（EMF、WMF 等），没法检查其中文字，未写出"
 MSG_INLINE_FAILED = "有 {n} 张内嵌图没能涂黑，未写出"
 
