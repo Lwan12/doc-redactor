@@ -1937,3 +1937,36 @@ def test_three_digit_page_location_visible_with_approx_row(gui):
     assert shown.startswith("第 501 页图 12"), shown
     assert gui.fonts["small"].measure(shown) <= tree.bbox("1", "loc")[2], shown
     assert loc_text in _hover_tip(gui, tree, "1", "loc")
+
+
+def test_three_digit_page_text_location_shown_in_full(gui):
+    """#54 M1：正文命中「第 501 页 · 第 1 行」在位置列里完整显示，不加「…」。编造数据。"""
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    gui.root.geometry("960x640+0+0")
+    hit = LocatedHit(
+        hit_id=1, category="申办方", text="Acme Pharma", location="第 501 页 · 第 1 行",
+        unit="page:500", boxes=[(10, 10, 100, 20)], page=500,
+    )
+    approx = LocatedHit(
+        hit_id=2, category="DRUG", text="菲蔡珠单抗", location="第 501 页图 1 · 图内 第 1 行",
+        unit="pdfimg:5", boxes=[(10, 40, 100, 20)], page=500, approx=True,
+    )
+    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit, approx], pages=[["Acme Pharma"]] * 501)
+    _show_one(gui, [scan], False)
+    assert str(_hit_table(gui.root).set("1", "loc")) == "第 501 页 · 第 1 行"
+
+
+def test_selected_hit_tip_closes_when_leaving_result_page(gui):
+    """#54 自审必改：选中后弹出的全文提示，离开结果页就关掉，不浮在别的界面上。编造数据。"""
+    gui.root.geometry("960x640+0+0")
+    scan = _approx_scan("第 1 页图 1 · 图内 第 1 行", LONG_SPACED)
+    _show_one(gui, [scan], False)
+    gui.jump_to_hit(1)
+    gui.show("result")
+    _settle(gui)
+    tip = getattr(gui, "_loc_tip", None)
+    assert tip is not None and tip.winfo_exists()
+    gui.show("main")
+    _settle(gui)
+    assert not tip.winfo_exists()

@@ -158,6 +158,7 @@ class ResultView:
         self.refresh()
 
     def hide(self) -> None:
+        self._hide_loc_tip()
         self.frame.pack_forget()
 
     def refresh(self) -> None:
@@ -1286,6 +1287,9 @@ class ResultView:
 
         loc.bind("<Motion>", on_loc_motion)
         loc.bind("<Leave>", lambda _e: self._hide_loc_tip())
+        # Leaving the page or scrolling must not leave a tip floating (self-review).
+        for seq in ("<Unmap>", "<Destroy>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
+            loc.bind(seq, lambda _e: self._hide_loc_tip(), add="+")
         current = str(self.app.current_hit) if self.app.current_hit is not None else None
         if current in tips:
             loc.after_idle(lambda: loc.winfo_exists() and self._show_loc_tip(loc, current, tips[current]))
@@ -1820,7 +1824,8 @@ def _hf_only_write(scan: FileScan, app) -> bool:
     return key not in app.write_errors and key not in app.write_notes
 
 
-CELL_PAD = 12
+# Treeview cell padding: 128px keeps 「第 501 页 · 第 1 行」 (about 120px) whole.
+CELL_PAD = 6
 
 
 def ellipsize(text: str, font, width: int) -> str:
