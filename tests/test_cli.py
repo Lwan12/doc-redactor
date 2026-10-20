@@ -45,6 +45,8 @@ def test_python_m_cli_module_runs_main():
     env = dict(os.environ)
     src = str(Path(__file__).resolve().parents[1] / "src")
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    # 帮助文字是中文；Windows CI 的管道默认 cp1252 编不了，这里只测入口有没有跑。
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, "-m", "doc_redactor.cli", "--help"],
         capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=120,
