@@ -10,6 +10,8 @@ import pymupdf
 import pytest
 from PIL import Image, ImageDraw
 
+from helpers import needs_tesseract
+
 from doc_redactor import scan as scan_module
 from doc_redactor.engine import RegexRule, build_engine
 from doc_redactor.scan import scan_path
@@ -47,6 +49,7 @@ def _pdf_with_broken_second_image(path: Path) -> None:
     document.save(path)
 
 
+@needs_tesseract
 def test_undecodable_image_names_page_and_index(tmp_path: Path):
     pdf = tmp_path / "broken.pdf"
     _pdf_with_broken_second_image(pdf)
@@ -54,6 +57,7 @@ def test_undecodable_image_names_page_and_index(tmp_path: Path):
     assert scan.blocked_reason == "第 2 页图 3 打不开，没法检查，未写出"
 
 
+@needs_tesseract
 def test_ocr_error_is_not_reported_as_unopenable(tmp_path: Path, monkeypatch):
     pdf = tmp_path / "ocr.pdf"
     document = pymupdf.open()
@@ -72,6 +76,7 @@ def test_ocr_error_is_not_reported_as_unopenable(tmp_path: Path, monkeypatch):
     assert not [hit for hit in scan.hits if hit.unit.startswith("pdfimg:")]
 
 
+@needs_tesseract
 def test_good_images_still_scan(tmp_path: Path):
     pdf = tmp_path / "good.pdf"
     document = pymupdf.open()
@@ -87,6 +92,7 @@ def _inline_image_ops(x: int, y: int) -> bytes:
     return f"q 100 0 0 50 {x} {y} cm BI /W 2 /H 2 /CS /G /BPC 8 ID ".encode() + b"\x00\xff\xff\x00" + b" EI Q\n"
 
 
+@needs_tesseract
 def test_second_inline_image_failing_names_its_own_index(tmp_path: Path, monkeypatch):
     pdf = tmp_path / "inline.pdf"
     document = pymupdf.open()
@@ -113,6 +119,7 @@ def test_second_inline_image_failing_names_its_own_index(tmp_path: Path, monkeyp
     assert scan.blocked_reason == "第 1 页图 2 打不开，没法检查，未写出"
 
 
+@needs_tesseract
 def test_missing_language_data_keeps_install_hint(tmp_path: Path, monkeypatch):
     from doc_redactor.image_redactor import MSG_NO_OCR
 
