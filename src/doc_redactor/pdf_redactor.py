@@ -1451,7 +1451,9 @@ def inline_images(page) -> list[tuple[dict, Image.Image]]:
             image = Image.open(io.BytesIO(match["image"]))
             image.load()
         except Exception as exc:
-            raise WriteBlocked(MSG_BAD_IMAGE.format(n=1)) from exc
+            blocked = WriteBlocked(MSG_BAD_IMAGE.format(n=1))
+            blocked.inline_position = len(found)  # inline images before it on this page
+            raise blocked from exc
         info["_stack"] = sum(1 for prev, _img in found if pymupdf.Rect(prev["bbox"]) == box)
         found.append((info, image))
     return found

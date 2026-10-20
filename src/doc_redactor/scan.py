@@ -51,7 +51,13 @@ from doc_redactor.pdf_redactor import (
     prepare_pdf,
     redact_text_placeholders,
 )
-from doc_redactor.image_redactor import MSG_BAD_IMAGE, MSG_INLINE_FAILED, MSG_NO_OCR
+from doc_redactor.image_redactor import (
+    MSG_BAD_IMAGE,
+    MSG_BAD_IMAGE_AT,
+    MSG_INLINE_FAILED,
+    MSG_NO_OCR,
+    MSG_OCR_FAILED_AT,
+)
 from doc_redactor.tesseract_cmd import require_tesseract
 from doc_redactor.verify_output import check_written, count_leftovers
 
@@ -791,8 +797,11 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                 continue
             seen.add(xref)
             image_index += 1
-            image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
-            entities = analyze_image_entities(image, engine)
+            try:
+                image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
+            except Exception as exc:
+                raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=image_index)) from exc
+            entities = _ocr_entities(image, engine, page.number + 1, image_index)
             for entity in entities:
                 top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
                 scan.hits.append(
@@ -808,9 +817,14 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                     )
                 )
     for page in document:
-        for inline_index, (info, image) in enumerate(inline_images(page)):
+        try:
+            found = inline_images(page)
+        except WriteBlocked as exc:
+            index = image_index + getattr(exc, "inline_position", 0) + 1
+            raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=index)) from exc
+        for inline_index, (info, image) in enumerate(found):
             image_index += 1
-            entities = analyze_image_entities(image, engine)
+            entities = _ocr_entities(image, engine, page.number + 1, image_index)
             for entity in entities:
                 top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
                 scan.hits.append(
@@ -826,6 +840,19 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                         page=page.number,
                     )
                 )
+
+
+def _ocr_entities(image, engine: RedactionEngine, page_no: int, index: int) -> list[dict]:
+    """OCR one PDF image. An OCR error names the image instead of calling it unopenable."""
+    try:
+        return analyze_image_entities(image, engine)
+    except RuntimeError as exc:
+        if "Tesseract" in str(exc):
+            # Not installed, or its language data is missing: MSG_NO_OCR, with its own fix.
+            raise
+        raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc
+    except Exception as exc:
+        raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc
 
 
 def _blocked_message(exc: Exception) -> str:
