@@ -187,3 +187,34 @@ jobs:
 
           & python (Join-Path $repo "tools\check_redacted_output.py") --output $out --tesseract $tess
           if ($LASTEXITCODE -ne 0) { throw "redaction check failed" }
+
+          # Reproduce installation paths containing Chinese characters and spaces.
+          # Do not supply an ASCII TESSDATA_PREFIX: the packaged app must select
+          # the language data beside its own executable through the normal path.
+          $unicodeRoot = Join-Path $apps "中文 路径"
+          New-Item -ItemType Directory -Path $unicodeRoot | Out-Null
+          Copy-Item -LiteralPath (Join-Path $apps "doc-redactor") -Destination $unicodeRoot -Recurse
+          $unicodeCli = Join-Path $unicodeRoot "doc-redactor\doc-redactor.exe"
+          $unicodeInputs = Join-Path $unicodeRoot "输入 文件"
+          New-Item -ItemType Directory -Path $unicodeInputs | Out-Null
+          foreach ($name in @("sample.docx", "sample.pdf", "sample.png")) {
+            Copy-Item -LiteralPath (Join-Path $repo "samples\$name") -Destination $unicodeInputs
+          }
+          $unicodeOut = Join-Path $unicodeRoot "输出 文件"
+          foreach ($name in @("TESSERACT_CMD", "TESSDATA_PREFIX")) {
+            if (Test-Path "Env:$name") { Remove-Item "Env:$name" }
+          }
+          & $unicodeCli @(
+            (Join-Path $unicodeInputs "sample.docx"),
+            (Join-Path $unicodeInputs "sample.pdf"),
+            (Join-Path $unicodeInputs "sample.png"),
+            "-r", (Join-Path $repo "rules.example.yaml"),
+            "-o", $unicodeOut
+          )
+          if ($LASTEXITCODE -ne 0) { throw "Chinese-path packaged CLI failed with exit $LASTEXITCODE" }
+          # This independent checker uses the original ASCII-path binary. It
+          # checks the outputs, not whether raw third-party Tesseract was fixed.
+          $checkOut = Join-Path $apps "out-unicode-install"
+          Copy-Item -LiteralPath $unicodeOut -Destination $checkOut -Recurse
+          & python (Join-Path $repo "tools\check_redacted_output.py") --output $checkOut --tesseract $tess
+          if ($LASTEXITCODE -ne 0) { throw "Chinese-path redaction check failed" }

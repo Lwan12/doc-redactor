@@ -35,6 +35,8 @@ Actions 产物里有 `doc-redactor-windows.zip` 和 `SHA256SUMS.txt`。zip 解�
 
 两个 exe 共用这一目录里的依赖。不要把 exe 单独拷走。图片脱敏用包内的 Tesseract，不用另外安装，也不用设置 `TESSERACT_CMD`。
 
+软件目录含中文时，程序会让每次 OCR 子进程从自己的 Tesseract 目录读取相对路径 `tessdata`，避免 Windows 版 Tesseract 转换中文语言数据路径时报错；不会改变整个程序的工作目录，也不需要修改 Windows 区域设置。这个兼容处理用于软件内的 OCR 调用，不改变单独运行 `tesseract.exe` 的行为。
+
 打包用 onedir，不用 onefile。onefile 每次启动都先把内容解压到临时目录，启动更慢，也更容易被杀毒软件拦住。onedir 把 exe 和依赖放在同一个目录里，启动更稳。
 
 没有签名的 exe 可能被杀毒软件或公司策略拦住。可以把解压后的目录交给 IT 加白名单；用 `SHA256SUMS.txt` 核对 zip 的 SHA256，确认它就是 Actions 上的那一份；也可以不跑 exe，按上面的安装一节用源码运行。
