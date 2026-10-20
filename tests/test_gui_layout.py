@@ -1374,8 +1374,8 @@ def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
     app.show("result")
     _settle(app)
     copy = _tree_values(app.root)
-    assert "近似：读成 Fictlzumab" in copy
-    assert copy.count("近似") == 1
+    assert copy.count("近似：读成") == 1
+    assert "近似：读成 Fictlzumab" in _hover_tip(app, _hit_table(app.root), "1", "text")
     payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
     assert "Fictlzumab" not in payload and "近似" not in payload
     app.hide_text = True
@@ -1383,6 +1383,7 @@ def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
     _settle(app)
     hidden = _tree_values(app.root)
     assert "近似" in hidden and "Fictlzumab" not in hidden
+    assert "Fictlzumab" not in _hover_tip(app, _hit_table(app.root), "1", "text")
 
 
 def test_zero_hit_file_written_for_header_footer_is_not_shown_as_unwritten(gui, tmp_path):
@@ -1742,7 +1743,10 @@ def test_inline_image_near_match_shows_approx_in_hit_table(gui, tmp_path, monkey
     scan = scan_mod.scan_path(_inline_pdf(tmp_path), build_engine([], [WordlistRule("药名", ["Fictizumab"], True)]))
     assert any(h.unit.startswith("pdfinline:") for h in scan.hits)
     _show_one(gui, [scan], False)
-    assert "近似：读成 Fictlzumab" in _tree_values(gui.root)
+    tree = _hit_table(gui.root)
+    row = tree.get_children()[0]
+    assert str(tree.set(row, "text")).startswith("近似：读成")
+    assert "近似：读成 Fictlzumab" in _hover_tip(gui, tree, row, "text")
 
 
 def test_top_bar_unchecked_count_matches_blocked_rows(gui, tmp_path):
@@ -1857,28 +1861,79 @@ def test_approx_hit_is_on_by_default_and_hidden_text_still_says_approx(gui):
     scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit], pages=[[""]])
     _show_one(gui, [scan], False)
     assert "☑" in _tree_values(gui.root)
-    assert "近似：读成 菲蔡珠单抗" in _tree_values(gui.root)
+    assert "近似：读成 菲蔡珠单抗" in _hover_tip(gui, _hit_table(gui.root), "1", "text")
     gui.hide_text = True
     gui.show("result")
     _settle(gui)
     hidden = _tree_values(gui.root)
     assert "近似" in hidden and "菲蔡珠单抗" not in hidden
+    assert "菲蔡珠单抗" not in _hover_tip(gui, _hit_table(gui.root), "1", "text")
 
 
-def test_approx_row_shows_whole_read_text_at_960(gui):
-    """方案 A：960 宽下「近似：读成 …」整句放得下，不被截断。编造数据。"""
-    import tkinter.font as tkfont
+def _hit_table(root):
     from tkinter import ttk
 
+    return next(n for n in _walk(root) if isinstance(n, ttk.Treeview) and "text" in tuple(n.cget("columns")))
+
+
+def _hover_tip(gui, tree, iid, column):
+    """Move the pointer onto a cell and return the tooltip text the user sees ("" if none)."""
+    x, y, w, h = tree.bbox(iid, column)
+    tree.event_generate("<Motion>", x=x + w // 2, y=y + h // 2)
+    _settle(gui)
+    tip = getattr(gui, "_loc_tip", None)
+    return tip.tip_text if tip is not None and tip.winfo_exists() else ""
+
+
+def _approx_scan(location, text):
     from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
 
-    gui.root.geometry("960x640+0+0")
     hit = LocatedHit(
-        hit_id=1, category="DRUG", text="菲蔡珠单抗", location="第 1 页图 1 · 图内 第 1 行",
-        unit="pdfimg:5", boxes=[(10, 10, 100, 20)], page=0, approx=True,
+        hit_id=1, category="DRUG", text=text, location=location,
+        unit="pdfimg:5", boxes=[(10, 10, 100, 20)], page=500, approx=True,
     )
-    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit], pages=[[""]])
+    return FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit], pages=[[""]] * 501)
+
+
+LONG_SPACED = "菲 蔡 珠 单 抗 注 射 液 冻 干 粉 针 剂"
+
+
+@pytest.mark.parametrize("size", ["960x640", "1100x720"])
+def test_long_spaced_approx_text_ellipsized_and_full_on_hover_and_select(gui, size):
+    """#54 M1：一字一空格的长串放不下时末尾「…」，悬停、选中都能看到全文；全文不进命中清单。编造数据。"""
+    import json
+
+    from doc_redactor.backpath import hit_list_payload
+
+    gui.root.geometry(f"{size}+0+0")
+    scan = _approx_scan("第 1 页图 1 · 图内 第 1 行", LONG_SPACED)
     _show_one(gui, [scan], False)
-    tree = next(n for n in _walk(gui.root) if isinstance(n, ttk.Treeview) and "text" in tuple(n.cget("columns")))
-    font = tkfont.nametofont(ttk.Style().lookup("Treeview", "font") or "TkDefaultFont")
-    assert int(tree.column("text", "width")) >= font.measure("近似：读成 菲蔡珠单抗")
+    tree = _hit_table(gui.root)
+    shown = str(tree.set("1", "text"))
+    font = gui.fonts["small"]
+    assert shown.startswith("近似：读成 菲") and shown.endswith("…"), shown
+    assert font.measure(shown) <= tree.bbox("1", "text")[2], shown
+    full = f"近似：读成 {LONG_SPACED}"
+    assert full in _hover_tip(gui, tree, "1", "text")
+    tree.event_generate("<Leave>")
+    _settle(gui)
+    gui.jump_to_hit(1)
+    gui.show("result")
+    _settle(gui)
+    tip = getattr(gui, "_loc_tip", None)
+    assert tip is not None and full in tip.tip_text
+    payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
+    assert "蔡" not in payload and "近似" not in payload
+
+
+def test_three_digit_page_location_visible_with_approx_row(gui):
+    """#54 M1：有近似行时位置列不再被压窄；三位数页码的页号、图号看得到，全文在悬停提示里。编造数据。"""
+    gui.root.geometry("960x640+0+0")
+    loc_text = "第 501 页图 12 · 图内 第 3 行"
+    scan = _approx_scan(loc_text, "菲蔡珠单抗")
+    _show_one(gui, [scan], False)
+    tree = _hit_table(gui.root)
+    shown = str(tree.set("1", "loc"))
+    assert shown.startswith("第 501 页图 12"), shown
+    assert gui.fonts["small"].measure(shown) <= tree.bbox("1", "loc")[2], shown
+    assert loc_text in _hover_tip(gui, tree, "1", "loc")

@@ -1232,16 +1232,7 @@ class ResultView:
                 spare = max(0, width - 32)
                 loc.column("on", width=width, minwidth=width)
                 loc.column("text", width=max(60, 126 - spare), minwidth=max(60, 124 - spare))
-        approx_rows = [h for h in hits if getattr(h, "approx", False)] if not self.app.hide_text else []
-        if approx_rows:
-            # 方案 A: the row must show the whole 「近似：读成 …」. Take the room
-            # from the location column (image hits all start 「第 N 页图 M」).
-            need = max(fonts["small"].measure(f"近似：读成 {h.text}") for h in approx_rows) + 16
-            cur = int(loc.column("text", "width"))
-            grow = max(0, min(need - cur, int(loc.column("loc", "width")) - 72))
-            if grow:
-                loc.column("loc", width=int(loc.column("loc", "width")) - grow, minwidth=72)
-                loc.column("text", width=cur + grow, minwidth=cur + grow)
+        tips: dict[str, str] = {}
         for hit in hits:
             if self.app.written and hit.enabled and hit.hit_id in unwritten_ids:
                 mark = MSG_UNWRITTEN
@@ -1252,11 +1243,17 @@ class ResultView:
                 # OCR read a look-alike; show what it read so the user can judge.
                 # Screen only: nothing here is written to disk.
                 content = f"近似：读成 {content}" if not self.app.hide_text else f"近似 {content}"
+            # #54 M1: a cell that does not fit ends in 「…」; the whole text is in
+            # a hover/selection tip. Screen only: never written anywhere.
+            shown_loc = ellipsize(hit.location, fonts["small"], int(loc.column("loc", "width")) - CELL_PAD)
+            shown = ellipsize(content, fonts["small"], int(loc.column("text", "width")) - CELL_PAD)
+            if shown_loc != hit.location or shown != content or getattr(hit, "approx", False):
+                tips[str(hit.hit_id)] = f"{hit.location}\n{content}"
             loc.insert(
                 "",
                 "end",
                 iid=str(hit.hit_id),
-                values=(mark, hit.location, marker_for(cat_index.get(hit.category, 0)), content),
+                values=(mark, shown_loc, marker_for(cat_index.get(hit.category, 0)), shown),
             )
         if self.app.current_hit is not None and loc.exists(str(self.app.current_hit)):
             loc.selection_set(str(self.app.current_hit))
@@ -1278,6 +1275,48 @@ class ResultView:
             self.refresh()
 
         loc.bind("<Button-1>", on_loc_click)
+
+        def on_loc_motion(event):
+            row = loc.identify_row(event.y)
+            if row in tips:
+                if getattr(self.app, "_loc_tip_row", None) != row:
+                    self._show_loc_tip(loc, row, tips[row])
+            else:
+                self._hide_loc_tip()
+
+        loc.bind("<Motion>", on_loc_motion)
+        loc.bind("<Leave>", lambda _e: self._hide_loc_tip())
+        current = str(self.app.current_hit) if self.app.current_hit is not None else None
+        if current in tips:
+            loc.after_idle(lambda: loc.winfo_exists() and self._show_loc_tip(loc, current, tips[current]))
+        else:
+            self._hide_loc_tip()
+
+    def _show_loc_tip(self, loc, row: str, text: str) -> None:
+        """Full location and content of one hit row, under that row. Screen only."""
+        self._hide_loc_tip()
+        tip = tk.Toplevel(loc)
+        tip.overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tk.Label(tip, text=text, bg="#1f2124", fg="#ffffff", font=self.app.fonts["small"], justify="left", padx=8, pady=4).pack()
+        tip.tip_text = text
+        box = loc.bbox(row) or (0, 0, 0, 0)
+        tip.geometry(f"+{loc.winfo_rootx() + 8}+{loc.winfo_rooty() + box[1] + box[3] + 2}")
+        self.app._loc_tip = tip
+        self.app._loc_tip_row = row
+
+    def _hide_loc_tip(self) -> None:
+        tip = getattr(self.app, "_loc_tip", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+        self.app._loc_tip = None
+        self.app._loc_tip_row = None
 
     def _fit_right_pane(self, parent, cat_box, tree, cat_scroll, loc, hf_rows=()) -> None:
         """Share the pane height so the location list keeps LOC_MIN_ROWS full rows.
@@ -1767,6 +1806,23 @@ def _hf_only_write(scan: FileScan, app) -> bool:
         return False
     key = str(scan.path)
     return key not in app.write_errors and key not in app.write_notes
+
+
+CELL_PAD = 12
+
+
+def ellipsize(text: str, font, width: int) -> str:
+    """``text`` cut to fit ``width`` pixels, ending in 「…」 when it was cut."""
+    if font.measure(text) <= width:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid].rstrip() + "…") <= width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + "…"
 
 
 def _hf_only_line(app) -> str:

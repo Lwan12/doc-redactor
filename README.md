@@ -114,6 +114,8 @@ python -m doc_redactor samples/sample.docx samples/sample.pdf samples/sample.png
 
 写出后还有一道复核：换几种读法（Word 的全部 XML 文字和属性、内层压缩包；PDF 的整页文字、链接、页标签、图层名和全部字符串对象）把输出再读一遍，任何一种读法还能读出命中，就删掉这个输出、提示「写出后复核：换一种读法仍能读出 N 处」，不放行。用户在界面上取消勾选的那几处不算。
 
+命令行的标准输出和错误输出一律是 UTF-8（英文 Windows 管道下中文也不会崩）。直接在控制台里看没问题；但 PowerShell 5.1 把输出存进变量或 `| Out-File`、cmd 里 `| findstr`，会按本机代码页解码，中文会显示成乱码。这时先设一下：PowerShell 里 `[Console]::OutputEncoding = [Text.UTF8Encoding]::new()`，cmd 里 `chcp 65001`。
+
 报告只写「类别 → 次数」，例如 `{"DRUG": 1, "PROJECT_ID": 2, "SPONSOR": 1}`。里面没有命中的原文。同一输出目录里，主文件名相同的输入会共用 `report.json` 这个名字，后写的会盖住先写的。
 
 图形界面：
