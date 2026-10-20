@@ -1882,7 +1882,14 @@ def _hover_tip(gui, tree, iid, column):
     tree.event_generate("<Motion>", x=x + w // 2, y=y + h // 2)
     _settle(gui)
     tip = getattr(gui, "_loc_tip", None)
-    return tip.tip_text if tip is not None and tip.winfo_exists() else ""
+    return _tip_label_text(tip)
+
+
+def _tip_label_text(tip) -> str:
+    """s7：读提示框里 Label 实际显示的文字，不读内部属性。"""
+    if tip is None or not tip.winfo_exists():
+        return ""
+    return "\n".join(str(w.cget("text")) for w in tip.winfo_children())
 
 
 def _approx_scan(location, text):
@@ -1921,7 +1928,7 @@ def test_long_spaced_approx_text_ellipsized_and_full_on_hover_and_select(gui, si
     gui.show("result")
     _settle(gui)
     tip = getattr(gui, "_loc_tip", None)
-    assert tip is not None and full in tip.tip_text
+    assert full in _tip_label_text(tip)
     payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
     assert "蔡" not in payload and "近似" not in payload
 
@@ -1970,3 +1977,62 @@ def test_selected_hit_tip_closes_when_leaving_result_page(gui):
     gui.show("main")
     _settle(gui)
     assert not tip.winfo_exists()
+
+
+
+def _many_approx(gui, n=12, location="第 1 页图 1 · 图内 第 1 行", text=LONG_SPACED):
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    hits = [
+        LocatedHit(hit_id=i, category="DRUG", text=text, location=location,
+                   unit="pdfimg:5", boxes=[(10, 10 * i, 100, 20)], page=0, approx=True)
+        for i in range(1, n + 1)
+    ]
+    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=hits, pages=[[""]])
+    gui.root.geometry("960x640+0+0")
+    _show_one(gui, [scan], False)
+    return _hit_table(gui.root)
+
+
+def test_tip_closes_when_window_loses_focus(gui):
+    """s1：主窗口失去焦点时提示关掉，不盖在别的程序上。编造数据。"""
+    tree = _many_approx(gui, n=1)
+    assert _hover_tip(gui, tree, "1", "text")
+    gui.root.event_generate("<FocusOut>")
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None)) == ""
+
+
+def test_tip_closes_when_table_scrolls_without_wheel(gui):
+    """s2：拖滚动条（yview_moveto / yview_scroll）后提示关掉。编造数据。"""
+    tree = _many_approx(gui)
+    assert _hover_tip(gui, tree, "1", "text")
+    tree.yview_moveto(1.0)
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None)) == ""
+
+
+def test_tip_stays_inside_window_right_edge(gui):
+    """s5：长位置加长串时提示框不超出窗口右边。编造数据。"""
+    long_loc = "第 501 页图 12 · 图内 第 3 行 · 附件二 扫描件 Acme Pharma 合同附页"
+    tree = _many_approx(gui, n=1, location=long_loc, text=LONG_SPACED + " " + LONG_SPACED)
+    assert _hover_tip(gui, tree, "1", "text")
+    tip = gui._loc_tip
+    tip.update_idletasks()
+    right = gui.root.winfo_rootx() + gui.root.winfo_width()
+    assert tip.winfo_rootx() + tip.winfo_reqwidth() <= right
+
+
+def test_tip_stays_when_pointer_moves_onto_it(gui):
+    """s3：鼠标从这一行移到提示上，提示不关。编造数据。"""
+    tree = _many_approx(gui, n=1)
+    assert _hover_tip(gui, tree, "1", "text")
+    tip = gui._loc_tip
+    tip.update_idletasks()
+    gui.root.event_generate(
+        "<Motion>", warp=True,
+        x=tip.winfo_rootx() - gui.root.winfo_rootx() + 10, y=tip.winfo_rooty() - gui.root.winfo_rooty() + 5,
+    )
+    tree.event_generate("<Leave>")
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None))

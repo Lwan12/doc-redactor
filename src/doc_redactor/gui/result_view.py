@@ -1286,7 +1286,25 @@ class ResultView:
                 self._hide_loc_tip()
 
         loc.bind("<Motion>", on_loc_motion)
-        loc.bind("<Leave>", lambda _e: self._hide_loc_tip())
+        def on_loc_leave(_event):
+            # s3: moving onto the tip itself keeps it; the tip closes on its own <Leave>.
+            tip = getattr(self.app, "_loc_tip", None)
+            if tip is not None and tip.winfo_exists():
+                px, py = loc.winfo_pointerxy()
+                if loc.winfo_containing(px, py) in (tip, *tip.winfo_children()):
+                    return
+            self._hide_loc_tip()
+
+        loc.bind("<Leave>", on_loc_leave)
+        scrolled = {"top": None}
+
+        def on_yscroll(first, _last):
+            # s2: any scroll (scrollbar drag, keys, yview_*) closes the tip.
+            if scrolled["top"] is not None and first != scrolled["top"]:
+                self._hide_loc_tip()
+            scrolled["top"] = first
+
+        loc.configure(yscrollcommand=on_yscroll)
         # Leaving the page or scrolling must not leave a tip floating (self-review).
         for seq in ("<Unmap>", "<Destroy>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
             loc.bind(seq, lambda _e: self._hide_loc_tip(), add="+")
@@ -1305,9 +1323,15 @@ class ResultView:
             tip.attributes("-topmost", True)
         except tk.TclError:
             pass
-        tk.Label(tip, text=text, bg="#1f2124", fg="#ffffff", font=self.app.fonts["small"], justify="left", padx=8, pady=4).pack()
-        tip.tip_text = text
+        tk.Label(tip, text=text, bg="#1f2124", fg="#ffffff", font=self.app.fonts["small"], justify="left", padx=8, pady=4,
+                 wraplength=max(200, loc.winfo_toplevel().winfo_width() - 40)).pack()
+        tip.bind("<Leave>", lambda _e: self._hide_loc_tip())
         self.app._loc_tip = tip
+        root = loc.winfo_toplevel()
+        if not getattr(root, "_loc_tip_focus_bound", False):
+            # s1: the app losing focus closes the tip so it never covers another program.
+            root.bind("<FocusOut>", lambda e: self._hide_loc_tip() if e.widget is root else None, add="+")
+            root._loc_tip_focus_bound = True
         self.app._loc_tip_row = row
 
         def place(tries: int = 0) -> None:
@@ -1320,7 +1344,11 @@ class ResultView:
                 tip.after(25, lambda: place(tries + 1))
                 return
             box = box or (0, 0, 0, 0)
-            tip.geometry(f"+{loc.winfo_rootx() + 8}+{loc.winfo_rooty() + box[1] + box[3] + 2}")
+            tip.update_idletasks()
+            # s5: keep the tip inside the window's right edge.
+            right = root.winfo_rootx() + root.winfo_width() - 4
+            x = max(root.winfo_rootx(), min(loc.winfo_rootx() + 8, right - tip.winfo_reqwidth()))
+            tip.geometry(f"+{x}+{loc.winfo_rooty() + box[1] + box[3] + 2}")
 
         place()
 
