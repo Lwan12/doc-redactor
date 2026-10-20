@@ -1374,8 +1374,8 @@ def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
     app.show("result")
     _settle(app)
     copy = _tree_values(app.root)
-    assert "近似 Fictlzumab" in copy
-    assert copy.count("近似") == 1
+    assert copy.count("近似：读成") == 1
+    assert "近似：读成 Fictlzumab" in _hover_tip(app, _hit_table(app.root), "1", "text")
     payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
     assert "Fictlzumab" not in payload and "近似" not in payload
     app.hide_text = True
@@ -1383,6 +1383,7 @@ def test_approximate_ocr_hit_is_marked_and_shows_what_ocr_read(gui):
     _settle(app)
     hidden = _tree_values(app.root)
     assert "近似" in hidden and "Fictlzumab" not in hidden
+    assert "Fictlzumab" not in _hover_tip(app, _hit_table(app.root), "1", "text")
 
 
 def test_zero_hit_file_written_for_header_footer_is_not_shown_as_unwritten(gui, tmp_path):
@@ -1742,7 +1743,10 @@ def test_inline_image_near_match_shows_approx_in_hit_table(gui, tmp_path, monkey
     scan = scan_mod.scan_path(_inline_pdf(tmp_path), build_engine([], [WordlistRule("药名", ["Fictizumab"], True)]))
     assert any(h.unit.startswith("pdfinline:") for h in scan.hits)
     _show_one(gui, [scan], False)
-    assert "近似 Fictlzumab" in _tree_values(gui.root)
+    tree = _hit_table(gui.root)
+    row = tree.get_children()[0]
+    assert str(tree.set(row, "text")).startswith("近似：读成")
+    assert "近似：读成 Fictlzumab" in _hover_tip(gui, tree, row, "text")
 
 
 def test_top_bar_unchecked_count_matches_blocked_rows(gui, tmp_path):
@@ -1789,7 +1793,8 @@ def test_top_bar_counts_each_file_once(gui, tmp_path):
     scans = [kept, wfail, nohit, blocked_hit]
 
     def counts():
-        copy = _visible_copy(gui.root)
+        # r2-3：只从顶栏取数，底栏的「失败 N 个」不算。
+        copy = _visible_copy(_top_counts_bar(gui.root))
         got = {}
         for name in ("有命中", "无命中", "没法检查", "失败"):
             m = _re.search(name + r" (\d+)", copy)
@@ -1810,3 +1815,245 @@ def test_top_bar_counts_each_file_once(gui, tmp_path):
     after = counts()
     assert sum(after.values()) == len(scans), after
     assert after["失败"] == 2 and after["有命中"] == 1, after
+
+
+def _top_counts_bar(root):
+    found = [node for node in _walk(root) if getattr(node, "top_counts", False)]
+    assert len(found) == 1, "顶栏计数控件应恰好一个"
+    return found[0]
+
+
+def test_nohit_unwritten_row_does_not_share_blocked_icon(gui):
+    """r2-1：「无命中，未写出」和「没法检查」不能用同一个符号。编造数据。"""
+    from doc_redactor.gui.result_view import MSG_NO_HITS
+    from doc_redactor.gui.theme import status_style
+    from doc_redactor.image_redactor import MSG_NO_OCR
+    from doc_redactor.scan import KIND_PDF, KIND_WORD, FileScan
+
+    reason = MSG_NO_OCR.format(n=1)
+    nohit = FileScan(path=Path("D.pdf"), kind=KIND_PDF, status="ok", hits=[], pages=[["plain"]])
+    blocked = FileScan(
+        path=Path("A.docx"), kind=KIND_WORD, status="ok", hits=[], paragraphs=["Acme Pharma"], blocked_reason=reason,
+    )
+    gui.scans = [nohit, blocked]
+    gui.selected = 0
+    gui.written = True
+    gui.write_errors = {str(blocked.path): reason}
+    gui.write_notes = {str(nohit.path): MSG_NO_HITS}
+    gui.preview_mode = "orig"
+    gui.hide_text = False
+    gui.show("result")
+    _settle(gui)
+    assert status_style("nohit_unwritten")[0] != status_style("blocked")[0]
+    line = next(r for r in _tree_values(gui.root).splitlines() if "无命中，未写出" in r)
+    assert "⚠" not in line, line
+
+
+def test_approx_hit_is_on_by_default_and_hidden_text_still_says_approx(gui):
+    """方案 A：近似命中默认勾选；隐藏原文时只标「近似」，不露读到的字。编造数据。"""
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    hit = LocatedHit(
+        hit_id=1, category="DRUG", text="菲蔡珠单抗", location="第 1 页图 1 · 图内 第 1 行",
+        unit="pdfimg:5", boxes=[(10, 10, 100, 20)], page=0, approx=True,
+    )
+    assert hit.enabled is True
+    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit], pages=[[""]])
+    _show_one(gui, [scan], False)
+    assert "☑" in _tree_values(gui.root)
+    assert "近似：读成 菲蔡珠单抗" in _hover_tip(gui, _hit_table(gui.root), "1", "text")
+    gui.hide_text = True
+    gui.show("result")
+    _settle(gui)
+    hidden = _tree_values(gui.root)
+    assert "近似" in hidden and "菲蔡珠单抗" not in hidden
+    assert "菲蔡珠单抗" not in _hover_tip(gui, _hit_table(gui.root), "1", "text")
+
+
+def _hit_table(root):
+    from tkinter import ttk
+
+    return next(n for n in _walk(root) if isinstance(n, ttk.Treeview) and "text" in tuple(n.cget("columns")))
+
+
+def _hover_tip(gui, tree, iid, column):
+    """Move the pointer onto a cell and return the tooltip text the user sees ("" if none)."""
+    x, y, w, h = tree.bbox(iid, column)
+    tree.event_generate("<Motion>", x=x + w // 2, y=y + h // 2)
+    _settle(gui)
+    tip = getattr(gui, "_loc_tip", None)
+    return _tip_label_text(tip)
+
+
+def _tip_label_text(tip) -> str:
+    """s7：读提示框里 Label 实际显示的文字，不读内部属性。"""
+    if tip is None or not tip.winfo_exists():
+        return ""
+    return "\n".join(str(w.cget("text")) for w in tip.winfo_children())
+
+
+def _approx_scan(location, text):
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    hit = LocatedHit(
+        hit_id=1, category="DRUG", text=text, location=location,
+        unit="pdfimg:5", boxes=[(10, 10, 100, 20)], page=500, approx=True,
+    )
+    return FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit], pages=[[""]] * 501)
+
+
+LONG_SPACED = "菲 蔡 珠 单 抗 注 射 液 冻 干 粉 针 剂"
+
+
+@pytest.mark.parametrize("size", ["960x640", "1100x720"])
+def test_long_spaced_approx_text_ellipsized_and_full_on_hover_and_select(gui, size):
+    """#54 M1：一字一空格的长串放不下时末尾「…」，悬停、选中都能看到全文；全文不进命中清单。编造数据。"""
+    import json
+
+    from doc_redactor.backpath import hit_list_payload
+
+    gui.root.geometry(f"{size}+0+0")
+    scan = _approx_scan("第 1 页图 1 · 图内 第 1 行", LONG_SPACED)
+    _show_one(gui, [scan], False)
+    tree = _hit_table(gui.root)
+    shown = str(tree.set("1", "text"))
+    font = gui.fonts["small"]
+    assert shown.startswith("近似：读成 菲") and shown.endswith("…"), shown
+    assert font.measure(shown) <= tree.bbox("1", "text")[2], shown
+    full = f"近似：读成 {LONG_SPACED}"
+    assert full in _hover_tip(gui, tree, "1", "text")
+    tree.event_generate("<Leave>")
+    _settle(gui)
+    gui.jump_to_hit(1)
+    gui.show("result")
+    _settle(gui)
+    tip = getattr(gui, "_loc_tip", None)
+    assert full in _tip_label_text(tip)
+    payload = json.dumps(hit_list_payload([scan]), ensure_ascii=False)
+    assert "蔡" not in payload and "近似" not in payload
+
+
+def test_three_digit_page_location_visible_with_approx_row(gui):
+    """#54 M1：有近似行时位置列不再被压窄；三位数页码的页号、图号看得到，全文在悬停提示里。编造数据。"""
+    gui.root.geometry("960x640+0+0")
+    loc_text = "第 501 页图 12 · 图内 第 3 行"
+    scan = _approx_scan(loc_text, "菲蔡珠单抗")
+    _show_one(gui, [scan], False)
+    tree = _hit_table(gui.root)
+    shown = str(tree.set("1", "loc"))
+    assert shown.startswith("第 501 页图 12"), shown
+    assert gui.fonts["small"].measure(shown) <= tree.bbox("1", "loc")[2], shown
+    assert loc_text in _hover_tip(gui, tree, "1", "loc")
+
+
+def test_three_digit_page_text_location_shown_in_full(gui):
+    """#54 M1：正文命中「第 501 页 · 第 1 行」在位置列里完整显示，不加「…」。编造数据。"""
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    gui.root.geometry("960x640+0+0")
+    hit = LocatedHit(
+        hit_id=1, category="申办方", text="Acme Pharma", location="第 501 页 · 第 1 行",
+        unit="page:500", boxes=[(10, 10, 100, 20)], page=500,
+    )
+    approx = LocatedHit(
+        hit_id=2, category="DRUG", text="菲蔡珠单抗", location="第 501 页图 1 · 图内 第 1 行",
+        unit="pdfimg:5", boxes=[(10, 40, 100, 20)], page=500, approx=True,
+    )
+    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=[hit, approx], pages=[["Acme Pharma"]] * 501)
+    _show_one(gui, [scan], False)
+    assert str(_hit_table(gui.root).set("1", "loc")) == "第 501 页 · 第 1 行"
+
+
+def test_selected_hit_tip_closes_when_leaving_result_page(gui):
+    """#54 自审必改：选中后弹出的全文提示，离开结果页就关掉，不浮在别的界面上。编造数据。"""
+    gui.root.geometry("960x640+0+0")
+    scan = _approx_scan("第 1 页图 1 · 图内 第 1 行", LONG_SPACED)
+    _show_one(gui, [scan], False)
+    gui.jump_to_hit(1)
+    gui.show("result")
+    _settle(gui)
+    tip = getattr(gui, "_loc_tip", None)
+    assert tip is not None and tip.winfo_exists()
+    gui.show("main")
+    _settle(gui)
+    assert not tip.winfo_exists()
+
+
+
+def _many_approx(gui, n=12, location="第 1 页图 1 · 图内 第 1 行", text=LONG_SPACED):
+    from doc_redactor.scan import KIND_PDF, FileScan, LocatedHit
+
+    hits = [
+        LocatedHit(hit_id=i, category="DRUG", text=text, location=location,
+                   unit="pdfimg:5", boxes=[(10, 10 * i, 100, 20)], page=0, approx=True)
+        for i in range(1, n + 1)
+    ]
+    scan = FileScan(path=Path("scan.pdf"), kind=KIND_PDF, status="ok", hits=hits, pages=[[""]])
+    gui.root.geometry("960x640+0+0")
+    _show_one(gui, [scan], False)
+    return _hit_table(gui.root)
+
+
+def test_tip_closes_when_window_loses_focus(gui):
+    """s1：主窗口失去焦点时提示关掉，不盖在别的程序上。编造数据。"""
+    tree = _many_approx(gui, n=1)
+    assert _hover_tip(gui, tree, "1", "text")
+    gui.root.event_generate("<FocusOut>")
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None)) == ""
+
+
+def test_tip_closes_when_table_scrolls_without_wheel(gui):
+    """s2：拖滚动条（yview_moveto / yview_scroll）后提示关掉。编造数据。"""
+    tree = _many_approx(gui)
+    assert _hover_tip(gui, tree, "1", "text")
+    tree.yview_moveto(1.0)
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None)) == ""
+
+
+def test_tip_stays_inside_window_right_edge(gui):
+    """s5：长位置加长串时提示框不超出窗口右边。编造数据。"""
+    long_loc = "第 501 页图 12 · 图内 第 3 行 · 附件二 扫描件 Acme Pharma 合同附页"
+    tree = _many_approx(gui, n=1, location=long_loc, text=LONG_SPACED + " " + LONG_SPACED)
+    assert _hover_tip(gui, tree, "1", "text")
+    tip = gui._loc_tip
+    tip.update_idletasks()
+    right = gui.root.winfo_rootx() + gui.root.winfo_width()
+    assert tip.winfo_rootx() + tip.winfo_reqwidth() <= right
+
+
+def test_tip_stays_when_pointer_moves_onto_it(gui):
+    """s3：鼠标从这一行移到提示上，提示不关。编造数据。"""
+    tree = _many_approx(gui, n=1)
+    assert _hover_tip(gui, tree, "1", "text")
+    tip = gui._loc_tip
+    tip.update_idletasks()
+    gui.root.event_generate(
+        "<Motion>", warp=True,
+        x=tip.winfo_rootx() - gui.root.winfo_rootx() + 10, y=tip.winfo_rooty() - gui.root.winfo_rooty() + 5,
+    )
+    tree.event_generate("<Leave>")
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None))
+
+
+def test_tip_closes_when_app_loses_focus_from_child_widget(gui, monkeypatch):
+    """自审 r4 必改 1：真实失焦时 FocusOut 落在子控件（位置表）上，提示也要关。编造数据。"""
+    tree = _many_approx(gui, n=1)
+    assert _hover_tip(gui, tree, "1", "text")
+    monkeypatch.setattr(gui.root, "focus_get", lambda: None)
+    tree.event_generate("<FocusOut>")
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None)) == ""
+
+
+def test_tip_touches_its_row_so_pointer_can_reach_it(gui):
+    """自审 r4 必改 2：提示和这一行之间没有空隙，鼠标往下移不会先落到下一行。编造数据。"""
+    tree = _many_approx(gui, n=3)
+    assert _hover_tip(gui, tree, "1", "text")
+    tip = gui._loc_tip
+    tip.update_idletasks()
+    x, y, w, h = tree.bbox("1")
+    row_bottom = tree.winfo_rooty() + y + h
+    assert tip.winfo_rooty() <= row_bottom

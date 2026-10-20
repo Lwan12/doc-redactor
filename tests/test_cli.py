@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from docx import Document
@@ -33,3 +34,45 @@ def test_cli_rejects_unknown_type(tmp_path: Path):
 
 def test_gui_import_does_not_require_a_display():
     assert callable(gui.main)
+
+
+def test_python_m_cli_module_runs_main():
+    """`python -m doc_redactor.cli --help` 要真的跑起来，不能静默退出 0。"""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = dict(os.environ)
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-m", "doc_redactor.cli", "--help"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip(), "没有输出"
+    assert "usage" in proc.stdout.lower()
+
+
+@pytest.mark.parametrize("module", ["doc_redactor.cli", "doc_redactor"])
+def test_cli_chinese_output_survives_cp1252_pipe(module, tmp_path):
+    """英文 Windows 的管道默认 cp1252：中文帮助和中文报错都不能因编码崩溃。编造数据。"""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONIOENCODING"] = "cp1252"
+    run = lambda *args: subprocess.run(
+        [sys.executable, "-m", module, *args], capture_output=True, env=env, timeout=120,
+    )
+    helped = run("--help")
+    assert helped.returncode == 0, helped.stderr.decode("utf-8", "replace")
+    assert "按规则离线脱敏" in helped.stdout.decode("utf-8")
+    failed = run(str(tmp_path / "Acme.docx"), "-r", str(tmp_path / "missing.yaml"), "-o", str(tmp_path / "out"))
+    err = failed.stderr.decode("utf-8", "replace")
+    assert "UnicodeEncodeError" not in err, err
+    assert "错误" in err, err
