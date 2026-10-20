@@ -102,7 +102,19 @@ def format_summary(name: str, counts: dict[str, int]) -> str:
     return "\n".join(lines)
 
 
+def _utf8_stdio() -> None:
+    """Chinese help and messages must not crash on an English Windows pipe (cp1252)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="doc-redactor",
         description="按规则离线脱敏 docx、pdf 和 png/jpg/jpeg。不覆盖原文件。",
