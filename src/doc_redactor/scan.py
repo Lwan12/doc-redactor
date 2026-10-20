@@ -847,8 +847,9 @@ def _ocr_entities(image, engine: RedactionEngine, page_no: int, index: int) -> l
     try:
         return analyze_image_entities(image, engine)
     except RuntimeError as exc:
-        if type(exc) is RuntimeError and "Tesseract" in str(exc):
-            raise  # Not installed (require_tesseract): MSG_NO_OCR, with its own fix.
+        if "Tesseract" in str(exc):
+            # Not installed, or its language data is missing: MSG_NO_OCR, with its own fix.
+            raise
         raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc
     except Exception as exc:
         raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc

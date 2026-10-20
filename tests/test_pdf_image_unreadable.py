@@ -111,3 +111,22 @@ def test_second_inline_image_failing_names_its_own_index(tmp_path: Path, monkeyp
     monkeypatch.setattr(scan_module, "analyze_image_entities", lambda *_a, **_k: [])
     scan = scan_path(pdf, _engine())
     assert scan.blocked_reason == "第 1 页图 2 打不开，没法检查，未写出"
+
+
+def test_missing_language_data_keeps_install_hint(tmp_path: Path, monkeypatch):
+    from doc_redactor.image_redactor import MSG_NO_OCR
+
+    pdf = tmp_path / "lang.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_image(pymupdf.Rect(72, 100, 432, 160), stream=_png("ABC-2026-001"))
+    document.save(pdf)
+
+    import pytesseract
+
+    def boom(*_args, **_kwargs):
+        raise pytesseract.TesseractError(1, "Tesseract couldn't load any languages!")
+
+    monkeypatch.setattr(scan_module, "analyze_image_entities", boom)
+    scan = scan_path(pdf, _engine())
+    assert scan.blocked_reason == MSG_NO_OCR.format(n=1)
