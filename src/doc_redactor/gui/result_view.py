@@ -388,6 +388,12 @@ class ResultView:
                 fg=MUTED,
                 font=fonts["small"],
             ).pack(side="left")
+        n_blanked = sum(len(getattr(s, "blanked_images", []) or []) for s in scans if not _blocked_reason(s))
+        if n_blanked:
+            # Its own count, outside the per-file buckets: images, not files.
+            tk.Label(
+                inner, text=f"    ▢ 认字出错换空白 {n_blanked} 张", bg=BG_SURFACE, fg="#c04700", font=fonts["small"]
+            ).pack(side="left")
         if n_unchecked:
             tk.Label(inner, text=f"    ⚠ 没法检查 {n_unchecked}", bg=BG_SURFACE, fg="#c04700", font=fonts["small"]).pack(
                 side="left"
@@ -1817,7 +1823,9 @@ def _file_notice(scan: FileScan, app) -> str:
     if scan.kind == KIND_WORD:
         return _comment_notice(scan, app)
     if scan.kind == KIND_PDF:
-        return _pdf_fit_notice(scan, app)
+        blanked = "；".join(message for _unit, message in getattr(scan, "blanked_images", []) or [])
+        fit = _pdf_fit_notice(scan, app)
+        return "；".join(part for part in (blanked, fit) if part)
     return ""
 
 

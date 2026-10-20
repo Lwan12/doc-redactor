@@ -241,6 +241,8 @@ MSG_BAD_IMAGE = "有 {n} 张图片打不开，没法检查，未写出"
 # PDF 里的图按页和图号写明是哪一张；读图失败和识别文字出错分开说。
 MSG_BAD_IMAGE_AT = "第 {page} 页图 {index} 打不开，没法检查，未写出"
 MSG_OCR_FAILED_AT = "第 {page} 页图 {index} 识别文字时出错，没法检查，未写出"
+# 认字出错的图：写出时整张换成空白（原图数据移除），文件照常写出。只写异常类型和 stderr 第一行。
+MSG_OCR_BLANKED_AT = "第 {page} 页图 {index} 认字出错，已换成空白（{detail}）"
 MSG_VECTOR = "有 {n} 张矢量图（EMF、WMF 等），没法检查其中文字，未写出"
 MSG_INLINE_FAILED = "有 {n} 张内嵌图没能涂黑，未写出"
 

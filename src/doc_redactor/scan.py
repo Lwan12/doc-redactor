@@ -56,6 +56,7 @@ from doc_redactor.image_redactor import (
     MSG_BAD_IMAGE_AT,
     MSG_INLINE_FAILED,
     MSG_NO_OCR,
+    MSG_OCR_BLANKED_AT,
     MSG_OCR_FAILED_AT,
 )
 from doc_redactor.tesseract_cmd import require_tesseract
@@ -163,6 +164,9 @@ class FileScan:
     # Why this file must not be written (an image that cannot be checked).
     # Counts only, never source text. Set at scan time; blocks the write.
     blocked_reason: str | None = None
+    # PDF images whose OCR errored: (unit, message). The write replaces each
+    # with a blank image (the original data is dropped) and still writes the file.
+    blanked_images: list[tuple[str, str]] = field(default_factory=list)
     # Word comments found in the file. The write deletes them all.
     comment_count: int = 0
     # 「去掉页眉页脚」. Empty route: the option was off at scan time (or image).
@@ -254,7 +258,7 @@ class FileScan:
         return [hit for hit in self.visible_hits if hit.enabled]
 
     def will_write(self) -> bool:
-        return bool(self.enabled_hits) or self.hf_active
+        return bool(self.enabled_hits) or self.hf_active or bool(self.blanked_images)
 
     def enabled_count(self) -> int:
         return len(self.enabled_hits)
@@ -801,7 +805,7 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
                 image = pdf_xref_image(document, xref, item[1] if len(item) > 1 else 0)
             except Exception as exc:
                 raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=image_index)) from exc
-            entities = _ocr_entities(image, engine, page.number + 1, image_index)
+            entities = _ocr_or_blank(image, engine, scan, page.number + 1, image_index, f"pdfimg:{xref}")
             for entity in entities:
                 top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
                 scan.hits.append(
@@ -824,7 +828,9 @@ def _scan_pdf_images(document, engine: RedactionEngine, ids: IdGen, scan: FileSc
             raise WriteBlocked(MSG_BAD_IMAGE_AT.format(page=page.number + 1, index=index)) from exc
         for inline_index, (info, image) in enumerate(found):
             image_index += 1
-            entities = _ocr_entities(image, engine, page.number + 1, image_index)
+            entities = _ocr_or_blank(
+                image, engine, scan, page.number + 1, image_index, f"pdfinline:{page.number}:{inline_index}"
+            )
             for entity in entities:
                 top = min(box[1] for box in entity["boxes"]) if entity["boxes"] else 0
                 scan.hits.append(
@@ -853,6 +859,31 @@ def _ocr_entities(image, engine: RedactionEngine, page_no: int, index: int) -> l
         raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc
     except Exception as exc:
         raise WriteBlocked(MSG_OCR_FAILED_AT.format(page=page_no, index=index)) from exc
+
+
+def _ocr_or_blank(image, engine: RedactionEngine, scan: FileScan, page_no: int, index: int, unit: str) -> list[dict]:
+    """OCR one PDF image. If OCR errors, the image is blanked on write instead of blocking the file."""
+    try:
+        return _ocr_entities(image, engine, page_no, index)
+    except WriteBlocked as exc:
+        cause = exc.__cause__
+        if cause is None:
+            raise
+        scan.blanked_images.append(
+            (unit, MSG_OCR_BLANKED_AT.format(page=page_no, index=index, detail=ocr_error_summary(cause)))
+        )
+        return []
+
+
+def ocr_error_summary(exc: BaseException) -> str:
+    """Exception type and the first line of Tesseract's stderr. No OCR text, no source text."""
+    message = getattr(exc, "message", None)
+    if message is None:
+        message = str(exc)
+    first = next((line.strip() for line in str(message).splitlines() if line.strip()), "")
+    if len(first) > 80:
+        first = first[:79] + "…"
+    return f"{type(exc).__name__}: {first}" if first else type(exc).__name__
 
 
 def _blocked_message(exc: Exception) -> str:
@@ -1007,6 +1038,7 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
                     buf = io.BytesIO()
                     painted.save(buf, format="PNG")
                     page.replace_image(xref, stream=buf.getvalue())
+        _blank_errored_images(document, scan)
         inline_units = [hit for hit in scan.enabled_hits if hit.unit.startswith("pdfinline:")]
         if inline_units:
             by_page: dict[int, dict[int, list[LocatedHit]]] = {}
@@ -1035,6 +1067,31 @@ def _write_pdf(scan: FileScan, dest: Path, label, engine: RedactionEngine | None
         short_count=stats.short_count,
         blank_count=stats.blank_count,
     )
+
+
+def _blank_errored_images(document, scan: FileScan) -> None:
+    """Replace each OCR-errored image with a white one of the same size; the old data is dropped on save."""
+    for unit, _message in scan.blanked_images:
+        if unit.startswith("pdfimg:"):
+            xref = int(unit.split(":", 1)[1])
+            width = int(document.xref_get_key(xref, "Width")[1] or 1)
+            height = int(document.xref_get_key(xref, "Height")[1] or 1)
+            buf = io.BytesIO()
+            Image.new("RGB", (max(width, 1), max(height, 1)), "white").save(buf, format="PNG")
+            for page in document:
+                if any(item[0] == xref for item in page.get_images(full=True) or []):
+                    page.replace_image(xref, stream=buf.getvalue())
+                    break
+        else:
+            _tag, page_no, index = unit.split(":")
+            page = document[int(page_no)]
+            info, _image = inline_images(page)[int(index)]
+            page.add_redact_annot(pymupdf.Rect(info["bbox"]))
+            page.apply_redactions(
+                images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
+                graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                text=pymupdf.PDF_REDACT_TEXT_NONE,
+            )
 
 
 def _write_image(scan: FileScan, dest: Path) -> dict[str, int]:

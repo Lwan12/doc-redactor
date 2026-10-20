@@ -57,23 +57,74 @@ def test_undecodable_image_names_page_and_index(tmp_path: Path):
     assert scan.blocked_reason == "第 2 页图 3 打不开，没法检查，未写出"
 
 
-@needs_tesseract
-def test_ocr_error_is_not_reported_as_unopenable(tmp_path: Path, monkeypatch):
-    pdf = tmp_path / "ocr.pdf"
+def _ocr_error_pdf(path: Path) -> bytes:
+    """One page, one image with a fabricated ID; metadata carries a fabricated drug name."""
     document = pymupdf.open()
     page = document.new_page()
-    page.insert_image(pymupdf.Rect(72, 100, 432, 160), stream=_png("ABC-2026-001"))
-    document.save(pdf)
+    page.insert_text((72, 60), "Acme Pharma")
+    png = _png("ABC-2026-001 Fictizumab")
+    page.insert_image(pymupdf.Rect(72, 100, 432, 160), stream=png)
+    document.set_metadata({"title": "Fictizumab", "subject": "ABC-2026-001"})
+    document.save(path)
+    xref = pymupdf.open(path)[0].get_images()[0][0]
+    return pymupdf.open(path).extract_image(xref)["image"]
 
+
+def _tesseract_boom(*_args, **_kwargs):
     import pytesseract
 
-    def boom(*_args, **_kwargs):
-        raise pytesseract.TesseractError(1, "fake")
+    raise pytesseract.TesseractError(1, "Error in pixReadMem: fake stderr line\nsecond line")
 
-    monkeypatch.setattr(scan_module, "analyze_image_entities", boom)
-    scan = scan_path(pdf, _engine())
-    assert scan.blocked_reason == "第 1 页图 1 识别文字时出错，没法检查，未写出"
-    assert not [hit for hit in scan.hits if hit.unit.startswith("pdfimg:")]
+
+@needs_tesseract
+def test_ocr_error_blanks_image_and_still_writes(tmp_path: Path, monkeypatch):
+    import hashlib
+    import subprocess
+
+    from doc_redactor.engine import WordlistRule
+    from doc_redactor.scan import write_scans
+
+    pdf = tmp_path / "ocr.pdf"
+    original = _ocr_error_pdf(pdf)
+    monkeypatch.setattr(scan_module, "analyze_image_entities", _tesseract_boom)
+    engine = build_engine(
+        [RegexRule(name="PROJECT_ID", pattern=r"ABC-\d{4}-\d{3}", flags=0)],
+        [WordlistRule(terms=["Acme Pharma"], category="SPONSOR", case_sensitive=False)],
+    )
+    scan = scan_path(pdf, engine)
+    assert scan.blocked_reason is None
+    assert [message for _unit, message in scan.blanked_images] == [
+        "第 1 页图 1 认字出错，已换成空白（TesseractError: Error in pixReadMem: fake stderr line）"
+    ]
+    [result] = write_scans([scan], tmp_path / "out", engine=engine)
+    assert result.dest is not None and result.dest.is_file(), result.error
+
+    out = pymupdf.open(result.dest)
+    text = "".join(page.get_text() for page in out)
+    assert "ABC-2026-001" not in text and "Fictizumab" not in text
+    pdftotext = subprocess.run(["pdftotext", str(result.dest), "-"], capture_output=True, text=True).stdout
+    assert "ABC-2026-001" not in pdftotext and "Fictizumab" not in pdftotext
+    images = out[0].get_images(full=True)
+    assert len(images) == 1
+    blank = out.extract_image(images[0][0])
+    assert hashlib.sha256(blank["image"]).hexdigest() != hashlib.sha256(original).hexdigest()
+    pix = pymupdf.Pixmap(out, images[0][0])
+    assert set(pix.samples) == {255}
+    raw = result.dest.read_bytes()
+    assert original not in raw
+    meta = " ".join(str(v) for v in out.metadata.values()) + (out.get_xml_metadata() or "")
+    assert "Fictizumab" not in meta and "ABC-2026-001" not in meta
+
+
+@needs_tesseract
+def test_ocr_error_summary_has_no_ocr_text():
+    import pytesseract
+
+    from doc_redactor.scan import ocr_error_summary
+
+    assert ocr_error_summary(pytesseract.TesseractError(3221225477, "")) == "TesseractError"
+    long = ocr_error_summary(pytesseract.TesseractError(1, "x" * 200))
+    assert len(long) <= len("TesseractError: ") + 80
 
 
 @needs_tesseract
