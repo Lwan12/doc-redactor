@@ -158,6 +158,7 @@ class ResultView:
         self.refresh()
 
     def hide(self) -> None:
+        self._hide_loc_tip()
         self.frame.pack_forget()
 
     def refresh(self) -> None:
@@ -338,6 +339,8 @@ class ResultView:
         bar.pack(fill="x")
         inner = tk.Frame(bar, bg=BG_SURFACE)
         inner.pack(fill="x", padx=12, pady=4)
+        # Marks the top-bar counts so tests read 失败 N here, not the bottom bar (r2-3).
+        inner.top_counts = True
         if all_fail:
             tk.Label(inner, text="0", bg=BG_SURFACE, fg=INK, font=fonts["mono_big"]).pack(side="left")
             tk.Label(inner, text=" 个文件可处理", bg=BG_SURFACE, fg=INK, font=fonts["ui"]).pack(side="left")
@@ -1230,6 +1233,7 @@ class ResultView:
                 spare = max(0, width - 32)
                 loc.column("on", width=width, minwidth=width)
                 loc.column("text", width=max(60, 126 - spare), minwidth=max(60, 124 - spare))
+        tips: dict[str, str] = {}
         for hit in hits:
             if self.app.written and hit.enabled and hit.hit_id in unwritten_ids:
                 mark = MSG_UNWRITTEN
@@ -1239,12 +1243,18 @@ class ResultView:
             if getattr(hit, "approx", False):
                 # OCR read a look-alike; show what it read so the user can judge.
                 # Screen only: nothing here is written to disk.
-                content = f"近似 {content}"
+                content = f"近似：读成 {content}" if not self.app.hide_text else f"近似 {content}"
+            # #54 M1: a cell that does not fit ends in 「…」; the whole text is in
+            # a hover/selection tip. Screen only: never written anywhere.
+            shown_loc = ellipsize(hit.location, fonts["small"], int(loc.column("loc", "width")) - CELL_PAD)
+            shown = ellipsize(content, fonts["small"], int(loc.column("text", "width")) - CELL_PAD)
+            if shown_loc != hit.location or shown != content or getattr(hit, "approx", False):
+                tips[str(hit.hit_id)] = f"{hit.location}\n{content}"
             loc.insert(
                 "",
                 "end",
                 iid=str(hit.hit_id),
-                values=(mark, hit.location, marker_for(cat_index.get(hit.category, 0)), content),
+                values=(mark, shown_loc, marker_for(cat_index.get(hit.category, 0)), shown),
             )
         if self.app.current_hit is not None and loc.exists(str(self.app.current_hit)):
             loc.selection_set(str(self.app.current_hit))
@@ -1266,6 +1276,112 @@ class ResultView:
             self.refresh()
 
         loc.bind("<Button-1>", on_loc_click)
+
+        def on_loc_motion(event):
+            row = loc.identify_row(event.y)
+            if row in tips:
+                if getattr(self.app, "_loc_tip_row", None) != row:
+                    self._show_loc_tip(loc, row, tips[row])
+            else:
+                self._hide_loc_tip()
+
+        loc.bind("<Motion>", on_loc_motion)
+        def on_loc_leave(_event):
+            # s3: moving onto the tip itself keeps it; the tip closes on its own <Leave>.
+            tip = getattr(self.app, "_loc_tip", None)
+            if tip is not None and tip.winfo_exists():
+                px, py = loc.winfo_pointerxy()
+                if loc.winfo_containing(px, py) in (tip, *tip.winfo_children()):
+                    return
+            self._hide_loc_tip()
+
+        loc.bind("<Leave>", on_loc_leave)
+        scrolled = {"top": None}
+
+        def on_yscroll(first, _last):
+            # s2: any scroll (scrollbar drag, keys, yview_*) closes the tip.
+            if scrolled["top"] is not None and first != scrolled["top"]:
+                self._hide_loc_tip()
+            scrolled["top"] = first
+
+        loc.configure(yscrollcommand=on_yscroll)
+        # Leaving the page or scrolling must not leave a tip floating (self-review).
+        for seq in ("<Unmap>", "<Destroy>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
+            loc.bind(seq, lambda _e: self._hide_loc_tip(), add="+")
+        current = str(self.app.current_hit) if self.app.current_hit is not None else None
+        if current in tips:
+            loc.after_idle(lambda: loc.winfo_exists() and self._show_loc_tip(loc, current, tips[current]))
+        else:
+            self._hide_loc_tip()
+
+    def _show_loc_tip(self, loc, row: str, text: str) -> None:
+        """Full location and content of one hit row, under that row. Screen only."""
+        self._hide_loc_tip()
+        tip = tk.Toplevel(loc)
+        tip.withdraw()  # shown only once placed, so it never flashes at (0, 0)
+        tip.overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tk.Label(tip, text=text, bg="#1f2124", fg="#ffffff", font=self.app.fonts["small"], justify="left", padx=8, pady=4,
+                 wraplength=max(200, loc.winfo_toplevel().winfo_width() - 40)).pack()
+        def on_tip_leave(_event):
+            # Leave also fires on the label and when the tip is mapped; close only
+            # when the pointer really is outside both the tip and the table.
+            px, py = tip.winfo_pointerxy()
+            under = tip.winfo_containing(px, py)
+            if under is None or (under is not loc and under not in (tip, *tip.winfo_children())):
+                self._hide_loc_tip()
+
+        tip.bind("<Leave>", on_tip_leave)
+        self.app._loc_tip = tip
+        root = loc.winfo_toplevel()
+        if not getattr(root, "_loc_tip_focus_bound", False):
+            # s1: the app losing focus closes the tip so it never covers another program.
+            # A real switch to another program arrives on the focused child (bindtags
+            # reach the toplevel); only a move inside the app leaves focus_get() set.
+            def on_focus_out(event):
+                if event.widget is root or root.focus_get() is None:
+                    self._hide_loc_tip()
+
+            root.bind("<FocusOut>", on_focus_out, add="+")
+            root._loc_tip_focus_bound = True
+        self.app._loc_tip_row = row
+
+        def place(tries: int = 0) -> None:
+            if not (tip.winfo_exists() and loc.winfo_exists()):
+                return
+            loc.update_idletasks()
+            box = loc.bbox(row)
+            if (not box or not loc.winfo_ismapped()) and tries < 20:
+                # Right after a refresh the table is not laid out yet.
+                tip.after(25, lambda: place(tries + 1))
+                return
+            box = box or (0, 0, 0, 0)
+            tip.update_idletasks()
+            # s5: keep the tip inside the window's right edge.
+            right = root.winfo_rootx() + root.winfo_width() - 4
+            x = max(root.winfo_rootx(), min(loc.winfo_rootx() + 8, right - tip.winfo_reqwidth()))
+            # Overlap the row's bottom edge: no gap, so the pointer goes from the
+            # row straight onto the tip (s3). Flip above the row near the screen bottom.
+            y = loc.winfo_rooty() + box[1] + box[3] - 2
+            if y + tip.winfo_reqheight() > tip.winfo_screenheight():
+                y = max(0, loc.winfo_rooty() + box[1] + 2 - tip.winfo_reqheight())
+            tip.geometry(f"+{x}+{y}")
+            tip.deiconify()
+
+        place()
+
+    def _hide_loc_tip(self) -> None:
+        tip = getattr(self.app, "_loc_tip", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+        self.app._loc_tip = None
+        self.app._loc_tip_row = None
 
     def _fit_right_pane(self, parent, cat_box, tree, cat_scroll, loc, hf_rows=()) -> None:
         """Share the pane height so the location list keeps LOC_MIN_ROWS full rows.
@@ -1757,6 +1873,24 @@ def _hf_only_write(scan: FileScan, app) -> bool:
     return key not in app.write_errors and key not in app.write_notes
 
 
+# Treeview cell padding: 128px keeps 「第 501 页 · 第 1 行」 (about 120px) whole.
+CELL_PAD = 6
+
+
+def ellipsize(text: str, font, width: int) -> str:
+    """``text`` cut to fit ``width`` pixels, ending in 「…」 when it was cut."""
+    if font.measure(text) <= width:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid].rstrip() + "…") <= width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + "…"
+
+
 def _hf_only_line(app) -> str:
     return "无命中词，已删除页眉页脚并写出" if app.written else "无命中词，将删除页眉页脚并写出"
 
@@ -1767,7 +1901,7 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
     if str(scan.path) in app.write_errors:
         return "nowrite", "没写出", "bad"
     if app.write_notes.get(str(scan.path)) == MSG_NO_HITS:
-        return "nohit_unwritten", MSG_NO_HITS, "warn"
+        return "nohit_unwritten", MSG_NO_HITS, "no"
     if str(scan.path) in app.write_notes:
         return "skipped", app.write_notes[str(scan.path)], "ok"
     if _hf_only_write(scan, app):
