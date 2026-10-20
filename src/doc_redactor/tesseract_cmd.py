@@ -29,20 +29,52 @@ def find_tesseract() -> str | None:
 def configure_tesseract() -> str | None:
     """Point pytesseract at the discovered binary.
 
-    When the binary ships with a sibling tessdata directory (the PyInstaller
-    layout), TESSDATA_PREFIX is set so runtime stays offline.
+    On Windows, bundled language data is selected in each OCR child's own
+    environment and working directory. The app's cwd is never changed.
     """
-    global _CONFIGURED
     command = find_tesseract()
     if not command:
         return None
     import pytesseract
 
+    # The child cwd can differ from ours, so never leave the executable relative.
+    command = str(Path(command).resolve())
     pytesseract.pytesseract.tesseract_cmd = command
-    tessdata = Path(command).resolve().parent / "tessdata"
-    if tessdata.is_dir():
+    tessdata = Path(command).parent / "tessdata"
+    if sys.platform == "win32":
+        _install_windows_ocr_adapter(pytesseract.pytesseract)
+    elif tessdata.is_dir():
         os.environ["TESSDATA_PREFIX"] = str(tessdata)
     return command
+
+
+def _install_windows_ocr_adapter(module) -> None:
+    """Adapt the pinned pytesseract 0.3.13 OCR subprocess kwargs, once.
+
+    It has no public per-call cwd/env option. Preserve its pipes, startupinfo
+    and timeout handling; do not patch subprocess itself or temporarily chdir.
+    Version queries don't load tessdata. get_languages bypasses this helper
+    and is not used by the app.
+    """
+    original = module.subprocess_args
+    if getattr(original, "_doc_redactor_windows_ocr", False):
+        return
+
+    def child_args(include_stdout=True):
+        kwargs = original(include_stdout)
+        folder = Path(module.tesseract_cmd).parent
+        if (folder / "tessdata").is_dir():
+            # Tesseract 5.5.3 passes getenv(TESSDATA_PREFIX) to std::filesystem.
+            # Its Windows build can reject a Chinese absolute path. A relative
+            # ASCII path avoids that conversion, even when folder is Chinese.
+            kwargs["cwd"] = str(folder)
+            env = kwargs.get("env")
+            kwargs["env"] = dict(os.environ if env is None else env)
+            kwargs["env"]["TESSDATA_PREFIX"] = "tessdata"
+        return kwargs
+
+    child_args._doc_redactor_windows_ocr = True
+    module.subprocess_args = child_args
 
 
 def require_tesseract() -> str:

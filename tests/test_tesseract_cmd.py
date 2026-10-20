@@ -66,4 +66,10 @@ def test_configure_sets_sibling_tessdata(monkeypatch, tmp_path: Path):
     assert Path(pytesseract.pytesseract.tesseract_cmd) == binary
     import os
 
-    assert os.environ["TESSDATA_PREFIX"] == str(folder / "tessdata")
+    if sys.platform == "win32":
+        assert "TESSDATA_PREFIX" not in os.environ
+        kwargs = pytesseract.pytesseract.subprocess_args()
+        assert kwargs["cwd"] == str(folder)
+        assert kwargs["env"]["TESSDATA_PREFIX"] == "tessdata"
+    else:
+        assert os.environ["TESSDATA_PREFIX"] == str(folder / "tessdata")
