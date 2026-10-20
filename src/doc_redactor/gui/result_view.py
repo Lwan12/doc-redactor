@@ -1318,6 +1318,7 @@ class ResultView:
         """Full location and content of one hit row, under that row. Screen only."""
         self._hide_loc_tip()
         tip = tk.Toplevel(loc)
+        tip.withdraw()  # shown only once placed, so it never flashes at (0, 0)
         tip.overrideredirect(True)
         try:
             tip.attributes("-topmost", True)
@@ -1325,12 +1326,26 @@ class ResultView:
             pass
         tk.Label(tip, text=text, bg="#1f2124", fg="#ffffff", font=self.app.fonts["small"], justify="left", padx=8, pady=4,
                  wraplength=max(200, loc.winfo_toplevel().winfo_width() - 40)).pack()
-        tip.bind("<Leave>", lambda _e: self._hide_loc_tip())
+        def on_tip_leave(_event):
+            # Leave also fires on the label and when the tip is mapped; close only
+            # when the pointer really is outside both the tip and the table.
+            px, py = tip.winfo_pointerxy()
+            under = tip.winfo_containing(px, py)
+            if under is None or (under is not loc and under not in (tip, *tip.winfo_children())):
+                self._hide_loc_tip()
+
+        tip.bind("<Leave>", on_tip_leave)
         self.app._loc_tip = tip
         root = loc.winfo_toplevel()
         if not getattr(root, "_loc_tip_focus_bound", False):
             # s1: the app losing focus closes the tip so it never covers another program.
-            root.bind("<FocusOut>", lambda e: self._hide_loc_tip() if e.widget is root else None, add="+")
+            # A real switch to another program arrives on the focused child (bindtags
+            # reach the toplevel); only a move inside the app leaves focus_get() set.
+            def on_focus_out(event):
+                if event.widget is root or root.focus_get() is None:
+                    self._hide_loc_tip()
+
+            root.bind("<FocusOut>", on_focus_out, add="+")
             root._loc_tip_focus_bound = True
         self.app._loc_tip_row = row
 
@@ -1348,7 +1363,13 @@ class ResultView:
             # s5: keep the tip inside the window's right edge.
             right = root.winfo_rootx() + root.winfo_width() - 4
             x = max(root.winfo_rootx(), min(loc.winfo_rootx() + 8, right - tip.winfo_reqwidth()))
-            tip.geometry(f"+{x}+{loc.winfo_rooty() + box[1] + box[3] + 2}")
+            # Overlap the row's bottom edge: no gap, so the pointer goes from the
+            # row straight onto the tip (s3). Flip above the row near the screen bottom.
+            y = loc.winfo_rooty() + box[1] + box[3] - 2
+            if y + tip.winfo_reqheight() > tip.winfo_screenheight():
+                y = max(0, loc.winfo_rooty() + box[1] + 2 - tip.winfo_reqheight())
+            tip.geometry(f"+{x}+{y}")
+            tip.deiconify()
 
         place()
 

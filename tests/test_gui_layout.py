@@ -2036,3 +2036,24 @@ def test_tip_stays_when_pointer_moves_onto_it(gui):
     tree.event_generate("<Leave>")
     _settle(gui)
     assert _tip_label_text(getattr(gui, "_loc_tip", None))
+
+
+def test_tip_closes_when_app_loses_focus_from_child_widget(gui, monkeypatch):
+    """自审 r4 必改 1：真实失焦时 FocusOut 落在子控件（位置表）上，提示也要关。编造数据。"""
+    tree = _many_approx(gui, n=1)
+    assert _hover_tip(gui, tree, "1", "text")
+    monkeypatch.setattr(gui.root, "focus_get", lambda: None)
+    tree.event_generate("<FocusOut>")
+    _settle(gui)
+    assert _tip_label_text(getattr(gui, "_loc_tip", None)) == ""
+
+
+def test_tip_touches_its_row_so_pointer_can_reach_it(gui):
+    """自审 r4 必改 2：提示和这一行之间没有空隙，鼠标往下移不会先落到下一行。编造数据。"""
+    tree = _many_approx(gui, n=3)
+    assert _hover_tip(gui, tree, "1", "text")
+    tip = gui._loc_tip
+    tip.update_idletasks()
+    x, y, w, h = tree.bbox("1")
+    row_bottom = tree.winfo_rooty() + y + h
+    assert tip.winfo_rooty() <= row_bottom
