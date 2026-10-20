@@ -1303,10 +1303,22 @@ class ResultView:
             pass
         tk.Label(tip, text=text, bg="#1f2124", fg="#ffffff", font=self.app.fonts["small"], justify="left", padx=8, pady=4).pack()
         tip.tip_text = text
-        box = loc.bbox(row) or (0, 0, 0, 0)
-        tip.geometry(f"+{loc.winfo_rootx() + 8}+{loc.winfo_rooty() + box[1] + box[3] + 2}")
         self.app._loc_tip = tip
         self.app._loc_tip_row = row
+
+        def place(tries: int = 0) -> None:
+            if not (tip.winfo_exists() and loc.winfo_exists()):
+                return
+            loc.update_idletasks()
+            box = loc.bbox(row)
+            if (not box or not loc.winfo_ismapped()) and tries < 20:
+                # Right after a refresh the table is not laid out yet.
+                tip.after(25, lambda: place(tries + 1))
+                return
+            box = box or (0, 0, 0, 0)
+            tip.geometry(f"+{loc.winfo_rootx() + 8}+{loc.winfo_rooty() + box[1] + box[3] + 2}")
+
+        place()
 
     def _hide_loc_tip(self) -> None:
         tip = getattr(self.app, "_loc_tip", None)
