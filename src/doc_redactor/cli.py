@@ -11,7 +11,9 @@ from doc_redactor.config import load_rules
 from doc_redactor.docx_redactor import redact_docx
 from doc_redactor.engine import RedactionEngine
 from doc_redactor.image_redactor import is_raster_suffix, redact_image_file
-from doc_redactor.image_redactor import MSG_NO_OCR_FIX, WriteBlocked, blocked_advice
+from doc_redactor.image_redactor import (
+    MSG_NO_OCR_FIX, WriteBlocked, blocked_advice, partial_image_notice, write_partial_warning,
+)
 from doc_redactor.leak_check import LeakedText, NoHits, gate_output
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
 from doc_redactor.verify_output import LeftoverText, check_written, count_leftovers, original_hit_texts
@@ -85,15 +87,30 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
             raise LeftoverText(*problem)
         # Then read it the other ways an AI tool would (leak_check).
         gate_output(redacted, engine, labels=[engine.label(category) for category in counts], source=src)
-    report.write_text(
-        json.dumps(counts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    skipped_images = getattr(counts, "skipped_images", [])
+    try:
+        if skipped_images:
+            partial = outdir / f"{src.stem}.partial-redacted{src.suffix}"
+            redacted.replace(partial)
+            redacted = partial
+            report = redacted.with_name(f"{redacted.stem}.report.json")
+        report.write_text(
+            json.dumps(counts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        write_partial_warning(redacted, skipped_images)
+    except OSError:
+        redacted.unlink(missing_ok=True)
+        report.unlink(missing_ok=True)
+        raise
     return counts
 
 
 def format_summary(name: str, counts: dict[str, int]) -> str:
     lines = [name]
+    if getattr(counts, "skipped_images", []):
+        lines.append(f"  ⚠ {partial_image_notice(counts.skipped_images, written=True)}")
+        lines.append("  输出文件名含 .partial-redacted；详情见同目录 .warnings.json")
     if not counts:
         lines.append("  （无命中）")
     else:
@@ -132,7 +149,10 @@ def main(argv: list[str] | None = None) -> int:
         print(format_summary(name, counts))
     for line in blocked:
         print(line, file=sys.stderr)
-    return 1 if blocked else 0
+    if blocked:
+        return 1
+    # A file exists, but this is deliberately not an all-clear success.
+    return 2 if any(getattr(counts, "skipped_images", []) for _name, counts in summaries) else 0
 
 
 if __name__ == "__main__":
