@@ -16,9 +16,8 @@ from doc_redactor.image_redactor import (
 )
 from doc_redactor.leak_check import LeakedText, NoHits, gate_output
 from doc_redactor.pdf_redactor import UnlocatedText, redact_pdf
+from doc_redactor.scan import KIND_SHEET, MSG_OPEN_FAIL, MSG_UNSUPPORTED, file_kind, scan_path, write_scans
 from doc_redactor.verify_output import LeftoverText, check_written, count_leftovers, original_hit_texts
-
-SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 
 
 def redact_paths(
@@ -55,9 +54,12 @@ def redact_paths(
 def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, int]:
     if not src.is_file():
         raise FileNotFoundError(f"输入文件不存在: {src}")
+    kind = file_kind(src)
+    if kind is None:
+        raise ValueError(MSG_UNSUPPORTED)
+    if kind == KIND_SHEET:
+        return _redact_sheet(src, outdir, engine)
     suffix = src.suffix.lower()
-    if suffix not in SUPPORTED:
-        raise ValueError(f"不支持的文件类型: {src.name}")
     redacted = outdir / f"{src.stem}.redacted{src.suffix}"
     report = outdir / f"{src.stem}.report.json"
     if suffix == ".docx":
@@ -67,7 +69,7 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
     elif is_raster_suffix(suffix):
         counts = redact_image_file(src, redacted, engine)
     else:
-        raise ValueError(f"不支持的文件类型: {src.name}")
+        raise ValueError(MSG_UNSUPPORTED)
     if not counts:
         # Writing it would hand back the original under a ".redacted" name.
         redacted.unlink(missing_ok=True)
@@ -106,6 +108,23 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
     return counts
 
 
+def _redact_sheet(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, int]:
+    """Scan and write one spreadsheet. The report comes from write_scans."""
+    scan = scan_path(src, engine)
+    if scan.status == "fail":
+        raise WriteBlocked(scan.error or MSG_OPEN_FAIL)
+    result = write_scans(
+        [scan], outdir, replacements=engine.replacements, engine=engine, overwrite=True
+    )[0]
+    if result.error:
+        if "写出后仍可见" in result.error or "写出后复核" in result.error:
+            raise LeftoverText(0, result.error)
+        raise WriteBlocked(result.error)
+    if result.dest is None or not result.counts:
+        raise NoHits()
+    return result.counts
+
+
 def format_summary(name: str, counts: dict[str, int]) -> str:
     lines = [name]
     if getattr(counts, "skipped_images", []):
@@ -134,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     _utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="doc-redactor",
-        description="按规则离线脱敏 docx、pdf 和 png/jpg/jpeg。不覆盖原文件。",
+        description="按规则离线脱敏 docx、pdf、png/jpg/jpeg 和 xlsx/xls/csv。不覆盖原文件。",
     )
     parser.add_argument("inputs", nargs="+", help="输入文件")
     parser.add_argument("-r", "--rules", required=True, help="规则文件 rules.yaml")

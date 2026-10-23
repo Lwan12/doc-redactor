@@ -13,6 +13,7 @@ from openpyxl.comments import Comment
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image as PILImage
 
+from doc_redactor.cli import main
 from doc_redactor.config import load_rules
 from doc_redactor.scan import scan_path, write_scans
 from doc_redactor.sheet import MSG_ENCRYPTED_SHEET, MSG_PICTURE_SHEET, extract_formulas, extract_in_scope
@@ -185,3 +186,43 @@ def test_xlsm_is_rejected_and_not_written(tmp_path: Path):
     assert "表格" in (scan.error or "")
     assert result.dest is None
     assert list(out.glob("*")) == []
+
+
+def test_cli_csv_keeps_the_formula_and_writes_the_file(tmp_path: Path, capsys):
+    src = tmp_path / "demo.csv"
+    _csv(src)
+    out = tmp_path / "out"
+    code = main([str(src), "-r", str(RULES), "-o", str(out)])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    dest = out / "demo.redacted.csv"
+    assert dest.is_file()
+    text = dest.read_text(encoding="utf-8")
+    assert '="ABC-2026-001"' in text
+    assert "ABC-2026-001" not in text.splitlines()[0]
+
+
+def test_cli_failures_keep_their_sentences_and_write_nothing(tmp_path: Path, capsys):
+    locked = tmp_path / "locked.xlsx"
+    locked.write_bytes(OLE_MAGIC + b"\x00" * 512)
+    locked_out = tmp_path / "locked-out"
+    code = main([str(locked), "-r", str(RULES), "-o", str(locked_out)])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert MSG_ENCRYPTED_SHEET in captured.err
+    assert list(locked_out.glob("*")) == []
+
+    pictured = tmp_path / "pict.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "ABC-2026-001"
+    png = tmp_path / "dot.png"
+    PILImage.new("RGB", (8, 8), "white").save(png)
+    ws.add_image(XLImage(str(png)), "C3")
+    wb.save(pictured)
+    pictured_out = tmp_path / "pict-out"
+    code = main([str(pictured), "-r", str(RULES), "-o", str(pictured_out)])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert MSG_PICTURE_SHEET in captured.err
+    assert list(pictured_out.glob("*")) == []
