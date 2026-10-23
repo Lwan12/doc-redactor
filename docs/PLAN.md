@@ -13,5 +13,5 @@
 ## 边界 / 不做
 - 图片/扫描件/OCR 不做（README 写后续用 Presidio image redactor + Tesseract）。
 - 不做 NER/人名自动识别、备份、回滚、容灾、遥测、联网。
-- 不做 .doc/.xlsx/.pptx。
+- 不做 .doc/.xlsm/.pptx。表格（.xlsx/.xls/.csv）替换单元格、批注、页眉页脚、工作表名和隐藏行列。公式原样写出。图表、文本框和文件属性不处理。加密文件和带图片的工作簿整份不写出。
 - 文本框/脚注/批注 v1 不覆盖（README 已知限制）。

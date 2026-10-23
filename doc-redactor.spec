@@ -43,6 +43,8 @@ def _collected():
         "doc_redactor.gui.dialogs",
         "doc_redactor.gui.demo",
         "tkinterdnd2",
+        "openpyxl",
+        "doc_redactor.sheet",
     ]
     datas += collect_data_files("presidio_analyzer")
     extra_datas, extra_binaries, extra_hidden = collect_all("pymupdf")
