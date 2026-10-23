@@ -13,7 +13,7 @@ from PIL import Image as PILImage
 
 from doc_redactor.cli import main
 from doc_redactor.config import load_rules
-from doc_redactor.scan import scan_path, write_scans
+from doc_redactor.scan import CommentPlace, scan_path, write_scans
 from doc_redactor.sheet import MSG_ENCRYPTED_SHEET, MSG_PICTURE_SHEET, extract_formulas, extract_in_scope
 from tests.helpers import RULES
 
@@ -111,6 +111,53 @@ def test_xlsx_redacts_in_scope_and_keeps_formula_and_chart(tmp_path: Path):
     with zipfile.ZipFile(result.dest) as package:
         chart = package.read("xl/charts/chart1.xml")
     assert b"Fictizumab" in chart
+
+
+def test_xlsx_comment_part_drops_a_replaced_author(tmp_path: Path, capsys):
+    src = tmp_path / "demo.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "hello"
+    ws["A1"].comment = Comment("batch Fictizumab", "Acme Pharma")
+    wb.save(src)
+    out = tmp_path / "out"
+    code = main([str(src), "-r", str(RULES), "-o", str(out)])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    dest = out / "demo.redacted.xlsx"
+    with zipfile.ZipFile(dest) as package:
+        xml = package.read("xl/comments/comment1.xml").decode("utf-8")
+    assert "Acme Pharma" not in xml
+    assert "[SPONSOR]" in xml
+    assert "Fictizumab" not in xml
+
+
+def test_shared_comment_author_stays_when_one_comment_keeps_it(tmp_path: Path):
+    src = tmp_path / "demo.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"].comment = Comment("seen", "Acme Pharma")
+    ws["B1"].comment = Comment("kept", "Acme Pharma")
+    wb.save(src)
+    engine = _engine()
+    scan = scan_path(src, engine)
+    for hit in scan.hits:
+        place = hit.place
+        if isinstance(place, CommentPlace) and place.part == "author" and place.column == 1:
+            hit.enabled = False
+    result = write_scans(
+        [scan],
+        tmp_path / "out",
+        replacements=engine.replacements,
+        overwrite=True,
+        engine=engine,
+    )[0]
+    assert result.dest is not None
+    with zipfile.ZipFile(result.dest) as package:
+        xml = package.read("xl/comments/comment1.xml").decode("utf-8")
+    assert xml.count("Acme Pharma") == 1
+    assert 'ref="B1" authorId="0"' in xml
+    assert "[SPONSOR]" in xml
 
 
 def test_xlsx_unchecked_cell_keeps_its_token(tmp_path: Path):
