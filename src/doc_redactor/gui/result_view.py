@@ -57,7 +57,18 @@ from doc_redactor.pdf_redactor import (
     placeholder_rect,
 )
 from doc_redactor.leak_check import MSG_NO_HITS, MSG_NO_HITS_LINE
-from doc_redactor.scan import KIND_IMAGE, KIND_PDF, KIND_WORD, FileScan
+from doc_redactor.scan import (
+    KIND_IMAGE,
+    KIND_PDF,
+    KIND_SHEET,
+    KIND_WORD,
+    CellPlace,
+    FileScan,
+    column_letter,
+    cycle_column,
+    disable_cell,
+    sheet_rows,
+)
 
 # Left is the previous page, right is the next page.
 PDF_PAGER = (("‹", -1), ("›", 1))
@@ -166,6 +177,9 @@ class ResultView:
         self._pdf_pager = None
         self._preview_text = None
         self._preview_scroll = None
+        self.loc_tree = None
+        self._sheet_book = None
+        self._sheet_canvas = None
         app = self.app
         app.drop_step_tip()
         for child in self.frame.winfo_children():
@@ -350,6 +364,7 @@ class ResultView:
         self.app.selected_cat = None
         self.app.current_hit = None
         self.app.pdf_page = 0
+        self.app.sheet_tab = 0
         self.refresh()
 
     def _summary(self, scans, fonts, all_fail: bool) -> None:
@@ -691,6 +706,8 @@ class ResultView:
                 ttk.Radiobutton(
                     controls, text="替换后", value="after", variable=mode, command=lambda: self._set_mode(mode.get())
                 ).pack(side="left")
+            if scan.kind == KIND_SHEET:
+                tk.Label(controls, text="公式未改", bg=BG_INSET, fg=INK2, font=fonts["small"]).pack(side="left", padx=8)
         if scan.kind == KIND_PDF and has_prev and scan.pages:
             pager = tk.Frame(head, bg=BG_INSET)
             pager.pack(fill="x")
@@ -782,8 +799,164 @@ class ResultView:
         body.pack(fill="both", expand=True)
         if scan.kind == KIND_IMAGE:
             self._image_canvas(body, scan)
+        elif scan.kind == KIND_SHEET:
+            self._sheet_preview(body, scan, fonts)
         else:
             self._text_preview(body, scan, fonts)
+
+    def _sheet_preview(self, parent, scan: FileScan, fonts) -> None:
+        sheets = list(scan.sheets)
+        if not sheets:
+            self._text_preview(parent, scan, fonts)
+            return
+        index = self.app.sheet_tab
+        if index < 0 or index >= len(sheets):
+            index = 0
+            self.app.sheet_tab = 0
+        book = ttk.Notebook(parent)
+        book.pack(fill="both", expand=True)
+        self._sheet_book = book
+        pages = []
+        for sheet in sheets:
+            page = tk.Frame(book, bg=BG_SURFACE)
+            book.add(page, text=sheet.title or "表")
+            pages.append(page)
+        self._sheet_grid(pages[index], scan, sheets[index], fonts)
+        try:
+            book.select(index)
+        except tk.TclError:
+            pass
+
+        def on_tab(_event=None) -> None:
+            if getattr(self, "_building", False) or not book.winfo_exists():
+                return
+            try:
+                chosen = book.index(book.select())
+            except tk.TclError:
+                return
+            if chosen == self.app.sheet_tab:
+                return
+            self.app.sheet_tab = chosen
+            self.app.current_hit = None
+            self.refresh()
+
+        book.bind("<<NotebookTabChanged>>", on_tab)
+
+    def _sheet_grid(self, parent, scan: FileScan, sheet, fonts) -> None:
+        canvas = tk.Canvas(parent, bg=BG_SURFACE, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        self._sheet_canvas = canvas
+        cells = list(sheet.cells)
+        if not cells:
+            return
+        columns = sorted({cell.column for cell in cells})
+        rows = sorted({cell.row for cell in cells})
+        by_pos = {(cell.column, cell.row): cell for cell in cells}
+        col_w, row_h = 96, 28
+        origin_x, origin_y = 8, 8
+        replacements = self.app.ruleset.replacements()
+        canvas.create_rectangle(origin_x, origin_y, origin_x + col_w, origin_y + row_h, outline=LINE2, fill=BG_INSET)
+        for i, column in enumerate(columns):
+            x = origin_x + (i + 1) * col_w
+            canvas.create_rectangle(x, origin_y, x + col_w, origin_y + row_h, outline=LINE2, fill=BG_INSET)
+            canvas.create_text(x + col_w / 2, origin_y + row_h / 2, text=column_letter(column), fill=INK2, font=fonts["small"])
+        for j, row in enumerate(rows):
+            y = origin_y + (j + 1) * row_h
+            canvas.create_rectangle(origin_x, y, origin_x + col_w, y + row_h, outline=LINE2, fill=BG_INSET)
+            canvas.create_text(origin_x + col_w / 2, y + row_h / 2, text=str(row + 1), fill=INK2, font=fonts["small"])
+            for i, column in enumerate(columns):
+                cell = by_pos.get((column, row))
+                x = origin_x + (i + 1) * col_w
+                shown, yellow = self._sheet_cell_face(scan, cell, replacements)
+                fill = HL2 if yellow else BG_SURFACE
+                tag = f"c-{column}-{row}"
+                tags = (tag, "yellow") if yellow else (tag,)
+                canvas.create_rectangle(x, y, x + col_w, y + row_h, outline=LINE2, fill=fill, tags=tags)
+                canvas.create_text(
+                    x + 6, y + row_h / 2, text=shown, anchor="w", fill=INK, font=fonts["small"], tags=tags
+                )
+
+        def on_click(event) -> None:
+            if self.app.written:
+                return
+            for item in canvas.find_overlapping(event.x, event.y, event.x, event.y):
+                tags = canvas.gettags(item)
+                if "yellow" not in tags:
+                    continue
+                addr = next((tag for tag in tags if tag.startswith("c-")), "")
+                parts = addr.split("-")
+                if len(parts) != 3:
+                    continue
+                disable_cell(scan, sheet.index, int(parts[1]), int(parts[2]))
+                self.refresh()
+                return
+
+        canvas.bind("<Button-1>", on_click)
+
+    def _sheet_cell_face(self, scan: FileScan, cell, replacements: dict[str, str]) -> tuple[str, bool]:
+        if cell is None:
+            return "", False
+        if cell.formula:
+            shown = "▇▇" if self.app.hide_text else cell.text
+            return shown, False
+        hits = [hit for hit_id in cell.hit_ids if (hit := self.app.hit_by_id(hit_id)) is not None]
+        yellow = any(hit.enabled for hit in hits)
+        if self.app.hide_text and (hits or cell.text):
+            return "▇▇", yellow
+        if self.app.preview_mode != "after" or not hits:
+            return cell.text, yellow
+        shown = cell.text
+        for hit in sorted((hit for hit in hits if hit.enabled), key=lambda item: item.start, reverse=True):
+            label = replacements.get(hit.category) or redaction_label(hit.category)
+            if shown[hit.start:hit.end] == hit.text:
+                shown = shown[: hit.start] + label + shown[hit.end :]
+        return shown, yellow
+
+    def _select_sheet_hit(self, loc, scan: FileScan) -> None:
+        hit = self.app.hit_by_id(self.app.current_hit)
+        if hit is None:
+            return
+        candidates = [f"hit:{hit.hit_id}"]
+        place = hit.place
+        if isinstance(place, CellPlace):
+            candidates.insert(0, f"cell:{place.sheet}:{place.column}:{place.row}")
+        for iid in candidates:
+            if loc.exists(iid):
+                loc.selection_set(iid)
+                loc.see(iid)
+                return
+
+    def _on_sheet_row(self, scan: FileScan | None, row: str, col: str) -> None:
+        if scan is None:
+            return
+        if row.startswith("col:"):
+            if col == "#1" and not self.app.written:
+                _prefix, sheet_s, column_s = row.split(":")
+                cycle_column(scan, int(sheet_s), int(column_s))
+                self.refresh()
+            return
+        if row.startswith("cell:"):
+            _prefix, sheet_s, column_s, row_s = row.split(":")
+            sheet_i, column_i, row_i = int(sheet_s), int(column_s), int(row_s)
+            for hit in scan.hits:
+                place = hit.place
+                if (
+                    isinstance(place, CellPlace)
+                    and place.sheet == sheet_i
+                    and place.column == column_i
+                    and place.row == row_i
+                ):
+                    self.app.current_hit = hit.hit_id
+                    self.refresh()
+                    return
+            return
+        if row.startswith("hit:"):
+            hid = int(row.split(":", 1)[1])
+            if col == "#1" and not self.app.written:
+                self.app.toggle_hit(hid)
+            else:
+                self.app.jump_to_hit(hid)
+            self.refresh()
 
     def _set_mode(self, value: str) -> None:
         self.app.preview_mode = value
@@ -1259,6 +1432,7 @@ class ResultView:
             ).pack(anchor="w", padx=8, pady=4)
 
         loc = ttk.Treeview(parent, columns=("on", "loc", "cat", "text"), show="headings", selectmode="browse")
+        self.loc_tree = loc
         loc.heading("on", text="" if self.app.written else "替换")
         loc.heading("loc", text="位置")
         loc.heading("cat", text="类")
@@ -1282,31 +1456,60 @@ class ResultView:
                 loc.column("on", width=width, minwidth=width)
                 loc.column("text", width=max(60, 126 - spare), minwidth=max(60, 124 - spare))
         tips: dict[str, str] = {}
-        for hit in hits:
-            if self.app.written and hit.enabled and hit.hit_id in unwritten_ids:
-                mark = MSG_UNWRITTEN
-            else:
-                mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
-            content = "▇▇▇▇" if self.app.hide_text else hit.text
-            if getattr(hit, "approx", False):
-                # OCR read a look-alike; show what it read so the user can judge.
-                # Screen only: nothing here is written to disk.
-                content = f"近似：读成 {content}" if not self.app.hide_text else f"近似 {content}"
-            # #54 M1: a cell that does not fit ends in 「…」; the whole text is in
-            # a hover/selection tip. Screen only: never written anywhere.
-            shown_loc = ellipsize(hit.location, fonts["small"], int(loc.column("loc", "width")) - CELL_PAD)
-            shown = ellipsize(content, fonts["small"], int(loc.column("text", "width")) - CELL_PAD)
-            if shown_loc != hit.location or shown != content or getattr(hit, "approx", False):
-                tips[str(hit.hit_id)] = f"{hit.location}\n{content}"
-            loc.insert(
-                "",
-                "end",
-                iid=str(hit.hit_id),
-                values=(mark, shown_loc, marker_for(cat_index.get(hit.category, 0)), shown),
-            )
-        if self.app.current_hit is not None and loc.exists(str(self.app.current_hit)):
-            loc.selection_set(str(self.app.current_hit))
-            loc.see(str(self.app.current_hit))
+        # `current` is reused later in this function. The click handler must
+        # keep the scan it was built for, not that later value.
+        sheet_scan = current if (
+            current is not None
+            and current.kind == KIND_SHEET
+            and current.status != "fail"
+            and bool(current.sheets)
+        ) else None
+        sheet_mode = sheet_scan is not None
+        if sheet_mode:
+            tab = self.app.sheet_tab
+            if tab < 0 or tab >= len(current.sheets):
+                tab = 0
+                self.app.sheet_tab = 0
+            sheet_index = current.sheets[tab].index
+            unwritten_file = any(hit.hit_id in unwritten_ids for hit in current.hits)
+            for row in sheet_rows(current, sheet_index, self.app.selected_cat):
+                mark = row.mark
+                if self.app.written and mark == "☑":
+                    mark = MSG_UNWRITTEN if unwritten_file else "✓"
+                content = "▇▇▇▇" if self.app.hide_text and row.text else row.text
+                cat_mark = marker_for(cat_index.get(row.category, 0)) if row.category else ""
+                shown_loc = ellipsize(row.location, fonts["small"], int(loc.column("loc", "width")) - CELL_PAD)
+                shown = ellipsize(content, fonts["small"], int(loc.column("text", "width")) - CELL_PAD)
+                if shown_loc != row.location or shown != content:
+                    tips[row.iid] = f"{row.location}\n{content}".strip()
+                loc.insert(row.parent, "end", iid=row.iid, open=True, values=(mark, shown_loc, cat_mark, shown))
+            self._select_sheet_hit(loc, current)
+        else:
+            for hit in hits:
+                if self.app.written and hit.enabled and hit.hit_id in unwritten_ids:
+                    mark = MSG_UNWRITTEN
+                else:
+                    mark = "✓" if self.app.written and hit.enabled else ("☑" if hit.enabled else "☐")
+                content = "▇▇▇▇" if self.app.hide_text else hit.text
+                if getattr(hit, "approx", False):
+                    # OCR read a look-alike; show what it read so the user can judge.
+                    # Screen only: nothing here is written to disk.
+                    content = f"近似：读成 {content}" if not self.app.hide_text else f"近似 {content}"
+                # #54 M1: a cell that does not fit ends in 「…」; the whole text is in
+                # a hover/selection tip. Screen only: never written anywhere.
+                shown_loc = ellipsize(hit.location, fonts["small"], int(loc.column("loc", "width")) - CELL_PAD)
+                shown = ellipsize(content, fonts["small"], int(loc.column("text", "width")) - CELL_PAD)
+                if shown_loc != hit.location or shown != content or getattr(hit, "approx", False):
+                    tips[str(hit.hit_id)] = f"{hit.location}\n{content}"
+                loc.insert(
+                    "",
+                    "end",
+                    iid=str(hit.hit_id),
+                    values=(mark, shown_loc, marker_for(cat_index.get(hit.category, 0)), shown),
+                )
+            if self.app.current_hit is not None and loc.exists(str(self.app.current_hit)):
+                loc.selection_set(str(self.app.current_hit))
+                loc.see(str(self.app.current_hit))
         loc.pack(fill="both", expand=True)
         self._fit_right_pane(parent, cat_box, tree, cat_scroll, loc, hf_rows)
 
@@ -1314,6 +1517,9 @@ class ResultView:
             row = loc.identify_row(event.y)
             col = loc.identify_column(event.x)
             if not row:
+                return
+            if not row.isdigit():
+                self._on_sheet_row(sheet_scan, row, col)
                 return
             hid = int(row)
             if col == "#1" and not self.app.written:
@@ -2033,7 +2239,7 @@ def _scan_status(scan: FileScan, app) -> tuple[str, str, str]:
 
 
 def _type_name(kind: str) -> str:
-    return {"word": "Word", "pdf": "PDF", "image": "图片"}.get(kind, kind)
+    return {"word": "Word", "pdf": "PDF", "image": "图片", "sheet": "表格"}.get(kind, kind)
 
 
 def _short_type(scan: FileScan) -> str:

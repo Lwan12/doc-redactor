@@ -109,9 +109,9 @@ class MainView:
         tk.Label(inner, text="⤓", bg=BG_INSET, fg=MUTED, font=self.app.fonts["title"]).pack()
         tk.Label(inner, text="把要脱敏的文件拖到这里", bg=BG_INSET, fg=INK, font=fonts["title"]).pack(pady=(8, 4))
         hint = (
-            "支持 Word（.docx）、PDF、图片（.png .jpg）。可以一次放很多个，也可以放整个文件夹。"
+            "支持 Word（.docx）、PDF、图片（.png .jpg .jpeg）和表格（.xlsx .xls .csv）。可以一次放很多个，也可以放整个文件夹。"
             if self.app.dnd_ok
-            else "未装上拖入支持，请点「选择文件…」。支持 Word（.docx）、PDF、图片（.png .jpg）。"
+            else "未装上拖入支持，请点「选择文件…」。支持 Word（.docx）、PDF、图片（.png .jpg .jpeg）和表格（.xlsx .xls .csv）。"
         )
         tk.Label(inner, text=hint, bg=BG_INSET, fg=INK2, font=fonts["small"], wraplength=480, justify="center").pack()
         row = tk.Frame(inner, bg=BG_INSET)
@@ -416,4 +416,6 @@ def _type_label(suffix: str) -> str:
         return "PDF"
     if lowered in {".png", ".jpg", ".jpeg"}:
         return "图片"
+    if lowered in {".xlsx", ".xls", ".csv"}:
+        return "表格"
     return lowered.lstrip(".")
