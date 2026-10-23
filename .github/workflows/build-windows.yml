@@ -244,25 +244,35 @@ jobs:
           }
           Push-Location $env:USERPROFILE
           try {
+            $PSNativeCommandUseErrorActionPreference = $false
             $listedPath = Join-Path $env:TEMP "tess-list-langs.txt"
             $rawPath = Join-Path $env:TEMP "tess-bin-list-langs.txt"
             & cmd.exe /d /c "`"$unicodeTess`" --list-langs > `"$listedPath`" 2>&1"
-            if ($LASTEXITCODE -ne 0) {
-              throw "launcher --list-langs failed: $(Get-Content -Raw -LiteralPath $listedPath)"
+            $launcherCode = $LASTEXITCODE
+            $listed = ""
+            if (Test-Path -LiteralPath $listedPath) {
+              $listed = [System.IO.File]::ReadAllText($listedPath)
             }
-            $listed = Get-Content -Raw -LiteralPath $listedPath
+            Write-Host "launcher exit $launcherCode"
+            Write-Host $listed
+            if ($launcherCode -ne 0) { throw "launcher --list-langs failed: $listed" }
             if ($listed -notmatch "chi_sim" -or $listed -notmatch "eng") {
               throw "launcher --list-langs missing languages: $listed"
             }
-            $PSNativeCommandUseErrorActionPreference = $false
             & cmd.exe /d /c "`"$unicodeBin`" --list-langs > `"$rawPath`" 2>&1"
             $binCode = $LASTEXITCODE
-            $PSNativeCommandUseErrorActionPreference = $true
-            $raw = Get-Content -Raw -LiteralPath $rawPath
-            if ($binCode -eq 0) { throw "tesseract-bin.exe --list-langs should fail on a Chinese path" }
+            $raw = ""
+            if (Test-Path -LiteralPath $rawPath) {
+              $raw = [System.IO.File]::ReadAllText($rawPath)
+            }
+            Write-Host "tesseract-bin exit $binCode"
+            Write-Host $raw
+            if ($binCode -eq 0) { throw "tesseract-bin.exe --list-langs should fail without the launcher" }
             if ($raw -notmatch "Illegal byte sequence" -and $raw -notmatch "filesystem error") {
               throw "tesseract-bin.exe failed for a different reason: $raw"
             }
           } finally {
             Pop-Location
           }
+          # pwsh -Command keeps the last native exit code. The raw binary is supposed to fail.
+          exit 0
