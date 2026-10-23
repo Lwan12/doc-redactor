@@ -23,6 +23,7 @@ PartFactory.part_type_for.setdefault(CT.WML_ENDNOTES, XmlPart)
 from doc_redactor.engine import Hit, RedactionEngine, merge_counts, redaction_label
 from doc_redactor.image_redactor import (
     MSG_BAD_IMAGE,
+    blocked_message,
     MSG_NO_OCR,
     MSG_VECTOR,
     WriteBlocked,
@@ -1132,7 +1133,12 @@ def _redact_media(path: Path, engine: RedactionEngine) -> dict[str, int]:
     replaced: dict[str, bytes] = {}
     for name, payload in payloads.items():
         suffix = Path(name).suffix
-        new_bytes, image_counts = redact_image_bytes(payload, suffix, engine)
+        try:
+            new_bytes, image_counts = redact_image_bytes(payload, suffix, engine)
+        except WriteBlocked:
+            raise
+        except Exception as exc:
+            raise WriteBlocked(blocked_message(exc, ocr=True)) from exc
         replaced[name] = new_bytes
         merge_counts(counts, image_counts)
 

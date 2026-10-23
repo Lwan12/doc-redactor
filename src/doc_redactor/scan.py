@@ -60,7 +60,7 @@ from doc_redactor.image_redactor import (
     MSG_BAD_IMAGE,
     MSG_BAD_IMAGE_AT,
     MSG_INLINE_FAILED,
-    MSG_NO_OCR,
+    blocked_message,
 )
 from doc_redactor.tesseract_cmd import require_tesseract
 from doc_redactor.verify_output import check_written, count_leftovers
@@ -718,9 +718,15 @@ def _scan_docx_media(path: Path, engine: RedactionEngine, ids: IdGen, scan: File
         try:
             with Image.open(io.BytesIO(payload)) as opened:
                 opened.load()
-                entities = analyze_image_entities(opened, engine)
+                loaded = opened.copy()
+        except Exception:
+            scan.blocked_reason = MSG_BAD_IMAGE.format(n=1)
+            scan.hits = [hit for hit in scan.hits if not hit.unit.startswith("media:")]
+            return
+        try:
+            entities = analyze_image_entities(loaded, engine)
         except Exception as exc:
-            scan.blocked_reason = _blocked_message(exc)
+            scan.blocked_reason = blocked_message(exc, ocr=True)
             scan.hits = [hit for hit in scan.hits if not hit.unit.startswith("media:")]
             return
         for entity in entities:
@@ -887,11 +893,7 @@ def _ocr_entities(image, engine: RedactionEngine, page_no: int, index: int) -> l
 
 
 def _blocked_message(exc: Exception) -> str:
-    if isinstance(exc, WriteBlocked):
-        return str(exc)
-    if isinstance(exc, RuntimeError) and "Tesseract" in str(exc):
-        return MSG_NO_OCR.format(n=1)
-    return MSG_BAD_IMAGE.format(n=1)
+    return blocked_message(exc)
 
 
 def _scan_image_file(path: Path, engine: RedactionEngine, ids: IdGen, scan: FileScan) -> FileScan:

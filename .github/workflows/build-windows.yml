@@ -85,6 +85,21 @@ jobs:
           python -m pytest -rs
           if ($LASTEXITCODE -ne 0) { throw "pytest failed" }
 
+      - name: Wrap tesseract.exe for a Chinese install path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "Visual Studio C++ tools not found" }
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
+          Rename-Item -LiteralPath "build\tesseract\tesseract.exe" -NewName "tesseract-bin.exe"
+          & cmd.exe /d /c "call `"$vcvars`" && cl /nologo /O1 /MT /W3 /DUNICODE /D_UNICODE /Fobuild\tesseract_launch.obj tools\tesseract_launch.c /Febuild\tesseract\tesseract.exe /link /INCREMENTAL:NO /SUBSYSTEM:CONSOLE"
+          if ($LASTEXITCODE -ne 0) { throw "tesseract launcher compile failed" }
+          foreach ($path in @("build\tesseract\tesseract.exe", "build\tesseract\tesseract-bin.exe")) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "missing $path" }
+          }
+
       - name: Build onedir package
         shell: pwsh
         run: |
@@ -218,3 +233,46 @@ jobs:
           Copy-Item -LiteralPath $unicodeOut -Destination $checkOut -Recurse
           & python (Join-Path $repo "tools\check_redacted_output.py") --output $checkOut --tesseract $tess
           if ($LASTEXITCODE -ne 0) { throw "Chinese-path redaction check failed" }
+
+          $unicodeTess = Join-Path $unicodeRoot "doc-redactor\tesseract\tesseract.exe"
+          $unicodeBin = Join-Path $unicodeRoot "doc-redactor\tesseract\tesseract-bin.exe"
+          foreach ($path in @($unicodeTess, $unicodeBin)) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "missing $path" }
+          }
+          foreach ($name in @("TESSERACT_CMD", "TESSDATA_PREFIX")) {
+            if (Test-Path "Env:$name") { Remove-Item "Env:$name" }
+          }
+          Push-Location $env:USERPROFILE
+          try {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $listedPath = Join-Path $env:TEMP "tess-list-langs.txt"
+            $rawPath = Join-Path $env:TEMP "tess-bin-list-langs.txt"
+            & cmd.exe /d /c "`"$unicodeTess`" --list-langs > `"$listedPath`" 2>&1"
+            $launcherCode = $LASTEXITCODE
+            $listed = ""
+            if (Test-Path -LiteralPath $listedPath) {
+              $listed = [System.IO.File]::ReadAllText($listedPath)
+            }
+            Write-Host "launcher exit $launcherCode"
+            Write-Host $listed
+            if ($launcherCode -ne 0) { throw "launcher --list-langs failed: $listed" }
+            if ($listed -notmatch "chi_sim" -or $listed -notmatch "eng") {
+              throw "launcher --list-langs missing languages: $listed"
+            }
+            & cmd.exe /d /c "`"$unicodeBin`" --list-langs > `"$rawPath`" 2>&1"
+            $binCode = $LASTEXITCODE
+            $raw = ""
+            if (Test-Path -LiteralPath $rawPath) {
+              $raw = [System.IO.File]::ReadAllText($rawPath)
+            }
+            Write-Host "tesseract-bin exit $binCode"
+            Write-Host $raw
+            if ($binCode -eq 0) { throw "tesseract-bin.exe --list-langs should fail without the launcher" }
+            if ($raw -notmatch "Illegal byte sequence" -and $raw -notmatch "filesystem error") {
+              throw "tesseract-bin.exe failed for a different reason: $raw"
+            }
+          } finally {
+            Pop-Location
+          }
+          # pwsh -Command keeps the last native exit code. The raw binary is supposed to fail.
+          exit 0

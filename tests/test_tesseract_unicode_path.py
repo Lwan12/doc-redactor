@@ -3,6 +3,7 @@
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -70,11 +71,120 @@ def test_windows_configuration_resolves_exe_without_mutating_environment(tmp_pat
     assert os.getcwd() == cwd
 
 
+def test_windows_ocr_child_gets_ascii_names_when_temp_path_is_chinese(tmp_path):
+    """Windows Tesseract rejects a Chinese absolute path. The child must see ASCII names."""
+    folder = tmp_path / "中文 软件" / "tesseract"
+    (folder / "tessdata").mkdir(parents=True)
+    seen = []
+
+    def original(input_filename, output_filename_base, extension, lang, config="", nice=0, timeout=0):
+        seen.append((input_filename, output_filename_base, extension, lang))
+        assert input_filename.isascii() and not Path(input_filename).is_absolute()
+        assert output_filename_base.isascii() and not Path(output_filename_base).is_absolute()
+        (folder / f"{output_filename_base}.{extension}").write_text("Project ABC-2026-001\n", encoding="utf-8")
+
+    module = SimpleNamespace(
+        tesseract_cmd=str(folder / "tesseract.exe"),
+        subprocess_args=lambda include_stdout=True: {"cwd": str(folder)},
+        run_tesseract=original,
+    )
+    tesseract_cmd._install_windows_ocr_adapter(module)
+    tesseract_cmd._install_windows_ocr_adapter(module)
+    chinese_temp = tmp_path / "临时 目录"
+    chinese_temp.mkdir()
+    image = chinese_temp / "CAPA回复1.PNG"
+    image.write_bytes(b"png-bytes")
+    output_base = str(chinese_temp / "tess_out")
+    module.run_tesseract(str(image), output_base, "txt", "chi_sim+eng")
+    assert seen == [(seen[0][0], seen[0][1], "txt", "chi_sim+eng")]
+    assert (folder / seen[0][0]).is_file() is False
+    assert list(folder.glob("ocr*")) == []
+    assert Path(output_base + ".txt").read_text(encoding="utf-8") == "Project ABC-2026-001\n"
+
+
+def test_windows_ocr_staging_cleans_up_when_the_child_fails(tmp_path):
+    folder = tmp_path / "中文 软件" / "tesseract"
+    (folder / "tessdata").mkdir(parents=True)
+
+    def original(input_filename, output_filename_base, extension, lang, config="", nice=0, timeout=0):
+        assert input_filename.isascii() and not Path(input_filename).is_absolute()
+        (folder / f"{output_filename_base}.{extension}").write_text("partial", encoding="utf-8")
+        raise RuntimeError("filesystem error: Cannot convert character sequence: Illegal byte sequence")
+
+    module = SimpleNamespace(
+        tesseract_cmd=str(folder / "tesseract.exe"),
+        subprocess_args=lambda include_stdout=True: {},
+        run_tesseract=original,
+    )
+    tesseract_cmd._install_windows_ocr_adapter(module)
+    image = tmp_path / "临时 目录" / "page.PNG"
+    image.parent.mkdir()
+    image.write_bytes(b"png-bytes")
+    with pytest.raises(RuntimeError, match="Illegal byte sequence"):
+        module.run_tesseract(str(image), str(tmp_path / "临时 目录" / "out"), "tsv", "eng")
+    assert list(folder.glob("ocr*")) == []
+
+
 def test_pytesseract_uses_absolute_image_and_output_paths():
     # The child cwd must not reinterpret a caller's relative image/output path.
     with pytesseract.pytesseract.save(Image.new("RGB", (12, 12), "white")) as (output, image):
         assert Path(output).is_absolute() and Path(image).is_absolute()
         assert Path(image).is_file()
+
+
+def test_real_tesseract_reads_staged_names_from_a_chinese_temp(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("Windows tesseract.exe needs the DLLs beside it; the packaged path is a separate check")
+    binary = shutil.which("tesseract")
+    if not binary:
+        pytest.skip("needs tesseract")
+    data_dirs = [
+        Path(os.environ["TESSDATA_PREFIX"]) if os.environ.get("TESSDATA_PREFIX") else None,
+        Path("/opt/homebrew/share/tessdata"),
+        Path("/usr/share/tesseract-ocr/5/tessdata"),
+        Path("/usr/share/tessdata"),
+    ]
+    source_data = next((path for path in data_dirs if path and (path / "eng.traineddata").is_file()), None)
+    if source_data is None:
+        pytest.skip("needs eng.traineddata")
+    folder = tmp_path / "中文 软件" / "tesseract"
+    (folder / "tessdata").mkdir(parents=True)
+    shutil.copy(binary, folder / Path(binary).name)
+    for name in ("eng.traineddata", "chi_sim.traineddata"):
+        if (source_data / name).is_file():
+            shutil.copy(source_data / name, folder / "tessdata" / name)
+    module = pytesseract.pytesseract
+    saved = (module.tesseract_cmd, module.subprocess_args, module.run_tesseract)
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "临时 目录"))
+    try:
+        module.tesseract_cmd = str(folder / Path(binary).name)
+        tesseract_cmd._install_windows_ocr_adapter(module)
+        image = Image.new("RGB", (900, 80), "white")
+        from PIL import ImageDraw, ImageFont
+
+        font_file = next(
+            (
+                path
+                for path in (
+                    Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+                    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+                    Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+                    Path("C:/Windows/Fonts/arial.ttf"),
+                )
+                if path.is_file()
+            ),
+            None,
+        )
+        if font_file is None:
+            pytest.skip("needs a TrueType font")
+        draw_font = ImageFont.truetype(str(font_file), 42)
+        ImageDraw.Draw(image).text((12, 16), "ABC-2026-001", fill="black", font=draw_font)
+        text = pytesseract.image_to_string(image, lang="eng")
+    finally:
+        module.tesseract_cmd, module.subprocess_args, module.run_tesseract = saved
+    assert "ABC-2026-001" in "".join(text.split())
+    assert list(folder.glob("ocr*")) == []
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires the real Windows Tesseract build")
