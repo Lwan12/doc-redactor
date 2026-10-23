@@ -81,23 +81,21 @@ from doc_redactor.ruleset import (
     word_dup_message,
 )
 from doc_redactor.scan import (
+    KIND_BY_SUFFIX,
     MSG_ALREADY_WRITTEN,
-    set_file_hf_confirmed,
+    CellPlace,
     FileScan,
     blocked_write_results,
+    dialog_filetypes,
+    disable_cell,
     output_dir_unwritable,
     scan_paths,
+    set_file_hf_confirmed,
     size_label,
     write_scans,
 )
 
 _EXPORT_CHOICES = (("全部规则", "all"), ("只导出勾选的几条", "enabled"))
-
-
-SUPPORTED = [
-    ("支持的文件", "*.docx *.pdf *.png *.jpg *.jpeg"),
-    ("所有文件", "*.*"),
-]
 
 
 def create_root():
@@ -175,6 +173,7 @@ class App:
         self.selected_cat: str | None = None
         self.current_hit: int | None = None
         self.pdf_page = 0
+        self.sheet_tab = 0
         self.narrow = False
         self.screen = "main"
         self.rules_page = "list"
@@ -256,7 +255,7 @@ class App:
             path = Path(str(raw).strip("{}"))
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in {".docx", ".pdf", ".png", ".jpg", ".jpeg"}:
+            if path.suffix.lower() not in KIND_BY_SUFFIX:
                 continue
             if path in self.files:
                 continue
@@ -392,7 +391,7 @@ class App:
             self.show_rules()
 
     def browse_files(self) -> None:
-        selected = filedialog.askopenfilenames(title="选择文件", filetypes=SUPPORTED)
+        selected = filedialog.askopenfilenames(title="选择文件", filetypes=dialog_filetypes())
         if selected:
             self.add_files(selected)
 
@@ -403,7 +402,7 @@ class App:
         folder = Path(chosen)
         found = []
         for path in sorted(folder.rglob("*")):
-            if path.suffix.lower() in {".docx", ".pdf", ".png", ".jpg", ".jpeg"} and path.is_file():
+            if path.suffix.lower() in KIND_BY_SUFFIX and path.is_file():
                 found.append(path)
         self.add_files(found)
 
@@ -925,6 +924,7 @@ class App:
         self.selected_cat = None
         self.current_hit = None
         self.pdf_page = 0
+        self.sheet_tab = 0
         self.written = False
         self.write_errors = {}
         self.write_notes = {}
@@ -968,6 +968,13 @@ class App:
         hit = self.hit_by_id(hit_id)
         if hit is None or self.written:
             return
+        place = hit.place
+        if isinstance(place, CellPlace):
+            for scan in self.scans:
+                if any(item.hit_id == hit_id for item in scan.hits):
+                    disable_cell(scan, place.sheet, place.column, place.row)
+                    return
+            return
         hit.enabled = not hit.enabled
 
     def jump_to_hit(self, hit_id: int) -> None:
@@ -978,6 +985,8 @@ class App:
                     self.current_hit = hit_id
                     if hit.unit.startswith("page:"):
                         self.pdf_page = hit.page
+                    if hit.place is not None:
+                        self.sheet_tab = hit.place.sheet
                     return
 
     def remove_scan(self, scan: FileScan) -> None:
@@ -1164,6 +1173,7 @@ class App:
         self.selected_cat = None
         self.current_hit = None
         self.pdf_page = 0
+        self.sheet_tab = 0
         self.output_error = None
         self.first_run_hint = False
         self.save_failed = False
