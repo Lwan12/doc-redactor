@@ -260,7 +260,7 @@ jobs:
             $PSNativeCommandUseErrorActionPreference = $true
             $raw = Get-Content -Raw -LiteralPath $rawPath
             if ($binCode -eq 0) { throw "tesseract-bin.exe --list-langs should fail on a Chinese path" }
-            if ($raw -notmatch "Illegal byte sequence") {
+            if ($raw -notmatch "Illegal byte sequence" -and $raw -notmatch "filesystem error") {
               throw "tesseract-bin.exe failed for a different reason: $raw"
             }
           } finally {

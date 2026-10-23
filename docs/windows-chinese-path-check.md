@@ -161,4 +161,4 @@ PDF 某一页识别失败时，程序可以留下部分脱敏文件，并写明�
 
 退出码是 0。输出里有 `chi_sim` 和 `eng`。没有 `Illegal byte sequence`。
 
-同一条命令把 `tesseract.exe` 换成 `tesseract-bin.exe`。退出码不是 0，并且能看到 `Illegal byte sequence`。这用来确认失败仍在原程序里，通过的是启动器。
+同一条命令把 `tesseract.exe` 换成 `tesseract-bin.exe`。退出码不是 0，并且输出里有 `Illegal byte sequence` 或 `filesystem error`。这用来确认失败仍在原程序里，通过的是启动器。当前目录是中文时常见前一句；当前目录是英文、程序本身在中文路径下时常见后一句。
