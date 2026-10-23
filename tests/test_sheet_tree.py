@@ -1,5 +1,3 @@
-"""Result screen for a spreadsheet. Column rows, a yellow cell, and sheet tabs."""
-
 from __future__ import annotations
 
 import os

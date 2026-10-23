@@ -9,6 +9,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
+from typing import Literal
 
 import pymupdf
 from PIL import Image
@@ -70,7 +71,6 @@ KIND_PDF = "pdf"
 KIND_IMAGE = "image"
 KIND_SHEET = "sheet"
 
-# The only suffix allow-list. .xlsm is absent on purpose.
 KIND_BY_SUFFIX = {
     ".docx": KIND_WORD,
     ".pdf": KIND_PDF,
@@ -176,7 +176,7 @@ class CommentPlace:
     sheet: int
     column: int
     row: int
-    part: str  # "text" or "author"
+    part: Literal["text", "author"]
 
 
 @dataclass(frozen=True)
@@ -248,7 +248,6 @@ class FileScan:
     hf_units: dict = field(default_factory=dict, repr=False)
     hf_lines: dict = field(default_factory=dict, repr=False)
     hf_line_sources: dict = field(default_factory=dict, repr=False)
-    # Spreadsheet preview. Empty for Word, PDF, and images. The writer does not read it.
     sheets: tuple[SheetView, ...] = ()
 
     def hf_has(self, source: str) -> bool:
@@ -1184,7 +1183,6 @@ def _row_of(top: int, row_height: int = 36) -> int:
 
 
 def column_letter(index: int) -> str:
-    """0 -> A. Spreadsheet columns, not a second on/off flag."""
     n = index + 1
     letters = []
     while n:
@@ -1203,7 +1201,6 @@ def _cell_hits(scan: FileScan, sheet: int, column: int) -> list[LocatedHit]:
 
 
 def column_state(scan: FileScan, sheet: int, column: int) -> str:
-    """on when every cell hit in the column is checked, off when none are, mixed otherwise."""
     group = _cell_hits(scan, sheet, column)
     if not group:
         return "off"
@@ -1220,10 +1217,6 @@ def column_mark(state: str) -> str:
 
 
 def cycle_column(scan: FileScan, sheet: int, column: int) -> None:
-    """The column checkbox. on turns every cell hit off. mixed and off turn every cell hit on.
-
-    A category filter may hide rows. It does not shrink this set.
-    """
     group = _cell_hits(scan, sheet, column)
     enable = column_state(scan, sheet, column) != "on"
     for hit in group:
@@ -1231,7 +1224,6 @@ def cycle_column(scan: FileScan, sheet: int, column: int) -> None:
 
 
 def disable_cell(scan: FileScan, sheet: int, column: int, row: int) -> bool:
-    """Uncheck every cell hit at this row. A no-op when the column is already off."""
     if column_state(scan, sheet, column) == "off":
         return False
     found = False
@@ -1261,7 +1253,6 @@ class LocationRow:
 
 
 def sheet_rows(scan: FileScan, sheet_index: int, category: str | None = None) -> list[LocationRow]:
-    """Right-hand rows for one worksheet. One row per column, child rows only while mixed."""
     columns = sorted(
         {
             hit.place.column

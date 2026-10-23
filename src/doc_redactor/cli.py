@@ -109,7 +109,6 @@ def redact_path(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, i
 
 
 def _redact_sheet(src: Path, outdir: Path, engine: RedactionEngine) -> dict[str, int]:
-    """Scan and write one spreadsheet. The report comes from write_scans."""
     scan = scan_path(src, engine)
     if scan.status == "fail":
         raise WriteBlocked(scan.error or MSG_OPEN_FAIL)

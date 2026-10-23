@@ -1,5 +1,3 @@
-"""Spreadsheet redaction. In-scope text loses the fictional tokens. Formulas keep theirs."""
-
 from __future__ import annotations
 
 import hashlib

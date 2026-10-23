@@ -1,5 +1,3 @@
-"""Column checkbox state. No workbook and no tkinter."""
-
 from pathlib import Path
 
 from doc_redactor.scan import (

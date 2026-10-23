@@ -1456,15 +1456,12 @@ class ResultView:
                 loc.column("on", width=width, minwidth=width)
                 loc.column("text", width=max(60, 126 - spare), minwidth=max(60, 124 - spare))
         tips: dict[str, str] = {}
-        # `current` is reused later in this function. The click handler must
-        # keep the scan it was built for, not that later value.
-        sheet_scan = current if (
+        sheet_mode = (
             current is not None
             and current.kind == KIND_SHEET
             and current.status != "fail"
             and bool(current.sheets)
-        ) else None
-        sheet_mode = sheet_scan is not None
+        )
         if sheet_mode:
             tab = self.app.sheet_tab
             if tab < 0 or tab >= len(current.sheets):
@@ -1519,7 +1516,7 @@ class ResultView:
             if not row:
                 return
             if not row.isdigit():
-                self._on_sheet_row(sheet_scan, row, col)
+                self._on_sheet_row(current, row, col)
                 return
             hid = int(row)
             if col == "#1" and not self.app.written:
@@ -1562,9 +1559,9 @@ class ResultView:
         # Leaving the page or scrolling must not leave a tip floating (self-review).
         for seq in ("<Unmap>", "<Destroy>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
             loc.bind(seq, lambda _e: self._hide_loc_tip(), add="+")
-        current = str(self.app.current_hit) if self.app.current_hit is not None else None
-        if current in tips:
-            loc.after_idle(lambda: loc.winfo_exists() and self._show_loc_tip(loc, current, tips[current]))
+        tip_row = str(self.app.current_hit) if self.app.current_hit is not None else None
+        if tip_row in tips:
+            loc.after_idle(lambda: loc.winfo_exists() and self._show_loc_tip(loc, tip_row, tips[tip_row]))
         else:
             self._hide_loc_tip()
 

@@ -1,5 +1,3 @@
-"""Read and write .xlsx, .xls, and .csv. Word, PDF, and image writers stay out of here."""
-
 from __future__ import annotations
 
 import csv
@@ -61,8 +59,6 @@ BIFF_MAX = 8224
 
 
 class SheetRefused(Exception):
-    """The whole spreadsheet is refused. Not a ValueError, so the PDF password mapper leaves the sentence alone."""
-
     def __init__(self, sentence: str) -> None:
         self.sentence = sentence
         super().__init__(sentence)
@@ -458,8 +454,6 @@ def _final_title(title: str, hits: list[LocatedHit], label, used: set[str]) -> s
     return sanitize_sheet_title(_apply(title, hits, label), used)
 
 
-# --- xlsx -----------------------------------------------------------------
-
 
 def _zip_names(path: Path) -> list[str]:
     try:
@@ -592,7 +586,6 @@ def _load_xlsx(path: Path, *, refuse: bool) -> _Book:
             if not name.endswith(".xml") or "comment" not in name.lower():
                 continue
             xml = package.read(name).decode("utf-8")
-            # A comment part with no sheet relationship stays on the first sheet.
             target = 0
             for index, sheet_name in enumerate(paths):
                 rel_name = sheet_name.replace("xl/worksheets/", "xl/worksheets/_rels/") + ".rels"
@@ -868,8 +861,6 @@ def _rewrite_comments(xml: str, scan: FileScan, label) -> str:
     return xml
 
 
-# --- csv ------------------------------------------------------------------
-
 
 def _csv_dialect(text: str) -> csv.Dialect:
     try:
@@ -944,8 +935,6 @@ def _csv_field(value: str, delimiter: str) -> str:
         return '"' + value.replace('"', '""') + '"'
     return value
 
-
-# --- xls ------------------------------------------------------------------
 
 
 @dataclass
@@ -1374,8 +1363,6 @@ def _boundsheet_name(payload: bytes) -> str:
 def _encode_boundsheet(pos: int, vis: int, kind: int, name: str) -> bytes:
     return struct.pack("<LBB", pos, vis, kind) + _encode_biff_string(name, short=True)
 
-
-# --- OLE ------------------------------------------------------------------
 
 
 def _read_ole(data: bytes) -> dict[str, bytes]:
