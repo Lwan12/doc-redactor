@@ -30,7 +30,6 @@ from doc_redactor.image_redactor import (
     _format_for_suffix,
     analyze_image_entities,
     is_embedded_raster_suffix,
-    is_raster_suffix,
     paint_image_boxes,
     PdfImageOcrFailed,
     checked_pdf_image_entities,
@@ -66,15 +65,28 @@ from doc_redactor.tesseract_cmd import require_tesseract
 from doc_redactor.verify_output import check_written, count_leftovers
 
 FILE_HIT_WARN = 500
-SUPPORTED = {".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 KIND_WORD = "word"
 KIND_PDF = "pdf"
 KIND_IMAGE = "image"
+KIND_SHEET = "sheet"
+
+# The only suffix allow-list. .xlsm is absent on purpose.
+KIND_BY_SUFFIX = {
+    ".docx": KIND_WORD,
+    ".pdf": KIND_PDF,
+    ".png": KIND_IMAGE,
+    ".jpg": KIND_IMAGE,
+    ".jpeg": KIND_IMAGE,
+    ".xlsx": KIND_SHEET,
+    ".xls": KIND_SHEET,
+    ".csv": KIND_SHEET,
+}
+SUPPORTED = frozenset(KIND_BY_SUFFIX)
 
 MSG_ENCRYPTED_PDF = (
     "这个 PDF 设了打开密码，工具打不开它。请先在 PDF 阅读器里另存一份没有密码的，再拖进来。"
 )
-MSG_UNSUPPORTED = "不支持这个文件类型。请用 Word（.docx）、PDF 或图片（.png .jpg）。"
+MSG_UNSUPPORTED = "不支持这个文件类型。请用 Word（.docx）、PDF、图片（.png .jpg .jpeg）或表格（.xlsx .xls .csv）。"
 MSG_MISSING = "找不到这个文件。"
 MSG_OPEN_FAIL = "打不开这个文件。请确认文件没有损坏，再试一次。"
 MSG_ALREADY_WRITTEN = "这个文件之前已写出，已跳过"
@@ -147,6 +159,57 @@ class LocatedHit:
     hf_role: str = ""
     # Which way that block was found (tag / sign / repeat / word).
     hf_source: str = ""
+    place: SheetPlace | None = None
+
+
+@dataclass(frozen=True)
+class CellPlace:
+    sheet: int
+    column: int
+    row: int
+    hidden_row: bool = False
+    hidden_col: bool = False
+
+
+@dataclass(frozen=True)
+class CommentPlace:
+    sheet: int
+    column: int
+    row: int
+    part: str  # "text" or "author"
+
+
+@dataclass(frozen=True)
+class HeaderFooterPlace:
+    sheet: int
+    slot: str
+    literal: int = 0
+
+
+@dataclass(frozen=True)
+class SheetNamePlace:
+    sheet: int
+
+
+SheetPlace = CellPlace | CommentPlace | HeaderFooterPlace | SheetNamePlace
+
+
+@dataclass(frozen=True)
+class SheetCellView:
+    column: int
+    row: int
+    text: str
+    formula: bool
+    hidden_row: bool
+    hidden_col: bool
+    hit_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class SheetView:
+    title: str
+    index: int
+    cells: tuple[SheetCellView, ...] = ()
 
 
 @dataclass
@@ -185,6 +248,8 @@ class FileScan:
     hf_units: dict = field(default_factory=dict, repr=False)
     hf_lines: dict = field(default_factory=dict, repr=False)
     hf_line_sources: dict = field(default_factory=dict, repr=False)
+    # Spreadsheet preview. Empty for Word, PDF, and images. The writer does not read it.
+    sheets: tuple[SheetView, ...] = ()
 
     def hf_has(self, source: str) -> bool:
         return hf.has_source(self.hf_plan, source)
@@ -311,14 +376,12 @@ class IdGen:
 
 
 def file_kind(path: Path) -> str | None:
-    suffix = path.suffix.lower()
-    if suffix == ".docx":
-        return KIND_WORD
-    if suffix == ".pdf":
-        return KIND_PDF
-    if is_raster_suffix(suffix):
-        return KIND_IMAGE
-    return None
+    return KIND_BY_SUFFIX.get(path.suffix.lower())
+
+
+def dialog_filetypes() -> list[tuple[str, str]]:
+    patterns = " ".join(f"*{suffix}" for suffix in KIND_BY_SUFFIX)
+    return [("支持的文件", patterns), ("所有文件", "*.*")]
 
 
 def size_label(path: Path) -> str:
@@ -355,10 +418,21 @@ def scan_path(
             return _scan_docx(target, engine, ids, base, remove_hf)
         if kind == KIND_PDF:
             return _scan_pdf(target, engine, ids, base, remove_hf)
+        if kind == KIND_SHEET:
+            from doc_redactor.sheet import SheetRefused, fill_scan
+
+            try:
+                return fill_scan(target, engine, ids, base)
+            except SheetRefused as exc:
+                base.hits.clear()
+                base.sheets = ()
+                base.status = "fail"
+                base.error = exc.sentence
+                return base
         return _scan_image_file(target, engine, ids, base)
     except ValueError as exc:
         message = str(exc)
-        if "加密" in message or "password" in message.lower():
+        if kind == KIND_PDF and ("加密" in message or "password" in message.lower()):
             base.error = MSG_ENCRYPTED_PDF
         else:
             base.error = message
@@ -554,6 +628,14 @@ def write_scans(
 def _leftovers_after_write(
     scan: FileScan, dest: Path, mapping: dict[str, str], engine, counts=None, ignore_tagged: bool = False
 ) -> int:
+    if scan.kind == KIND_SHEET:
+        from doc_redactor.sheet import sheet_leftover_count
+
+        return sheet_leftover_count(
+            dest,
+            [hit.text for hit in scan.enabled_hits],
+            [hit.text for hit in scan.hits if not hit.enabled],
+        )
     if scan.kind not in (KIND_WORD, KIND_PDF):
         return 0
     labels = set(mapping.values()) | {redaction_label(hit.category) for hit in scan.hits}
@@ -603,6 +685,10 @@ def write_scan(
         return _write_pdf(scan, dest, label, engine)
     if scan.kind == KIND_IMAGE:
         return _write_image(scan, dest)
+    if scan.kind == KIND_SHEET:
+        from doc_redactor.sheet import write_sheet
+
+        return write_sheet(scan, dest, label)
     raise ValueError(MSG_UNSUPPORTED)
 
 
@@ -1095,3 +1181,155 @@ def _is_media(name: str) -> bool:
 
 def _row_of(top: int, row_height: int = 36) -> int:
     return max(1, int(top) // row_height + 1)
+
+
+def column_letter(index: int) -> str:
+    """0 -> A. Spreadsheet columns, not a second on/off flag."""
+    n = index + 1
+    letters = []
+    while n:
+        n, rem = divmod(n - 1, 26)
+        letters.append(chr(65 + rem))
+    return "".join(reversed(letters))
+
+
+def _cell_hits(scan: FileScan, sheet: int, column: int) -> list[LocatedHit]:
+    found = []
+    for hit in scan.hits:
+        place = hit.place
+        if isinstance(place, CellPlace) and place.sheet == sheet and place.column == column:
+            found.append(hit)
+    return found
+
+
+def column_state(scan: FileScan, sheet: int, column: int) -> str:
+    """on when every cell hit in the column is checked, off when none are, mixed otherwise."""
+    group = _cell_hits(scan, sheet, column)
+    if not group:
+        return "off"
+    enabled = [hit.enabled for hit in group]
+    if all(enabled):
+        return "on"
+    if any(enabled):
+        return "mixed"
+    return "off"
+
+
+def column_mark(state: str) -> str:
+    return {"on": "☑", "mixed": "▣", "off": "☐"}.get(state, "☐")
+
+
+def cycle_column(scan: FileScan, sheet: int, column: int) -> None:
+    """The column checkbox. on turns every cell hit off. mixed and off turn every cell hit on.
+
+    A category filter may hide rows. It does not shrink this set.
+    """
+    group = _cell_hits(scan, sheet, column)
+    enable = column_state(scan, sheet, column) != "on"
+    for hit in group:
+        hit.enabled = enable
+
+
+def disable_cell(scan: FileScan, sheet: int, column: int, row: int) -> bool:
+    """Uncheck every cell hit at this row. A no-op when the column is already off."""
+    if column_state(scan, sheet, column) == "off":
+        return False
+    found = False
+    for hit in scan.hits:
+        place = hit.place
+        if (
+            isinstance(place, CellPlace)
+            and place.sheet == sheet
+            and place.column == column
+            and place.row == row
+        ):
+            found = True
+            hit.enabled = False
+    return found
+
+
+@dataclass(frozen=True)
+class LocationRow:
+    iid: str
+    parent: str
+    mark: str
+    location: str
+    category: str
+    text: str
+    jump_id: int | None
+    action: str
+
+
+def sheet_rows(scan: FileScan, sheet_index: int, category: str | None = None) -> list[LocationRow]:
+    """Right-hand rows for one worksheet. One row per column, child rows only while mixed."""
+    columns = sorted(
+        {
+            hit.place.column
+            for hit in scan.hits
+            if isinstance(hit.place, CellPlace) and hit.place.sheet == sheet_index
+        }
+    )
+    rows: list[LocationRow] = []
+    for column in columns:
+        group = _cell_hits(scan, sheet_index, column)
+        if category and not any(hit.category == category for hit in group):
+            continue
+        state = column_state(scan, sheet_index, column)
+        extras = []
+        if any(hit.place.hidden_row for hit in group if isinstance(hit.place, CellPlace)):
+            extras.append("含隐藏行")
+        if any(hit.place.hidden_col for hit in group if isinstance(hit.place, CellPlace)):
+            extras.append("隐藏列")
+        extra = ("，" + "，".join(extras)) if extras else ""
+        letter = column_letter(column)
+        iid = f"col:{sheet_index}:{column}"
+        rows.append(
+            LocationRow(
+                iid=iid,
+                parent="",
+                mark=column_mark(state),
+                location=f"{letter} 整列 {len(group)} 处{extra}",
+                category="",
+                text="",
+                jump_id=None,
+                action="column",
+            )
+        )
+        if state != "mixed":
+            continue
+        disabled_rows = sorted({hit.place.row for hit in group if isinstance(hit.place, CellPlace) and not hit.enabled})
+        for row in disabled_rows:
+            cell_hits = [hit for hit in group if isinstance(hit.place, CellPlace) and hit.place.row == row]
+            if category and not any(hit.category == category for hit in cell_hits):
+                continue
+            rows.append(
+                LocationRow(
+                    iid=f"cell:{sheet_index}:{column}:{row}",
+                    parent=iid,
+                    mark="",
+                    location=f"  {letter}{row + 1}",
+                    category=cell_hits[0].category,
+                    text=" ".join(hit.text for hit in cell_hits),
+                    jump_id=cell_hits[0].hit_id,
+                    action="child",
+                )
+            )
+    for hit in scan.hits:
+        place = hit.place
+        if isinstance(place, CellPlace) or place is None or place.sheet != sheet_index:
+            continue
+        if category and hit.category != category:
+            continue
+        rows.append(
+            LocationRow(
+                iid=f"hit:{hit.hit_id}",
+                parent="",
+                mark="☑" if hit.enabled else "☐",
+                location=hit.location,
+                category=hit.category,
+                text=hit.text,
+                jump_id=hit.hit_id,
+                action="hit",
+            )
+        )
+    return rows
