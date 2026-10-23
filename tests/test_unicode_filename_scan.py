@@ -12,9 +12,8 @@ from doc_redactor.config import load_rules
 from doc_redactor.scan import scan_path, write_scans
 from doc_redactor.tesseract_cmd import configure_tesseract
 from doc_redactor.verify_output import count_leftovers
-from helpers import RULES, needs_tesseract
+from helpers import RULES, load_make_samples, needs_tesseract
 
-_FONT = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
 _CASES = [
     ("english", "CAPA回复1", False),
     ("中文目录", "report", False),
@@ -62,7 +61,7 @@ def _assert_unreadable(text: str) -> None:
 
 
 def _card(path: Path) -> None:
-    font = ImageFont.truetype(str(_FONT), 64)
+    font = ImageFont.truetype(str(load_make_samples().font_path()), 64)
     image = Image.new("RGB", (1400, 360), "white")
     draw = ImageDraw.Draw(image)
     y = 24
