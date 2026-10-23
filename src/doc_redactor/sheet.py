@@ -811,6 +811,7 @@ def _rewrite_comments(xml: str, scan: FileScan, label) -> str:
         return xml
     authors = [unescape(text) for text in re.findall(r"<author>(.*?)</author>", xml, re.DOTALL)]
     extra: list[str] = []
+    spent: set[int] = set()
 
     def one(match: re.Match[str]) -> str:
         block = match.group(0)
@@ -850,6 +851,7 @@ def _rewrite_comments(xml: str, scan: FileScan, label) -> str:
             if updated_author != authors[author_id]:
                 extra.append(updated_author)
                 new_id = len(authors) + len(extra) - 1
+                spent.add(author_id)
                 block = _replace_attr(block, "authorId", str(new_id)) if "authorId=" in block.split(">", 1)[0] else block
                 block = re.sub(r'authorId="\d+"', f'authorId="{new_id}"', block, count=1)
         return block
@@ -858,6 +860,20 @@ def _rewrite_comments(xml: str, scan: FileScan, label) -> str:
     if extra:
         added = "".join(f"<author>{_xml_text(text)}</author>" for text in extra)
         xml = xml.replace("</authors>", added + "</authors>", 1)
+    referenced = {int(value) for value in re.findall(r'authorId="(\d+)"', xml)}
+    orphaned = spent - referenced
+    if orphaned:
+        index = 0
+
+        def blank(match: re.Match[str]) -> str:
+            nonlocal index
+            current = index
+            index += 1
+            if current in orphaned:
+                return "<author></author>"
+            return match.group(0)
+
+        xml = re.sub(r"<author>.*?</author>", blank, xml, flags=re.DOTALL)
     return xml
 
 
