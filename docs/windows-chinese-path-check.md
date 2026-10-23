@@ -150,3 +150,15 @@ PDF 某一页识别失败时，程序可以留下部分脱敏文件，并写明�
 每一条记下输入路径、屏幕上的原句、输出文件名、三个原词还在不在。真实的 `CAPA回复1.docx` 可以另测一次，但不要把它的内容写进这份记录以外的地方。那份原件如果是坏图、EMF 或 WMF，正确结果仍是「打不开」，并且不写出。
 
 把记录和 zip 的 SHA256 一起留下。SHA256 对上、四条路径都写出、坏图被拦住，这份 Windows 检查才算过。
+
+## 单独启动 tesseract.exe
+
+安装目录要含中文。在另一个目录里运行，不要先进入 `tesseract` 文件夹，也不要设置 `TESSDATA_PREFIX`。
+
+```powershell
+& "D:\测试\doc-redactor\tesseract\tesseract.exe" --list-langs
+```
+
+退出码是 0。输出里有 `chi_sim` 和 `eng`。没有 `Illegal byte sequence`。
+
+同一条命令把 `tesseract.exe` 换成 `tesseract-bin.exe`。退出码不是 0，并且能看到 `Illegal byte sequence`。这用来确认失败仍在原程序里，通过的是启动器。

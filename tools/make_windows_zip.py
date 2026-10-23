@@ -15,6 +15,7 @@ REQUIRED = (
     "doc-redactor.exe",
     "doc-redactor-gui.exe",
     "tesseract/tesseract.exe",
+    "tesseract/tesseract-bin.exe",
     "tesseract/tessdata/eng.traineddata",
     "tesseract/tessdata/chi_sim.traineddata",
 )

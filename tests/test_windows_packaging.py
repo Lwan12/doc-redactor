@@ -52,6 +52,7 @@ def _stage_onedir(root: Path, *, admin: bool = False) -> None:
     (root / "doc-redactor.exe").write_bytes(blob)
     (root / "doc-redactor-gui.exe").write_bytes(blob)
     (root / "tesseract" / "tesseract.exe").write_bytes(b"tess")
+    (root / "tesseract" / "tesseract-bin.exe").write_bytes(b"real")
     (root / "tesseract" / "libtesseract.dll").write_bytes(b"dll")
     (root / "tesseract" / "tessdata" / "eng.traineddata").write_bytes(b"eng")
     (root / "tesseract" / "tessdata" / "chi_sim.traineddata").write_bytes(b"chi")
@@ -73,6 +74,7 @@ def test_make_windows_zip_writes_hash_and_rejects_admin(tmp_path: Path):
     assert "doc-redactor/doc-redactor.exe" in names
     assert "doc-redactor/doc-redactor-gui.exe" in names
     assert "doc-redactor/tesseract/tesseract.exe" in names
+    assert "doc-redactor/tesseract/tesseract-bin.exe" in names
     assert "doc-redactor/tesseract/libtesseract.dll" in names
     assert "doc-redactor/tesseract/tessdata/chi_sim.traineddata" in names
     assert "doc-redactor/tesseract/tessdata/eng.traineddata" in names

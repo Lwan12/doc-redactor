@@ -31,11 +31,11 @@ Actions 产物里有 `doc-redactor-windows.zip` 和 `SHA256SUMS.txt`。zip 解�
 
 - `doc-redactor.exe`，命令行
 - `doc-redactor-gui.exe`，窗口
-- `tesseract\`：`tesseract.exe`、DLL，以及 `tessdata` 里的 `chi_sim.traineddata` 和 `eng.traineddata`
+- `tesseract\`：`tesseract.exe`、`tesseract-bin.exe`、DLL，以及 `tessdata` 里的 `chi_sim.traineddata` 和 `eng.traineddata`
 
 两个 exe 共用这一目录里的依赖。不要把 exe 单独拷走。图片脱敏用包内的 Tesseract，不用另外安装，也不用设置 `TESSERACT_CMD`。
 
-软件目录含中文时，程序会让每次 OCR 子进程从自己的 Tesseract 目录读取相对路径 `tessdata`，避免 Windows 版 Tesseract 转换中文语言数据路径时报错。图片和识别结果也放在这个目录下的英文文件名上，程序再把结果读回临时目录。这样临时目录含中文时，Tesseract 看不到那条中文绝对路径。这些处理不改变整个程序的工作目录，也不需要修改 Windows 区域设置。它们只用于软件内的 OCR 调用，不改变单独运行 `tesseract.exe` 的行为。
+软件目录含中文时，程序会让每次 OCR 子进程从自己的 Tesseract 目录读取相对路径 `tessdata`，避免 Windows 版 Tesseract 转换中文语言数据路径时报错。图片和识别结果也放在这个目录下的英文文件名上，程序再把结果读回临时目录。这样临时目录含中文时，Tesseract 看不到那条中文绝对路径。这些处理不改变整个程序的工作目录，也不需要修改 Windows 区域设置。包里的 `tesseract.exe` 是启动器。直接运行它时，如果 `TESSDATA_PREFIX` 没设或含有中文，启动器会把工作目录改到自己所在的文件夹，把 `TESSDATA_PREFIX` 设为 `tessdata`，再运行旁边的 `tesseract-bin.exe`。`tesseract-bin.exe` 本身没有这层处理。
 
 打包用 onedir，不用 onefile。onefile 每次启动都先把内容解压到临时目录，启动更慢，也更容易被杀毒软件拦住。onedir 把 exe 和依赖放在同一个目录里，启动更稳。
 
