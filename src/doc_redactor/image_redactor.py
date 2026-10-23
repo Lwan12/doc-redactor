@@ -284,6 +284,7 @@ MSG_NO_OCR = "有 {n} 张图片没法检查：没找到 Tesseract（识别图片
 MSG_NO_OCR_FIX = "装好 Tesseract（带中文 chi_sim 和英文 eng 语言数据）后重新扫描；已经装了的，把环境变量 TESSERACT_CMD 设成 tesseract 程序的路径"
 MSG_IMAGE_FIX = "可以先把这张图删掉或换成普通图片，再拖进来"
 MSG_BAD_IMAGE = "有 {n} 张图片打不开，没法检查，未写出"
+MSG_OCR_FAILED = "有 {n} 张图片识别文字时出错，没法检查，未写出"
 # PDF 里的图按页和图号写明是哪一张；读图失败和识别文字出错分开说。
 MSG_BAD_IMAGE_AT = "第 {page} 页图 {index} 打不开，没法检查，未写出"
 MSG_OCR_FAILED_AT = "第 {page} 页图 {index} 识别文字时出错，没法检查，未写出"
@@ -292,6 +293,19 @@ MSG_VECTOR = "有 {n} 张矢量图（EMF、WMF 等），没法检查其中文字
 MSG_INLINE_FAILED = "有 {n} 张内嵌图没能涂黑，未写出"
 
 _NO_OCR_PATTERN = re.compile(re.escape(MSG_NO_OCR).replace(re.escape("{n}"), r"\d+"))
+
+
+def blocked_message(exc: Exception, *, ocr: bool = False) -> str:
+    """Sentence for a picture that stopped the file from being written."""
+    if isinstance(exc, WriteBlocked):
+        return str(exc)
+    if type(exc).__name__ == "TesseractNotFoundError" or (
+        isinstance(exc, RuntimeError) and "Tesseract" in str(exc)
+    ):
+        return MSG_NO_OCR.format(n=1)
+    if ocr:
+        return MSG_OCR_FAILED.format(n=1)
+    return MSG_BAD_IMAGE.format(n=1)
 
 
 def blocked_advice(reason: str) -> str:

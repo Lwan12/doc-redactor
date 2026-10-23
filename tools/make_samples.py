@@ -24,6 +24,7 @@ _FONT_CANDIDATES = (
     Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
     Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
+    Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
     Path("C:/Windows/Fonts/arial.ttf"),
 )
 

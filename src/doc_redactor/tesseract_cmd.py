@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from secrets import token_hex
 
 TESSERACT_HINT = (
     "未找到 Tesseract OCR。图片脱敏需要 tesseract，并带上 chi_sim 与 eng 语言数据。"
@@ -58,6 +59,7 @@ def _install_windows_ocr_adapter(module) -> None:
     """
     original = module.subprocess_args
     if getattr(original, "_doc_redactor_windows_ocr", False):
+        _install_windows_image_staging(module)
         return
 
     def child_args(include_stdout=True):
@@ -75,6 +77,61 @@ def _install_windows_ocr_adapter(module) -> None:
 
     child_args._doc_redactor_windows_ocr = True
     module.subprocess_args = child_args
+    _install_windows_image_staging(module)
+
+
+def _install_windows_image_staging(module) -> None:
+    """pytesseract 0.3.13 writes the picture under the system temp directory and
+    passes that absolute path on the command line. Tesseract 5.5.3 feeds the
+    path to ``std::filesystem``, which rejects a Chinese absolute path with
+    ``Illegal byte sequence``.
+    """
+    original = getattr(module, "run_tesseract", None)
+    if original is None or getattr(original, "_doc_redactor_windows_ocr", False):
+        return
+
+    def run_tesseract(
+        input_filename,
+        output_filename_base,
+        extension,
+        lang,
+        config="",
+        nice=0,
+        timeout=0,
+    ):
+        folder = Path(module.tesseract_cmd).parent
+        if not (folder / "tessdata").is_dir():
+            return original(
+                input_filename,
+                output_filename_base,
+                extension,
+                lang,
+                config,
+                nice,
+                timeout,
+            )
+        suffix = Path(input_filename).suffix
+        if not suffix.isascii():
+            suffix = ".png"
+        token = token_hex(8)
+        staged_name = f"ocrin-{token}{suffix}"
+        staged = folder / staged_name
+        output_name = f"ocrout-{token}"
+        extensions = [part for part in str(extension).split() if part] or ["txt"]
+        shutil.copyfile(input_filename, staged)
+        try:
+            original(staged_name, output_name, extension, lang, config, nice, timeout)
+            for ext in extensions:
+                produced = folder / f"{output_name}.{ext}"
+                if produced.is_file():
+                    shutil.move(str(produced), f"{output_filename_base}.{ext}")
+        finally:
+            staged.unlink(missing_ok=True)
+            for ext in extensions:
+                (folder / f"{output_name}.{ext}").unlink(missing_ok=True)
+
+    run_tesseract._doc_redactor_windows_ocr = True
+    module.run_tesseract = run_tesseract
 
 
 def require_tesseract() -> str:
