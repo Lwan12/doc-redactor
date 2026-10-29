@@ -19,6 +19,9 @@ from doc_redactor.tesseract_cmd import require_tesseract
 
 _OCR_LANG = "chi_sim+eng"
 _PAD = 4
+# A one-word logo is smaller than a scanned page. Default page segmentation
+# returns no text for it. A 2x single-block pass is only worth trying there.
+_SMALL_LOGO_MAX_SIDE = 800
 
 
 def redact_image_file(src: Path, dest: Path, engine: RedactionEngine) -> dict[str, int]:
@@ -38,12 +41,30 @@ def analyze_image_entities(image: Image.Image, engine: RedactionEngine) -> list[
     """
     require_tesseract()
     prepared = _to_rgb(image)
-    analyzer = _build_image_analyzer(engine)
-    boxes = analyzer.analyze(
-        prepared,
-        ocr_kwargs={"lang": _OCR_LANG},
-        language="en",
+    entities, ocr_text = _ocr_entities(prepared, engine)
+    if entities or ocr_text.strip() or max(prepared.size) > _SMALL_LOGO_MAX_SIDE:
+        return entities
+    scaled = prepared.resize(
+        (prepared.width * 2, prepared.height * 2),
+        Image.Resampling.LANCZOS,
     )
+    entities, _ = _ocr_entities(scaled, engine, config="--psm 6")
+    for item in entities:
+        item["boxes"] = [_halve_box(box) for box in item["boxes"]]
+    return entities
+
+
+def _ocr_entities(
+    image: Image.Image,
+    engine: RedactionEngine,
+    *,
+    config: str | None = None,
+) -> tuple[list[dict], str]:
+    analyzer = _build_image_analyzer(engine)
+    ocr_kwargs = {"lang": _OCR_LANG}
+    if config:
+        ocr_kwargs["config"] = config
+    boxes = analyzer.analyze(image, ocr_kwargs=ocr_kwargs, language="en")
     grouped: dict[tuple[str, int, int], dict] = {}
     for box in boxes:
         key = (box.entity_type, int(box.start), int(box.end))
@@ -64,9 +85,19 @@ def analyze_image_entities(image: Image.Image, engine: RedactionEngine) -> list[
         # What OCR read for this hit. Kept in memory for the screen only: the
         # hit list and reports carry category counts, never this text.
         read = ocr_text[item["start"] : item["end"]].strip()
-        item["text"] = read or _ocr_crop(prepared, item["boxes"][0]) or item["category"]
+        item["text"] = read or _ocr_crop(image, item["boxes"][0]) or item["category"]
         item["approx"] = engine.is_approximate_ocr_match(read) if read else False
-    return list(grouped.values())
+    return list(grouped.values()), ocr_text
+
+
+def _halve_box(box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    left, top, width, height = box
+    return (
+        (left + 1) // 2,
+        (top + 1) // 2,
+        max(1, (width + 1) // 2),
+        max(1, (height + 1) // 2),
+    )
 
 
 def paint_image_boxes(image: Image.Image, boxes: list[tuple[int, int, int, int]], pad: int = _PAD) -> Image.Image:
@@ -123,6 +154,15 @@ def redact_image(image: Image.Image, engine: RedactionEngine) -> tuple[Image.Ima
         ocr_kwargs={"lang": _OCR_LANG},
         language="en",
     )
+    if not boxes and max(prepared.size) <= _SMALL_LOGO_MAX_SIDE:
+        entities = analyze_image_entities(prepared, engine)
+        if entities:
+            rects = [box for entity in entities for box in entity["boxes"]]
+            redacted = paint_image_boxes(prepared, rects)
+            counts: dict[str, int] = {}
+            for entity in entities:
+                counts[entity["category"]] = counts.get(entity["category"], 0) + 1
+            return redacted, counts
     _paint_padding(redacted, boxes, _PAD)
     return redacted, _counts_from_boxes(boxes)
 
