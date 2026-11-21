@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import zipfile
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.comments import Comment
 from openpyxl.drawing.image import Image as XLImage
@@ -13,7 +14,7 @@ from PIL import Image as PILImage
 
 from doc_redactor.cli import main
 from doc_redactor.config import load_rules
-from doc_redactor.scan import CommentPlace, scan_path, write_scans
+from doc_redactor.scan import CellPlace, CommentPlace, scan_path, write_scans
 from doc_redactor.sheet import MSG_ENCRYPTED_SHEET, MSG_PICTURE_SHEET, extract_formulas, extract_in_scope
 from tests.helpers import RULES
 
@@ -271,3 +272,189 @@ def test_cli_failures_keep_their_sentences_and_write_nothing(tmp_path: Path, cap
     assert code == 1
     assert MSG_PICTURE_SHEET in captured.err
     assert list(pictured_out.glob("*")) == []
+
+
+# openpyxl 3.1 writes inline strings. Excel writes one shared-string table.
+_SST_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
+_SST_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"
+_QA_TOKEN = "QA_REDACT_7F3A91"
+_QA_PLACEHOLDER = "[REDACTED]"
+
+
+def _qa_rules(path: Path) -> Path:
+    path.write_text(
+        "regex:\n"
+        "  - name: QA\n"
+        f"    pattern: '{_QA_TOKEN}'\n"
+        f'    replacement: "{_QA_PLACEHOLDER}"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def _as_shared_strings(path: Path) -> None:
+    with zipfile.ZipFile(path) as package:
+        files = {name: package.read(name) for name in package.namelist()}
+    strings: list[str] = []
+    uses = 0
+    for name, data in list(files.items()):
+        if not (name.startswith("xl/worksheets/sheet") and name.endswith(".xml")):
+            continue
+        xml = data.decode("utf-8")
+
+        def cell(match: re.Match[str]) -> str:
+            nonlocal uses
+            attrs, inner = match.group(1), match.group(2)
+            if inner is None or 't="inlineStr"' not in attrs:
+                return match.group(0)
+            text = "".join(re.findall(r"<t\b[^>]*>(.*?)</t>", inner, re.DOTALL))
+            if text not in strings:
+                strings.append(text)
+            index = strings.index(text)
+            uses += 1
+            attrs = attrs.replace(' t="inlineStr"', ' t="s"')
+            return f"<c{attrs}><v>{index}</v></c>"
+
+        files[name] = re.sub(r"<c\b([^>/]*?)(?:/>|>(.*?)</c>)", cell, xml, flags=re.DOTALL).encode("utf-8")
+    items = "".join(f"<si><t>{text}</t></si>" for text in strings)
+    files["xl/sharedStrings.xml"] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        f'count="{uses}" uniqueCount="{len(strings)}">{items}</sst>'
+    ).encode("utf-8")
+    types = files["[Content_Types].xml"].decode("utf-8")
+    if "sharedStrings" not in types:
+        files["[Content_Types].xml"] = types.replace(
+            "</Types>",
+            f'<Override PartName="/xl/sharedStrings.xml" ContentType="{_SST_TYPE}"/></Types>',
+        ).encode("utf-8")
+    rels_name = "xl/_rels/workbook.xml.rels"
+    rels = files[rels_name].decode("utf-8")
+    if "sharedStrings" not in rels:
+        next_id = max((int(n) for n in re.findall(r'Id="rId(\d+)"', rels)), default=0) + 1
+        files[rels_name] = rels.replace(
+            "</Relationships>",
+            f'<Relationship Id="rId{next_id}" Type="{_SST_REL}" Target="sharedStrings.xml"/></Relationships>',
+        ).encode("utf-8")
+    with zipfile.ZipFile(path, "w") as package:
+        for name, data in files.items():
+            package.writestr(name, data)
+
+
+def _package_contains(path: Path, token: str) -> bool:
+    needle = token.encode("utf-8")
+    with zipfile.ZipFile(path) as package:
+        return any(needle in package.read(name) for name in package.namelist())
+
+
+def _cell(path: Path, sheet: int, coord: str):
+    workbook = load_workbook(path, data_only=False)
+    try:
+        return workbook.worksheets[sheet][coord].value
+    finally:
+        workbook.close()
+
+
+def test_written_xlsx_drops_an_unused_shared_string(tmp_path: Path, capsys):
+    src = tmp_path / "one.xlsx"
+    workbook = Workbook()
+    workbook.active["A1"] = _QA_TOKEN
+    workbook.active["B1"] = "keep-me"
+    workbook.save(src)
+    _as_shared_strings(src)
+    out = tmp_path / "out"
+    code = main([str(src), "-r", str(_qa_rules(tmp_path / "rules.yaml")), "-o", str(out)])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    dest = out / "one.redacted.xlsx"
+    assert _cell(dest, 0, "A1") == _QA_PLACEHOLDER
+    assert _cell(dest, 0, "B1") == "keep-me"
+    assert not _package_contains(dest, _QA_TOKEN)
+
+
+def _two_sheet_source(path: Path) -> None:
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "One"
+    second = workbook.create_sheet("Two")
+    first["A1"] = _QA_TOKEN
+    second["A1"] = _QA_TOKEN
+    workbook.save(path)
+    _as_shared_strings(path)
+    with zipfile.ZipFile(path) as package:
+        table = package.read("xl/sharedStrings.xml").decode("utf-8")
+        sheet_one = package.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        sheet_two = package.read("xl/worksheets/sheet2.xml").decode("utf-8")
+    assert table.count(f"<t>{_QA_TOKEN}</t>") == 1
+    assert sheet_one.count("<v>0</v>") == 1
+    assert sheet_two.count("<v>0</v>") == 1
+
+
+def _write_two_sheets(src: Path, outdir: Path, *, second_sheet: bool):
+    rules = _qa_rules(src.parent / "rules.yaml")
+    engine = load_rules(rules)
+    scan = scan_path(src, engine)
+    if not second_sheet:
+        for hit in scan.hits:
+            if isinstance(hit.place, CellPlace) and hit.place.sheet == 1:
+                hit.enabled = False
+    result = write_scans(
+        [scan],
+        outdir,
+        replacements=engine.replacements,
+        overwrite=True,
+        engine=engine,
+    )[0]
+    assert result.error is None
+    assert result.dest is not None
+    return result.dest
+
+
+def test_shared_string_stays_when_only_the_first_sheet_is_checked(tmp_path: Path):
+    src = tmp_path / "two.xlsx"
+    _two_sheet_source(src)
+    dest = _write_two_sheets(src, tmp_path / "out", second_sheet=False)
+    assert _cell(dest, 0, "A1") == _QA_PLACEHOLDER
+    assert _cell(dest, 1, "A1") == _QA_TOKEN
+    assert _package_contains(dest, _QA_TOKEN)
+
+
+def test_formula_cache_keeps_a_shared_string_the_formula_still_names(tmp_path: Path, capsys):
+    src = tmp_path / "formula.xlsx"
+    workbook = Workbook()
+    workbook.active["A1"] = _QA_TOKEN
+    workbook.save(src)
+    _as_shared_strings(src)
+    with zipfile.ZipFile(src) as package:
+        files = {name: package.read(name) for name in package.namelist()}
+    sheet = "xl/worksheets/sheet1.xml"
+    xml = files[sheet].decode("utf-8")
+    cached = '<c r="C1" t="s"><f>A1</f><v>0</v></c>'
+    xml = xml.replace("</row>", cached + "</row>", 1)
+    files[sheet] = xml.encode("utf-8")
+    with zipfile.ZipFile(src, "w") as package:
+        for name, data in files.items():
+            package.writestr(name, data)
+    before = files[sheet]
+    out = tmp_path / "out"
+    code = main([str(src), "-r", str(_qa_rules(tmp_path / "rules.yaml")), "-o", str(out)])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    dest = out / "formula.redacted.xlsx"
+    assert _cell(dest, 0, "A1") == _QA_PLACEHOLDER
+    with zipfile.ZipFile(dest) as package:
+        after = package.read(sheet)
+    assert b"<f>A1</f>" in after
+    assert b"<f>A1</f>" in before
+    formula = after.decode("utf-8")
+    assert '<c r="C1" t="s"><f>A1</f><v>0</v></c>' in formula
+    assert _package_contains(dest, _QA_TOKEN)
+
+
+def test_shared_string_is_gone_when_both_sheets_are_checked(tmp_path: Path):
+    src = tmp_path / "two.xlsx"
+    _two_sheet_source(src)
+    dest = _write_two_sheets(src, tmp_path / "out", second_sheet=True)
+    assert _cell(dest, 0, "A1") == _QA_PLACEHOLDER
+    assert _cell(dest, 1, "A1") == _QA_PLACEHOLDER
+    assert not _package_contains(dest, _QA_TOKEN)

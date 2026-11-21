@@ -653,12 +653,13 @@ def _write_xlsx(scan: FileScan, label) -> bytes:
     if sst_name:
         strings = _sst_texts(files[sst_name].decode("utf-8"))
     appended: list[str] = []
+    departed: set[int] = set()
     workbook_xml = files["xl/workbook.xml"].decode("utf-8")
     used: set[str] = set()
     sheet_tags = list(_SHEET_TAG_RE.finditer(workbook_xml))
     for index, sheet_path in enumerate(paths):
         xml = files[sheet_path].decode("utf-8")
-        xml = _rewrite_sheet_xml(xml, scan, index, strings, appended, label)
+        xml = _rewrite_sheet_xml(xml, scan, index, strings, appended, departed, label)
         files[sheet_path] = xml.encode("utf-8")
         title = _sheet_title(workbook_xml, index)
         hits = _hits_at(scan, lambda place, i=index: isinstance(place, SheetNamePlace) and place.sheet == i)
@@ -668,8 +669,13 @@ def _write_xlsx(scan: FileScan, label) -> bytes:
             workbook_xml = workbook_xml.replace(tag, _replace_attr(tag, "name", new_title), 1)
             sheet_tags = list(_SHEET_TAG_RE.finditer(workbook_xml))
     files["xl/workbook.xml"] = workbook_xml.encode("utf-8")
-    if sst_name and appended:
-        files[sst_name] = _append_sst(files[sst_name].decode("utf-8"), appended).encode("utf-8")
+    if sst_name and (appended or departed):
+        text = files[sst_name].decode("utf-8")
+        if appended:
+            text = _append_sst(text, appended)
+        sheet_xml = [files[path].decode("utf-8") for path in paths]
+        text = _blank_departed_strings(text, departed, _shared_string_refs(sheet_xml))
+        files[sst_name] = text.encode("utf-8")
     for name in list(files):
         if not name.endswith(".xml") or "comment" not in name.lower():
             continue
@@ -728,7 +734,45 @@ def _intern(strings: list[str], appended: list[str], text: str) -> int:
     return len(strings) - 1
 
 
-def _rewrite_sheet_xml(xml: str, scan: FileScan, index: int, strings: list[str], appended: list[str], label) -> str:
+def _shared_string_refs(sheets: list[str]) -> set[int]:
+    refs: set[int] = set()
+    for xml in sheets:
+        for match in _CELL_RE.finditer(xml):
+            inner = match.group(2) or ""
+            if _attr("<c" + match.group(1) + ">", "t") != "s":
+                continue
+            value = re.search(r"<v\b[^>]*>(\s*\d+\s*)</v>", inner)
+            if value:
+                refs.add(int(value.group(1)))
+    return refs
+
+
+def _blank_departed_strings(xml: str, departed: set[int], referenced: set[int]) -> str:
+    orphaned = departed - referenced
+    if not orphaned:
+        return xml
+    index = 0
+
+    def blank(match: re.Match[str]) -> str:
+        nonlocal index
+        current = index
+        index += 1
+        if current in orphaned:
+            return "<si><t></t></si>"
+        return match.group(0)
+
+    return re.sub(r"<si\b[^>]*>.*?</si>", blank, xml, flags=re.DOTALL)
+
+
+def _rewrite_sheet_xml(
+    xml: str,
+    scan: FileScan,
+    index: int,
+    strings: list[str],
+    appended: list[str],
+    departed: set[int],
+    label,
+) -> str:
     headers = _header_slots(xml, refuse=True)
 
     def header_hits(slot: str, literal: int) -> list[LocatedHit]:
@@ -780,11 +824,14 @@ def _rewrite_sheet_xml(xml: str, scan: FileScan, index: int, strings: list[str],
             value = re.search(r"<v\b[^>]*>(\d+)</v>", inner)
             if value is None or not strings:
                 raise ValueError(MSG_OPEN_FAIL)
-            current = strings[int(value.group(1))]
+            old_index = int(value.group(1))
+            current = strings[old_index]
             updated = _apply(current, hits, label)
             if updated == current:
                 return match.group(0)
             new_index = _intern(strings, appended, updated)
+            if new_index != old_index:
+                departed.add(old_index)
             inner = re.sub(r"(<v\b[^>]*>)(.*?)(</v>)", lambda m: m.group(1) + str(new_index) + m.group(3), inner, count=1, flags=re.DOTALL)
             return f"<c{attrs}>{inner}</c>"
         if kind == "inlineStr" or "<is" in inner:
