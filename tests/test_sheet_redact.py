@@ -419,6 +419,38 @@ def test_shared_string_stays_when_only_the_first_sheet_is_checked(tmp_path: Path
     assert _package_contains(dest, _QA_TOKEN)
 
 
+def test_formula_cache_keeps_a_shared_string_the_formula_still_names(tmp_path: Path, capsys):
+    src = tmp_path / "formula.xlsx"
+    workbook = Workbook()
+    workbook.active["A1"] = _QA_TOKEN
+    workbook.save(src)
+    _as_shared_strings(src)
+    with zipfile.ZipFile(src) as package:
+        files = {name: package.read(name) for name in package.namelist()}
+    sheet = "xl/worksheets/sheet1.xml"
+    xml = files[sheet].decode("utf-8")
+    cached = '<c r="C1" t="s"><f>A1</f><v>0</v></c>'
+    xml = xml.replace("</row>", cached + "</row>", 1)
+    files[sheet] = xml.encode("utf-8")
+    with zipfile.ZipFile(src, "w") as package:
+        for name, data in files.items():
+            package.writestr(name, data)
+    before = files[sheet]
+    out = tmp_path / "out"
+    code = main([str(src), "-r", str(_qa_rules(tmp_path / "rules.yaml")), "-o", str(out)])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    dest = out / "formula.redacted.xlsx"
+    assert _cell(dest, 0, "A1") == _QA_PLACEHOLDER
+    with zipfile.ZipFile(dest) as package:
+        after = package.read(sheet)
+    assert b"<f>A1</f>" in after
+    assert b"<f>A1</f>" in before
+    formula = after.decode("utf-8")
+    assert '<c r="C1" t="s"><f>A1</f><v>0</v></c>' in formula
+    assert _package_contains(dest, _QA_TOKEN)
+
+
 def test_shared_string_is_gone_when_both_sheets_are_checked(tmp_path: Path):
     src = tmp_path / "two.xlsx"
     _two_sheet_source(src)
